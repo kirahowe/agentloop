@@ -26,8 +26,9 @@ leaves a record that can be resumed without repeating an action.
    the neutral conversation into one provider's requests and back.
    Assistant turns keep the provider's own record (`Native`) next to the
    neutral parts, and the same provider is always given its own record
-   back, byte for byte. Reasoning state survives, and history is never
-   rewritten, which current models require.
+   back unchanged (the same JSON, though whitespace may differ).
+   Reasoning state survives, and history is never rewritten, which
+   current models require.
 5. **Failures are classified, not parsed.** A failed model call comes back
    as a `ModelError` with a kind (rate limited, overloaded, unreachable,
    unauthorized, billing, not found, invalid request) and the times the
@@ -160,9 +161,14 @@ finished). Tool results are logged one by one as they finish, so a crash
 between two calls loses neither. In the conversation, results that follow
 an assistant turn are gathered into one user message.
 
-`FileStore.Load` ignores a final line that is not complete JSON, which is
-what a write cut short by a crash leaves. A bad line anywhere else is an
-error.
+`FileStore.Load` ignores a final line that is not a complete entry, which
+is what a write cut short by a crash leaves, and the next append cuts it
+off. A bad line anywhere else is an error, and so are sequence numbers that
+do not run 1, 2, 3 and so on.
+
+Every entry goes through JSON before the session applies it, so the live
+state and the state rebuilt from the same log are always equal, and a
+session shares no memory with its callers.
 
 ### The loop
 
@@ -196,8 +202,9 @@ type RetryPolicy struct {
 func (a *Agent) Run(ctx context.Context, s *Session, prompt string) (*Outcome, error)
 ```
 
-`Run` returns an error only when the agent is set up wrongly or the store
-fails. Everything else is an `Outcome`:
+`Run` returns an error only when the agent is set up wrongly, the store
+fails, or another `Run` is already in progress on the same session.
+Everything else is an `Outcome`:
 
 ```go
 type Outcome struct {
@@ -217,19 +224,30 @@ A run:
 2. Settles the calls left open by the last assistant turn (below). If any
    is still held, ends with `held`.
 3. Adds the prompt as a user message, if there is one. With no prompt and
-   nothing waiting for the model, it ends with `completed` and the last
-   assistant text.
+   nothing waiting for the model, it ends with the last turn's outcome,
+   usually `completed`, and the last assistant text. A run that ends
+   `held` or `canceled` before this step does not add its prompt, so the
+   caller passes it again.
 4. Repeats: checks the limits, calls the model (retrying under the retry
    policy), and records the response. On `tool_use` it settles the turn's
-   calls and goes on. On `pause` it goes on. On `end_turn`, `max_tokens` or
-   `refusal` it ends with `completed`, `max_tokens` or `refused`.
+   calls and goes on. On `pause` it settles them as cut off and goes on.
+   On `end_turn`, `max_tokens` or `refusal` it settles them as cut off and
+   ends with `completed`, `max_tokens` or `refused`. So at rest every call
+   has a result, unless it is held.
 5. Writes `run_ended`.
+
+A response that repeats a tool call id, or has a call with no id, is not
+recorded: the run ends with `model_error`, kind `invalid_request`.
+
+A call refused because the run reached `MaxToolCalls` keeps the labels its
+decision added, though it never ran. Labels err toward caution.
 
 Settling takes the calls of the last assistant turn that have no result,
 in order:
 
 - If the turn did not end in `tool_use`, its calls were cut off, and each
-  gets an error result saying so. Nothing runs.
+  gets an error result saying so. Nothing runs. (Normally these were
+  settled when the turn ended; this covers a crash in between.)
 - A call that was started and never finished gets an error result saying
   the run stopped while it was running, so it may or may not have taken
   effect. It is never run again.
@@ -248,8 +266,10 @@ ends the run with `model_error`. Other kinds are not retried.
 `DefaultRetry` is 3 retries, a 2-second backoff and a 60-second maximum
 wait.
 
-When `ctx` is cancelled, the model call or the tool stops, the open call
-gets its result, and the run ends with `canceled`.
+When `ctx` is cancelled, the model call or the tool stops, and the run
+ends with `canceled`. A call that was running gets the same result as
+after a crash: it may or may not have taken effect, and it is not run
+again.
 
 ## The command
 
@@ -282,10 +302,36 @@ The request:
 ```
 
 `run` writes every session entry of the run to stdout as one JSON line,
-and then a last line `{"type": "outcome", ...}` with the outcome. It exits
-0 whenever it reaches an outcome, whatever the reason, and 2 when the
-request is unusable. On SIGTERM or SIGINT it cancels the run, so the
-outcome line is still written.
+and then a last line `{"type": "outcome", ...}` with the outcome and the
+session path. Nothing else goes to stdout.
+
+It exits 0 whenever it reaches an outcome, whatever the reason. It exits 2
+when the request is unusable, before writing anything: bad JSON, an unknown
+field, a schema that does not compile, a tool name the providers would
+reject, a session path it cannot use. It exits 1 when the session log is
+corrupt or another process holds it. On SIGTERM or SIGINT it cancels the
+run, so the outcome line is still written.
+
+A session is held under an exclusive lock on `<session>.lock` while a
+process uses it. The OS releases the lock when the process dies, however it
+dies.
+
+With no API key in `api_key_env`, `run` calls nothing and reports
+`model_error` with kind `unauthorized`.
 
 The key is read from `api_key_env` and is not passed on: tools get only
 `tool_env`.
+
+## What it does not guarantee
+
+- A tool is killed with its process group. A tool that leaves the group
+  (with `setsid`, say) can outlive its call. On Linux a cgroup could close
+  that gap; macOS has no equivalent.
+- When agentloop itself is killed with SIGKILL, a tool that is running
+  carries on as an orphan. Its call is still never run a second time.
+- A signal that arrives before the Go runtime has started kills the
+  process with nothing written. Running the same request again is safe.
+- Replay is checked against recorded wire formats and the SDKs' types.
+  Whether each provider accepts every replayed shape is confirmed only by
+  the live tests (`AGENTLOOP_LIVE=1`), which spend money and do not run by
+  default.
