@@ -502,10 +502,11 @@ func TestCutOffTurnGetsErrorResults(t *testing.T) {
 	a := &agentloop.Agent{Model: m, Tools: []agentloop.Tool{echoTool("echo", c)}}
 	s, _ := newSession(t)
 	wantReason(t, run(t, a, s, "go"), agentloop.ReasonMaxTokens)
-	if len(s.Pending()) != 1 {
-		t.Fatal("the cut-off call was settled in the run that cut it")
+	if len(s.Pending()) != 0 {
+		t.Fatal("the cut-off call was left open when the run ended")
 	}
-	out := run(t, a, s, "")
+	checkConversation(t, s.Messages())
+	out := run(t, a, s, "again")
 	wantReason(t, out, agentloop.ReasonCompleted)
 	if c.all() != 0 {
 		t.Fatal("a cut-off call ran")

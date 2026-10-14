@@ -191,3 +191,14 @@ func contains(t *testing.T, got, want string) {
 }
 
 func jsonMarshal(v any) ([]byte, error) { return json.Marshal(v) }
+
+// seqStore makes a store of hand-built entries, numbering them 1, 2, 3, ...
+// as a session would have.
+func seqStore(entries ...agentloop.Entry) *agentloop.MemoryStore {
+	out := make([]agentloop.Entry, len(entries))
+	for i, e := range entries {
+		e.Seq = i + 1
+		out[i] = e
+	}
+	return agentloop.NewMemoryStore(out...)
+}

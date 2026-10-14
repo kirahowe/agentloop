@@ -200,9 +200,16 @@ func (r *runner) drive(ctx context.Context, prompt string) (*Outcome, error) {
 		if out != nil || err != nil {
 			return out, err
 		}
+		msg := keepable(resp.Message)
+		if bad := badCallID(r.s, msg); bad != "" {
+			// The provider broke its own contract. Nothing of the turn is
+			// kept, and asking again would not change what it says.
+			out := r.outcome(ReasonModelError)
+			out.Error = &ModelError{Kind: InvalidRequest, Message: bad}
+			return out, nil
+		}
 		r.turns++
 		r.usage.add(resp.Usage)
-		msg := keepable(resp.Message)
 		err = r.record(Entry{Type: EntryMessage, Message: &MessageEntry{
 			Message: msg, Stop: resp.Stop, Usage: resp.Usage, Model: resp.Model, Refusal: resp.Refusal,
 		}})
@@ -224,13 +231,48 @@ func (r *runner) drive(ctx context.Context, prompt string) (*Outcome, error) {
 				return out, err
 			}
 		case StopMaxTokens:
+			if err := r.settleCutOff(ctx); err != nil {
+				return nil, err
+			}
 			return r.outcome(ReasonMaxTokens), nil
 		case StopRefusal:
+			if err := r.settleCutOff(ctx); err != nil {
+				return nil, err
+			}
 			return r.outcome(ReasonRefused), nil
 		default:
+			if err := r.settleCutOff(ctx); err != nil {
+				return nil, err
+			}
 			return r.outcome(ReasonCompleted), nil
 		}
 	}
+}
+
+// settleCutOff answers the calls of a turn that ended without tool_use
+// before the run ends, so the session is a conversation a model can take
+// whenever no call is held. Nothing runs: settle gives each open call of
+// such a turn its cut-off result without consulting the policy or the tools.
+func (r *runner) settleCutOff(ctx context.Context) error {
+	_, err := r.settle(ctx)
+	return err
+}
+
+// badCallID says what is wrong with the tool call ids of a message, or
+// returns "" if nothing is. Ids must be present and not used before in the
+// session, or results could not be matched to calls.
+func badCallID(s *Session, m Message) string {
+	seen := map[string]bool{}
+	for _, c := range m.ToolCalls() {
+		if c.ID == "" {
+			return "the model returned a tool call with no id"
+		}
+		if _, dup := s.Call(c.ID); dup || seen[c.ID] {
+			return "the model reused a tool call id"
+		}
+		seen[c.ID] = true
+	}
+	return ""
 }
 
 // modelIsDue reports whether the conversation is waiting for the

@@ -74,6 +74,9 @@ func OpenSession(store Store) (*Session, error) {
 		calls:  map[string]*callState{},
 	}
 	for i, e := range entries {
+		if e.Seq != i+1 {
+			return nil, fmt.Errorf("the log is out of sequence: entry %d has seq %d, want %d", i+1, e.Seq, i+1)
+		}
 		if err := s.apply(e); err != nil {
 			return nil, fmt.Errorf("entry %d: %w", i+1, err)
 		}

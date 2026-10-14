@@ -116,6 +116,9 @@ type step struct {
 	In, Out    int64
 	Text       string
 	Reasoning  bool
+	// BadID makes the model break the id contract: 1 repeats an id within
+	// the turn, 2 leaves one empty, 3 reuses the id of an earlier step's call.
+	BadID int
 }
 
 var callNames = []string{"echo", "echo", "any", "lab", "ghost"}
@@ -139,6 +142,7 @@ func genStep() *rapid.Generator[step] {
 					Input: rapid.SampledFrom([]int{0, 0, 0, 0, 1, 2, 3, 4, 5, 6}).Draw(t, "input"),
 				}
 			}), 0, 4).Draw(t, "calls")
+			s.BadID = rapid.SampledFrom([]int{0, 0, 0, 0, 0, 0, 0, 1, 2, 3}).Draw(t, "badid")
 			s.Stop = rapid.SampledFrom([]agentloop.Stop{agentloop.StopToolUse, agentloop.StopToolUse, agentloop.StopToolUse,
 				agentloop.StopToolUse, agentloop.StopToolUse, agentloop.StopEndTurn, agentloop.StopMaxTokens,
 				agentloop.StopPause, agentloop.StopRefusal}).Draw(t, "stop")
@@ -347,6 +351,16 @@ func (sc *scenario) respond(req *agentloop.Request) (*agentloop.Response, error)
 		for i, c := range st.Calls {
 			id := callID(idx, i)
 			calls[i] = agentloop.ToolCall{ID: id, Name: c.Name, Input: inputFor(c.Input, id)}
+		}
+		switch {
+		case st.BadID == 1 && len(calls) > 1:
+			calls[1].ID = calls[0].ID
+		case st.BadID == 2 && len(calls) > 0:
+			calls[len(calls)-1].ID = ""
+		case st.BadID == 3 && len(calls) > 0 && idx > 0:
+			// An id an earlier step used: a repeat if that call was
+			// recorded, otherwise just an unusual but valid id.
+			calls[0].ID = callID(idx-1, 0)
 		}
 		resp = fake.ToolUse(st.Text, calls...)
 		resp.Stop = st.Stop
@@ -977,6 +991,18 @@ func (sc *scenario) checkRun(s *agentloop.Session, a *agentloop.Agent, out *agen
 		}
 	case agentloop.ReasonModelError:
 		prev := run[len(run)-2]
+		if out.Error != nil && out.Error.Kind == agentloop.InvalidRequest &&
+			(out.Error.Message == "the model reused a tool call id" || out.Error.Message == "the model returned a tool call with no id") {
+			// A bad call id ends the run with nothing recorded for the turn.
+			if prev.Type == agentloop.EntryMessage && prev.Message.Message.Role == agentloop.Assistant {
+				for _, c := range prev.Message.Message.ToolCalls() {
+					if c.ID == "" {
+						t.Fatalf("a tool call with no id was recorded")
+					}
+				}
+			}
+			break
+		}
 		if out.Error == nil || prev.Type != agentloop.EntryModelError || prev.ModelError.Retry || prev.ModelError.Error.Kind != out.Error.Kind {
 			t.Fatalf("model_error outcome %+v after %s", out.Error, prev.Type)
 		}
@@ -1015,7 +1041,43 @@ func (sc *scenario) checkRun(s *agentloop.Session, a *agentloop.Agent, out *agen
 		t.Fatalf("outcome text %q, last assistant text %q", out.Text, want)
 	}
 
+	sc.checkAtRest(s, out)
 	sc.checkRetries(run, a)
+}
+
+// checkAtRest holds when a run ends: unless calls are held, the session is
+// a request a provider accepts, with every call answered by its result. A
+// canceled run may stop part way through a tool_use turn, but never leaves
+// a cut-off turn's calls open.
+func (sc *scenario) checkAtRest(s *agentloop.Session, out *agentloop.Outcome) {
+	t := sc.t
+	if out.Reason == agentloop.ReasonHeld {
+		return
+	}
+	if out.Reason == agentloop.ReasonCanceled {
+		turns := s.Turns()
+		if len(turns) == 0 || turns[len(turns)-1].Stop == agentloop.StopToolUse {
+			return
+		}
+	}
+	if p := s.Pending(); len(p) != 0 {
+		t.Fatalf("the run ended %s with unanswered calls %+v", out.Reason, p)
+	}
+	msgs := s.Messages()
+	for i, m := range msgs {
+		calls := m.ToolCalls()
+		if m.Role != agentloop.Assistant || len(calls) == 0 {
+			continue
+		}
+		if i+1 >= len(msgs) || len(msgs[i+1].Parts) != len(calls) {
+			t.Fatalf("the run ended %s, but the calls of message %d are not all answered", out.Reason, i)
+		}
+		for j, c := range calls {
+			if p := msgs[i+1].Parts[j]; msgs[i+1].Role != agentloop.User || p.ToolResult == nil || p.ToolResult.CallID != c.ID {
+				t.Fatalf("call %s of message %d is not answered in place", c.ID, i)
+			}
+		}
+	}
 }
 
 // checkRetries holds the retry rules of DESIGN.md against the log.
@@ -1182,17 +1244,12 @@ func (sc *scenario) finalChecks(s *agentloop.Session, complete bool) {
 		}
 	}
 	if complete {
-		// A turn that was cut off (it did not end in tool_use) may keep
-		// its calls open at rest; the next Run answers them (DESIGN.md).
 		turns := s.Turns()
-		cutOff := len(turns) > 0 && turns[len(turns)-1].Stop != agentloop.StopToolUse
-		if len(s.Held()) != 0 || (len(s.Pending()) != 0 && !cutOff) {
+		if len(s.Held()) != 0 || len(s.Pending()) != 0 {
 			t.Fatalf("pending %v held %v at the end", s.Pending(), s.Held())
 		}
 		for ti, turn := range turns {
-			if cutOff && ti == len(turns)-1 {
-				continue
-			}
+			_ = ti
 			for _, id := range turn.Calls {
 				if len(results[id]) != 1 {
 					t.Fatalf("call %s has %d results at the end", id, len(results[id]))

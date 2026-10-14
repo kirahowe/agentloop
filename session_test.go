@@ -35,7 +35,7 @@ func resultEntry(id, content string, labels ...string) agentloop.Entry {
 
 func TestSessionDerivesStateFromEntries(t *testing.T) {
 	u := agentloop.Usage{InputTokens: 3, OutputTokens: 4}
-	s := reopen(t, agentloop.NewMemoryStore(
+	s := reopen(t, seqStore(
 		msgEntry(agentloop.Text(agentloop.User, "hi"), "", agentloop.Usage{}),
 		msgEntry(assistantCalls("a", "b", "c"), agentloop.StopToolUse, u),
 		decisionEntry("a", agentloop.Allow, "z-label", "a-label"),
@@ -88,7 +88,7 @@ func TestSessionDerivesStateFromEntries(t *testing.T) {
 }
 
 func TestSessionLateResultJoinsItsMessage(t *testing.T) {
-	store := agentloop.NewMemoryStore(
+	store := seqStore(
 		msgEntry(agentloop.Text(agentloop.User, "hi"), "", agentloop.Usage{}),
 		msgEntry(assistantCalls("a", "b"), agentloop.StopToolUse, agentloop.Usage{}),
 		decisionEntry("b", agentloop.Allow),
@@ -105,7 +105,7 @@ func TestSessionLateResultJoinsItsMessage(t *testing.T) {
 	}
 	// a was denied; a run would now record its result.
 	entries := append(s.Entries(), resultEntry("a", "no"))
-	s = reopen(t, agentloop.NewMemoryStore(entries...))
+	s = reopen(t, seqStore(entries...))
 	msgs := s.Messages()
 	if len(msgs) != 3 || len(msgs[2].Parts) != 2 || msgs[2].Parts[0].ToolResult.CallID != "a" {
 		t.Fatalf("%+v", msgs)
@@ -132,14 +132,14 @@ func TestSessionRefusesEntriesThatDoNotFit(t *testing.T) {
 		"missing payload":            {{Type: agentloop.EntryDecision}},
 	}
 	for name, entries := range cases {
-		if _, err := agentloop.OpenSession(agentloop.NewMemoryStore(entries...)); err == nil {
+		if _, err := agentloop.OpenSession(seqStore(entries...)); err == nil {
 			t.Errorf("%s: opened", name)
 		}
 	}
 }
 
 func TestResolveWritesDecisionEntry(t *testing.T) {
-	s := reopen(t, agentloop.NewMemoryStore(
+	s := reopen(t, seqStore(
 		msgEntry(agentloop.Text(agentloop.User, "hi"), "", agentloop.Usage{}),
 		msgEntry(assistantCalls("a"), agentloop.StopToolUse, agentloop.Usage{}),
 		decisionEntry("a", agentloop.Hold),
