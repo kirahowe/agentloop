@@ -99,7 +99,10 @@ func (t *Tool) Call(ctx context.Context, input json.RawMessage) (agentloop.Resul
 	}
 	var exitErr *exec.ExitError
 	switch {
-	case waitErr == nil:
+	// ErrWaitDelay means the program exited with status 0 but a process it
+	// left behind kept the output pipes open. The program succeeded and
+	// that process was just swept, so this is a result, not a failure.
+	case waitErr == nil || errors.Is(waitErr, exec.ErrWaitDelay):
 		out := text(stdout)
 		if strings.TrimSpace(stdout.String()) == "" {
 			out = text(stderr)

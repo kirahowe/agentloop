@@ -1,0 +1,263 @@
+package main
+
+import (
+	"encoding/json"
+	"fmt"
+	"net"
+	"net/http"
+	"net/http/httptest"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"sort"
+	"strings"
+	"sync"
+	"testing"
+)
+
+var (
+	envdumpOnce sync.Once
+	envdumpPath string
+	envdumpErr  error
+)
+
+// buildEnvdump compiles testdata/envdump, a tool that reports exactly what
+// its process was given. A shell would add PWD, SHLVL and _ on its own, so
+// the tests use this instead.
+func buildEnvdump(t *testing.T) string {
+	envdumpOnce.Do(func() {
+		dir, err := os.MkdirTemp("", "envdump")
+		if err != nil {
+			envdumpErr = err
+			return
+		}
+		envdumpPath = filepath.Join(dir, "envdump")
+		if out, err := exec.Command("go", "build", "-o", envdumpPath, "./testdata/envdump").CombinedOutput(); err != nil {
+			envdumpErr = fmt.Errorf("%v\n%s", err, out)
+		}
+	})
+	if envdumpErr != nil {
+		t.Fatal(envdumpErr)
+	}
+	return envdumpPath
+}
+
+type dump struct {
+	Env   []string
+	Args  []string
+	Stdin string
+	Fds   []string
+	Cwd   string
+	Pgid  int
+	Pid   int
+}
+
+func readDumps(t *testing.T, dir string) []dump {
+	files, _ := filepath.Glob(filepath.Join(dir, "dump-*.json"))
+	var out []dump
+	for _, f := range files {
+		b, err := os.ReadFile(f)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var d dump
+		if err := json.Unmarshal(b, &d); err != nil {
+			t.Fatal(err)
+		}
+		out = append(out, d)
+	}
+	return out
+}
+
+// toolWorld runs one tool-use turn that calls the envdump tool, then ends.
+func toolWorld(t *testing.T, toolEnv map[string]string, input string) (*chaosWorld, chaosRun, []dump) {
+	w := newChaosWorld(t, newTestRand())
+	w.turns = [][]string{{"toolu_iso_1"}}
+	w.api.turns = w.turns
+	w.req["tool_command"] = []string{buildEnvdump(t)}
+	w.req["tool_env"] = toolEnv
+	w.req["tools"] = []map[string]any{{
+		"name": "probe", "description": "probe",
+		"parameters": map[string]any{"type": "object"},
+	}}
+	// The API script names the tool "ledger"; make the probe answer to it.
+	w.req["tools"].([]map[string]any)[0]["name"] = "ledger"
+	r := w.run("go", nil, 0, 0)
+	if r.code != 0 {
+		t.Fatalf("exit %d: %s", r.code, r.stderr)
+	}
+	return w, r, readDumps(t, w.dir)
+}
+
+func sortedCopy(s []string) []string {
+	c := append([]string{}, s...)
+	sort.Strings(c)
+	return c
+}
+
+// TestToolSeesExactlyToolEnv compares the tool process's whole environment
+// with tool_env.
+func TestToolSeesExactlyToolEnv(t *testing.T) {
+	cases := []map[string]string{
+		{},
+		{"A": "1"},
+		{"A": "1", "B": "x=y", "EMPTY": "", "UNI": "héllo 世界", "SP": " a b ", "NL": "line1\nline2", "PATH": "/usr/bin"},
+		{"AGENTLOOP_API_KEY": "from-tool-env-not-the-real-key"},
+		{"HOME": "/nonexistent", "LEAK_CANARY": "request-says-so"},
+	}
+	for i, env := range cases {
+		t.Run(fmt.Sprint(i), func(t *testing.T) {
+			_, _, dumps := toolWorld(t, env, "")
+			if len(dumps) != 1 {
+				t.Fatalf("%d dumps", len(dumps))
+			}
+			var want []string
+			for k, v := range env {
+				want = append(want, k+"="+v)
+			}
+			got := dumps[0].Env
+			if strings.Join(sortedCopy(got), "\x00") != strings.Join(sortedCopy(want), "\x00") {
+				t.Errorf("tool environment\n got  %q\n want %q", got, want)
+			}
+		})
+	}
+}
+
+// TestToolIsolation: the key and the parent's environment never reach the
+// tool, and the tool has no stray descriptors.
+func TestToolIsolation(t *testing.T) {
+	w, r, dumps := toolWorld(t, map[string]string{"X": "1"}, "")
+	d := dumps[0]
+	blob, _ := json.Marshal(d)
+	for _, leak := range []string{chaosKey, "AGENTLOOP_API_KEY", "LEAK_CANARY", "parent-env"} {
+		if strings.Contains(string(blob), leak) {
+			t.Errorf("tool saw %q: %s", leak, blob)
+		}
+	}
+	if strings.TrimSpace(d.Stdin) != `{"n":"toolu_iso_1"}` {
+		t.Errorf("stdin = %q", d.Stdin)
+	}
+	if len(d.Args) != 2 || d.Args[1] != "ledger" {
+		t.Errorf("argv = %q", d.Args)
+	}
+	if d.Cwd == "" || !strings.HasSuffix(d.Cwd, filepath.Base(w.dir)) {
+		t.Errorf("cwd = %q, want tool_dir %q", d.Cwd, w.dir)
+	}
+	if got := strings.Join(sortedCopy(d.Fds), ","); got != "0,1,2" {
+		t.Errorf("tool descriptors = %s, want 0,1,2", got)
+	}
+	if d.Pgid != d.Pid {
+		t.Errorf("tool is not a process group leader (pgid %d, pid %d)", d.Pgid, d.Pid)
+	}
+	// The key did go to the API, and appears nowhere else.
+	for name, s := range map[string]string{
+		"stdout":  r.stdout,
+		"stderr":  r.stderr,
+		"session": readFileT(t, w.session),
+	} {
+		if strings.Contains(s, chaosKey) {
+			t.Errorf("key in %s", name)
+		}
+	}
+}
+
+func readFileT(t *testing.T, p string) string {
+	b, err := os.ReadFile(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(b)
+}
+
+// TestKeyNeverLeaksOnErrors drives the failure paths of the model call and
+// checks that the key is in none of the outputs.
+func TestKeyNeverLeaksOnErrors(t *testing.T) {
+	var seenKey []string
+	var mu sync.Mutex
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		seenKey = append(seenKey, r.Header.Get("x-api-key")+r.Header.Get("Authorization"))
+		mu.Unlock()
+		switch r.URL.Query().Get("m") {
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(401)
+		// A hostile server may even echo; the agent must still not add the key itself.
+		fmt.Fprint(w, `{"type":"error","error":{"type":"authentication_error","message":"invalid x-api-key"}}`)
+	}))
+	defer srv.Close()
+	closed, _ := net.Listen("tcp", "127.0.0.1:0")
+	closedURL := "http://" + closed.Addr().String()
+	closed.Close()
+
+	for name, base := range map[string]string{"401": srv.URL, "refused": closedURL} {
+		t.Run(name, func(t *testing.T) {
+			f := newValFixture(t)
+			f.req["base_url"] = base
+			f.req["tools"] = []any{}
+			delete(f.req, "tool_command")
+			r := f.exec(nil)
+			if r.code != 0 {
+				t.Fatalf("exit %d: %s", r.code, r.stderr)
+			}
+			out := r.outputLines()
+			var o map[string]any
+			json.Unmarshal(out[len(out)-1], &o)
+			if o["reason"] != "model_error" {
+				t.Fatalf("outcome %v", o)
+			}
+			for what, s := range map[string]string{"stdout": r.stdout, "stderr": r.stderr, "session": readFileT(t, f.session())} {
+				if strings.Contains(s, chaosKey) {
+					t.Errorf("key in %s: %s", what, s)
+				}
+			}
+		})
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	for _, k := range seenKey {
+		if !strings.Contains(k, chaosKey) {
+			t.Errorf("the API was not sent the key: %q", k)
+		}
+	}
+}
+
+// TestNoKey: with no usable key there is an unauthorized outcome, no HTTP
+// request, and the session is left exactly as it was.
+func TestNoKey(t *testing.T) {
+	for name, env := range map[string][]string{
+		"unset": {"PATH=/usr/bin:/bin"},
+		"empty": {"PATH=/usr/bin:/bin", "AGENTLOOP_API_KEY="},
+	} {
+		t.Run(name, func(t *testing.T) {
+			f := newValFixture(t)
+			// An existing session with work pending must not be touched either.
+			os.MkdirAll(filepath.Dir(f.session()), 0o755)
+			before := `{"seq":1,"time":"2026-01-01T00:00:00Z","type":"run_started","run_started":{"prompt":"x"}}` + "\n"
+			os.WriteFile(f.session(), []byte(before), 0o600)
+			raw, _ := json.Marshal(f.req)
+			p := filepath.Join(f.dir, "request.json")
+			os.WriteFile(p, raw, 0o644)
+			r := chaosExecIn(t, "", []string{"run", p}, env)
+			out := r.outputLines()
+			if r.code != 0 || len(out) != 1 {
+				t.Fatalf("exit %d, stdout %q, stderr %q", r.code, r.stdout, r.stderr)
+			}
+			var o struct {
+				Type   string
+				Reason string
+				Error  struct{ Kind, Message string }
+			}
+			json.Unmarshal(out[0], &o)
+			if o.Type != "outcome" || o.Reason != "model_error" || o.Error.Kind != "unauthorized" {
+				t.Errorf("outcome %s", out[0])
+			}
+			if n := f.api.count(); n != 0 {
+				t.Errorf("%d HTTP requests", n)
+			}
+			if got := readFileT(t, f.session()); got != before {
+				t.Errorf("session changed: %q", got)
+			}
+		})
+	}
+}
