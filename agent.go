@@ -57,7 +57,7 @@ type RetryPolicy struct {
 	// doubles each time.
 	Backoff time.Duration
 	// MaxWait is the longest single wait, rate limits included. A longer
-	// wait ends the run instead. Zero means no limit.
+	// wait ends the run instead. Zero means no cap: any wait is accepted.
 	MaxWait time.Duration
 }
 
@@ -117,8 +117,9 @@ type Event struct {
 // earlier run left open, so it resumes a session from any point. A
 // non-empty prompt is added as a user message once those are settled.
 //
-// Run returns an error only if the agent is set up wrongly or the store
-// fails. Anything else is an Outcome.
+// Run returns an error only if the agent is set up wrongly, the store
+// fails, or another Run is already in progress on the session (at most one
+// runs at a time). Anything else is an Outcome.
 func (a *Agent) Run(ctx context.Context, s *Session, prompt string) (*Outcome, error) {
 	if a.Model == nil {
 		return nil, errors.New("agent has no model")
@@ -127,6 +128,10 @@ func (a *Agent) Run(ctx context.Context, s *Session, prompt string) (*Outcome, e
 	if err != nil {
 		return nil, err
 	}
+	if err := s.begin(); err != nil {
+		return nil, err
+	}
+	defer s.end()
 	r := &runner{a: a, s: s, tb: tb, retry: DefaultRetry}
 	if a.Retry != nil {
 		r.retry = *a.Retry
@@ -213,6 +218,11 @@ func (r *runner) drive(ctx context.Context, prompt string) (*Outcome, error) {
 				return out, err
 			}
 		case StopPause:
+			// Calls in a paused turn were cut off like any others, and
+			// the model must see that they were not run.
+			if out, err := r.settleAndCheck(ctx); out != nil || err != nil {
+				return out, err
+			}
 		case StopMaxTokens:
 			return r.outcome(ReasonMaxTokens), nil
 		case StopRefusal:
@@ -389,6 +399,11 @@ type settled struct {
 	limit    bool
 }
 
+// stoppedWhileRunning is the result of a call that was started and never
+// seen to finish, whether the process died or the run was canceled: either
+// way the call may or may not have taken effect.
+const stoppedWhileRunning = "The run stopped while this call was running, so it may or may not have taken effect. It was not run again."
+
 // settle gives every open call of the last assistant turn a result, or
 // leaves it held. See DESIGN.md for the rules.
 func (r *runner) settle(ctx context.Context) (settled, error) {
@@ -411,7 +426,7 @@ func (r *runner) settle(ctx context.Context) (settled, error) {
 			}
 			continue
 		case info.Started:
-			msg := "The run stopped while this call was running, so it may or may not have taken effect. It was not run again."
+			msg := stoppedWhileRunning
 			if err := r.finish(id, ToolResult{Content: msg, IsError: true}, nil); err != nil {
 				return res, err
 			}
@@ -492,6 +507,13 @@ func (r *runner) finish(id string, res ToolResult, labels []string) error {
 // execute runs an allowed call and records its result. It reports
 // whether the context ended meanwhile.
 func (r *runner) execute(ctx context.Context, call ToolCall) (canceled bool, err error) {
+	tool, ok := r.tb.tools[call.Name]
+	if !ok {
+		// Allowed in an earlier run, whose agent had the tool; this one
+		// does not. Nothing runs.
+		msg := fmt.Sprintf("This call was not run: there is no tool called %s.", call.Name)
+		return false, r.finish(call.ID, ToolResult{Content: msg, IsError: true}, nil)
+	}
 	if err := r.record(Entry{Type: EntryCallStarted, CallStarted: &CallStartedEntry{CallID: call.ID}}); err != nil {
 		return false, err
 	}
@@ -500,7 +522,7 @@ func (r *runner) execute(ctx context.Context, call ToolCall) (canceled bool, err
 	if r.a.ToolTimeout > 0 {
 		callCtx, cancel = context.WithTimeout(ctx, r.a.ToolTimeout)
 	}
-	out, callErr := r.tb.tools[call.Name].Call(callCtx, call.Input)
+	out, callErr := tool.Call(callCtx, call.Input)
 	timedOut := callCtx.Err() == context.DeadlineExceeded && ctx.Err() == nil
 	cancel()
 
@@ -509,7 +531,8 @@ func (r *runner) execute(ctx context.Context, call ToolCall) (canceled bool, err
 		res.IsError = true
 		switch {
 		case ctx.Err() != nil:
-			res.Content = fmt.Sprintf("The call was canceled before it finished: %v", callErr)
+			// The tool may have done its work before it noticed.
+			res.Content = stoppedWhileRunning
 		case timedOut:
 			res.Content = fmt.Sprintf("The tool timed out after %s.", r.a.ToolTimeout)
 		default:

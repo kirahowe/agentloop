@@ -719,7 +719,12 @@ func TestCancelDuringTool(t *testing.T) {
 			t.Fatalf("the open call has no result: %+v", info)
 		}
 		if returnsError {
-			contains(t, info.Result.Content, "canceled")
+			// A call cut off by cancellation may have taken effect, and
+			// the model is told so rather than that it was canceled.
+			contains(t, info.Result.Content, "may or may not have taken effect")
+			if !info.Result.IsError {
+				t.Fatalf("%+v", info.Result)
+			}
 		} else if info.Result.Content != "finished anyway" {
 			t.Fatalf("%+v", info.Result)
 		}

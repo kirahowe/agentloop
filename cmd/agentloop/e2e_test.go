@@ -376,7 +376,7 @@ func checkResumes(t *testing.T, f *fixture, api *fakeAPI) {
 		t.Errorf("resume outcome = %v", out)
 	}
 	reqs := api.requests()
-	if len(reqs) != 2 || !strings.Contains(reqs[1], "canceled before it finished") {
+	if len(reqs) != 2 || !strings.Contains(reqs[1], "may or may not have taken effect") {
 		t.Errorf("second request does not report the interrupted call: %v", reqs)
 	}
 	if n := strings.Count(readFile(t, filepath.Join(f.dir, "starts")), "\n"); n != 1 {

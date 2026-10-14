@@ -1,6 +1,7 @@
 package agentloop
 
 import (
+	"encoding/json"
 	"fmt"
 	"slices"
 	"sort"
@@ -13,8 +14,9 @@ import (
 // usage and the state of every tool call are derived from them, so a
 // session reopened from its store is the session that was closed.
 type Session struct {
-	mu    sync.Mutex
-	store Store
+	mu      sync.Mutex
+	store   Store
+	running bool // a Run is in progress
 
 	entries  []Entry
 	messages []Message
@@ -194,6 +196,14 @@ func (s *Session) record(e Entry) (Entry, error) {
 func (s *Session) appendLocked(e Entry) (Entry, error) {
 	e.Seq = len(s.entries) + 1
 	e.Time = time.Now().UTC()
+	// The entry is kept as the log will give it back: copied, so nothing
+	// the caller holds can reach into the session, and passed through
+	// JSON once, so a session that has run is the same as one reopened
+	// (a store cannot keep invalid UTF-8, or the spacing of raw JSON).
+	e, err := normalize(e)
+	if err != nil {
+		return Entry{}, err
+	}
 	if err := s.validate(e); err != nil {
 		return Entry{}, err
 	}
@@ -202,6 +212,37 @@ func (s *Session) appendLocked(e Entry) (Entry, error) {
 	}
 	s.mutate(e)
 	return e, nil
+}
+
+// normalize returns the entry as it reads back from a store.
+func normalize(e Entry) (Entry, error) {
+	b, err := json.Marshal(e)
+	if err != nil {
+		return Entry{}, err
+	}
+	var out Entry
+	if err := json.Unmarshal(b, &out); err != nil {
+		return Entry{}, err
+	}
+	return out, nil
+}
+
+// begin claims the session for one Run. Two runs at once would interleave
+// their entries, so the second is refused.
+func (s *Session) begin() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.running {
+		return fmt.Errorf("another Run is already in progress on this session")
+	}
+	s.running = true
+	return nil
+}
+
+func (s *Session) end() {
+	s.mu.Lock()
+	s.running = false
+	s.mu.Unlock()
 }
 
 func (s *Session) apply(e Entry) error {
@@ -223,6 +264,15 @@ func (s *Session) validate(e Entry) error {
 	case EntryMessage:
 		if e.Message == nil {
 			return fmt.Errorf("message entry has no payload")
+		}
+		if e.Message.Message.Role != Assistant {
+			// Results enter the conversation as tool_result entries, which
+			// place them after their calls; a message cannot carry them.
+			for _, p := range e.Message.Message.Parts {
+				if p.Type == ToolResultPart || p.ToolResult != nil {
+					return fmt.Errorf("a message entry cannot hold a tool result")
+				}
+			}
 		}
 		if e.Message.Message.Role == Assistant {
 			seen := map[string]bool{}
@@ -372,7 +422,7 @@ func isResultMessage(m Message) bool {
 		return false
 	}
 	for _, p := range m.Parts {
-		if p.Type != ToolResultPart {
+		if p.Type != ToolResultPart || p.ToolResult == nil {
 			return false
 		}
 	}

@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"sync"
 	"time"
+	"unicode"
 )
 
 // A Store keeps a session's entries. It is the only thing a session needs
@@ -229,10 +230,10 @@ func (f *FileStore) Append(e Entry) error {
 }
 
 // repairTail makes the file end on a line boundary before anything is
-// appended to it. A last line that is not complete JSON is a torn write,
-// which Load ignores, so it is cut off; otherwise appending would glue
-// the next entry onto it. A complete last line missing its newline just
-// gets one.
+// appended to it. A last line that is not a complete entry is a torn
+// write, which Load ignores, so it is cut off; otherwise appending would
+// glue the next entry onto it. A complete last line missing its newline
+// just gets one.
 func repairTail(path string) error {
 	raw, err := os.ReadFile(path)
 	if errors.Is(err, fs.ErrNotExist) {
@@ -241,34 +242,37 @@ func repairTail(path string) error {
 	if err != nil {
 		return err
 	}
-	if len(raw) == 0 || raw[len(raw)-1] == '\n' {
-		if tail := lastLine(raw); len(tail) > 0 && !json.Valid(tail) {
-			return truncateTo(path, int64(bytes.LastIndex(raw, tail)))
+	// The last line is the last one with anything on it, as in Load.
+	end := len(bytes.TrimRightFunc(raw, unicode.IsSpace))
+	if end == 0 {
+		if len(raw) == 0 {
+			return nil
 		}
+		return truncateTo(path, 0)
+	}
+	start := bytes.LastIndexByte(raw[:end], '\n') + 1
+	if !isEntryLine(raw[start:end]) {
+		return truncateTo(path, int64(start))
+	}
+	if raw[len(raw)-1] == '\n' {
 		return nil
 	}
-	start := bytes.LastIndexByte(raw, '\n') + 1
-	if json.Valid(bytes.TrimSpace(raw[start:])) {
-		file, err := os.OpenFile(path, os.O_WRONLY|os.O_APPEND, 0o600)
-		if err != nil {
-			return err
-		}
-		defer file.Close()
-		if _, err := file.Write([]byte("\n")); err != nil {
-			return err
-		}
-		return file.Sync()
+	file, err := os.OpenFile(path, os.O_WRONLY|os.O_APPEND, 0o600)
+	if err != nil {
+		return err
 	}
-	return truncateTo(path, int64(start))
+	defer file.Close()
+	if _, err := file.Write([]byte("\n")); err != nil {
+		return err
+	}
+	return file.Sync()
 }
 
-// lastLine is the final non-blank line of raw, without its newline.
-func lastLine(raw []byte) []byte {
-	lines := nonBlankLines(raw)
-	if len(lines) == 0 {
-		return nil
-	}
-	return lines[len(lines)-1]
+// isEntryLine reports whether line is a complete entry. Load and repairTail
+// must agree on this, or a line one ignores as torn the other would keep.
+func isEntryLine(line []byte) bool {
+	var e Entry
+	return json.Unmarshal(line, &e) == nil
 }
 
 func truncateTo(path string, size int64) error {
