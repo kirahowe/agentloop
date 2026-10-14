@@ -12,6 +12,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"strconv"
 	"strings"
@@ -82,9 +83,10 @@ func (m *Model) Generate(ctx context.Context, req *agentloop.Request, observe fu
 	if err != nil {
 		return nil, &agentloop.ModelError{Kind: agentloop.InvalidRequest, Message: err.Error(), Err: err}
 	}
-	stream := m.svc.NewStreaming(ctx, params)
+	var seen httpFailure
+	stream := m.svc.NewStreaming(ctx, params, option.WithMiddleware(seen.tap))
 	defer stream.Close()
-	return m.consume(ctx, req, stream, observe)
+	return m.consume(ctx, req, stream, observe, &seen)
 }
 
 func (m *Model) buildParams(req *agentloop.Request) (responses.ResponseNewParams, error) {
@@ -92,10 +94,11 @@ func (m *Model) buildParams(req *agentloop.Request) (responses.ResponseNewParams
 		Model:   shared.ResponsesModel(req.Model),
 		Store:   param.NewOpt(false),
 		Include: []responses.ResponseIncludable{responses.ResponseIncludableReasoningEncryptedContent},
-		Reasoning: shared.ReasoningParam{
-			Summary: shared.ReasoningSummaryAuto,
-			Effort:  effort(req.Effort),
-		},
+	}
+	// Models that do not reason reject the reasoning object, so it goes out
+	// only when the caller asks for an effort.
+	if e := effort(req.Effort); e != "" {
+		p.Reasoning = shared.ReasoningParam{Summary: shared.ReasoningSummaryAuto, Effort: e}
 	}
 	if req.System != "" {
 		p.Instructions = param.NewOpt(req.System)
@@ -161,46 +164,65 @@ func toolJSON(t agentloop.ToolSpec) (json.RawMessage, error) {
 //
 // An assistant message from this provider is replayed from Native.Data, the
 // JSON array of the response's output items, each element passed through
-// untouched (the SDK only strips insignificant whitespace). Any other assistant message is rendered from its parts, with
-// reasoning dropped.
+// untouched (the SDK only strips insignificant whitespace). Any other
+// assistant message, or one whose Native has no data, is rendered from its
+// parts, with reasoning dropped.
 //
 // The API has no error flag on function_call_output, so a tool result with
-// IsError is sent with the output prefixed "Error: ".
+// IsError is sent with the output prefixed "Error: ". Within a run of user
+// messages the function_call_output items go first, so no text separates a
+// call from its output.
 func inputItems(msgs []agentloop.Message) (responses.ResponseInputParam, error) {
+	type item struct {
+		raw    json.RawMessage
+		result bool
+	}
 	var out responses.ResponseInputParam
-	raw := func(v any) error {
-		b, err := json.Marshal(v)
-		if err != nil {
-			return err
+	var user []item // the current run of user messages
+	flush := func() {
+		for _, it := range user {
+			if it.result {
+				out = append(out, param.Override[responses.ResponseInputItemUnionParam](it.raw))
+			}
 		}
-		out = append(out, param.Override[responses.ResponseInputItemUnionParam](json.RawMessage(b)))
-		return nil
+		for _, it := range user {
+			if !it.result {
+				out = append(out, param.Override[responses.ResponseInputItemUnionParam](it.raw))
+			}
+		}
+		user = nil
 	}
 	for _, msg := range msgs {
-		if msg.Role == agentloop.Assistant && msg.Native != nil && msg.Native.Provider == Provider {
+		if msg.Role == agentloop.Assistant && msg.Native != nil && msg.Native.Provider == Provider && len(bytes.TrimSpace(msg.Native.Data)) > 0 {
 			var items []json.RawMessage
 			if err := json.Unmarshal(msg.Native.Data, &items); err != nil {
 				return nil, fmt.Errorf("openai: native data is not an array of output items: %w", err)
 			}
+			flush()
 			for _, it := range items {
 				out = append(out, param.Override[responses.ResponseInputItemUnionParam](it))
 			}
 			continue
 		}
+		var items []item
 		for _, part := range msg.Parts {
-			var err error
+			var v map[string]any
+			result := false
 			switch part.Type {
 			case agentloop.TextPart:
-				err = raw(map[string]any{"type": "message", "role": string(msg.Role), "content": part.Text})
+				if part.Text == "" {
+					continue
+				}
+				v = map[string]any{"type": "message", "role": string(msg.Role), "content": part.Text}
 			case agentloop.ToolCallPart:
 				if part.ToolCall == nil {
 					continue
 				}
 				args := string(part.ToolCall.Input)
-				if strings.TrimSpace(args) == "" {
+				if a := strings.TrimSpace(args); a == "" || a == "null" {
 					args = "{}"
 				}
-				err = raw(map[string]any{"type": "function_call", "call_id": part.ToolCall.ID, "name": part.ToolCall.Name, "arguments": args})
+				v = map[string]any{"type": "function_call", "call_id": part.ToolCall.ID, "name": part.ToolCall.Name, "arguments": args}
 			case agentloop.ToolResultPart:
 				if part.ToolResult == nil {
 					continue
@@ -209,17 +231,30 @@ func inputItems(msgs []agentloop.Message) (responses.ResponseInputParam, error) 
 				if part.ToolResult.IsError {
 					o = "Error: " + o
 				}
-				err = raw(map[string]any{"type": "function_call_output", "call_id": part.ToolResult.CallID, "output": o})
+				v, result = map[string]any{"type": "function_call_output", "call_id": part.ToolResult.CallID, "output": o}, true
+			default:
+				continue
 			}
+			b, err := json.Marshal(v)
 			if err != nil {
 				return nil, err
 			}
+			items = append(items, item{b, result})
+		}
+		if msg.Role == agentloop.User {
+			user = append(user, items...)
+			continue
+		}
+		flush()
+		for _, it := range items {
+			out = append(out, param.Override[responses.ResponseInputItemUnionParam](it.raw))
 		}
 	}
+	flush()
 	return out, nil
 }
 
-func (m *Model) consume(ctx context.Context, req *agentloop.Request, stream *ssestream.Stream[responses.ResponseStreamEventUnion], observe func(agentloop.Delta)) (*agentloop.Response, error) {
+func (m *Model) consume(ctx context.Context, req *agentloop.Request, stream *ssestream.Stream[responses.ResponseStreamEventUnion], observe func(agentloop.Delta), seen *httpFailure) (*agentloop.Response, error) {
 	emit := func(t agentloop.PartType, s string) {
 		if observe != nil && s != "" {
 			observe(agentloop.Delta{Type: t, Text: s})
@@ -248,7 +283,7 @@ func (m *Model) consume(ctx context.Context, req *agentloop.Request, stream *sse
 		}
 	}
 	if err := stream.Err(); err != nil {
-		return nil, m.classify(ctx, err)
+		return nil, m.classify(ctx, err, seen)
 	}
 	if ctx.Err() != nil {
 		return nil, fmt.Errorf("openai: %w", ctx.Err())
@@ -342,13 +377,15 @@ func buildResponse(req *agentloop.Request, r responses.Response, done []json.Raw
 		CacheWriteTokens: written,
 	}
 
+	// A response cut short by the token cap or a filter outranks its tool
+	// calls: their arguments may be cut off, and the agent must not run them.
 	switch {
-	case toolUse:
-		resp.Stop = agentloop.StopToolUse
 	case r.Status == "incomplete" && r.IncompleteDetails.Reason == "max_output_tokens":
 		resp.Stop = agentloop.StopMaxTokens
 	case r.Status == "incomplete" && r.IncompleteDetails.Reason == "content_filter", len(refusals) > 0:
 		resp.Stop = agentloop.StopRefusal
+	case toolUse:
+		resp.Stop = agentloop.StopToolUse
 	default:
 		resp.Stop = agentloop.StopEndTurn
 	}
@@ -356,13 +393,20 @@ func buildResponse(req *agentloop.Request, r responses.Response, done []json.Raw
 }
 
 // classify turns a stream or request error into a *ModelError.
-func (m *Model) classify(ctx context.Context, err error) error {
+func (m *Model) classify(ctx context.Context, err error, seen *httpFailure) error {
 	if ctx.Err() != nil {
 		return fmt.Errorf("openai: %w", ctx.Err())
 	}
 	var me *agentloop.ModelError
 	if errors.As(err, &me) {
 		return err
+	}
+	// The SDK failed to build the body: nothing was sent and retrying cannot
+	// help.
+	// The SDK has its own copy of encoding/json, so match on the text too.
+	var mje *json.MarshalerError
+	if errors.As(err, &mje) || strings.Contains(err.Error(), "error calling MarshalJSON") {
+		return &agentloop.ModelError{Kind: agentloop.InvalidRequest, Message: err.Error(), Err: err}
 	}
 	var api *oai.Error
 	if errors.As(err, &api) {
@@ -389,7 +433,40 @@ func (m *Model) classify(ctx context.Context, err error) error {
 		e.Err = err
 		return e
 	}
+	if seen.status >= 400 {
+		// The SDK could not read the error body (a string where it expects an
+		// object, say) and dropped the status; the tap kept it.
+		return classifyAPI(&oai.Error{StatusCode: seen.status, Message: seen.message(), Response: &http.Response{Header: seen.header}}, time.Now())
+	}
 	return &agentloop.ModelError{Kind: agentloop.Unreachable, Message: err.Error(), Err: err}
+}
+
+// httpFailure remembers the status, headers and start of the body of an
+// error response, for when the SDK fails to turn them into an *oai.Error.
+type httpFailure struct {
+	status int
+	header http.Header
+	body   string
+}
+
+func (f *httpFailure) tap(req *http.Request, next option.MiddlewareNext) (*http.Response, error) {
+	res, err := next(req)
+	if res != nil && res.StatusCode >= 400 && res.Body != nil {
+		head, _ := io.ReadAll(io.LimitReader(res.Body, 4096))
+		res.Body = struct {
+			io.Reader
+			io.Closer
+		}{io.MultiReader(bytes.NewReader(head), res.Body), res.Body}
+		f.status, f.header, f.body = res.StatusCode, res.Header.Clone(), string(head)
+	}
+	return res, err
+}
+
+func (f *httpFailure) message() string {
+	if b := strings.TrimSpace(f.body); b != "" {
+		return b
+	}
+	return ""
 }
 
 func classifyAPI(e *oai.Error, now time.Time) *agentloop.ModelError {
@@ -397,8 +474,11 @@ func classifyAPI(e *oai.Error, now time.Time) *agentloop.ModelError {
 	if me.Message == "" {
 		me.Message = http.StatusText(e.StatusCode)
 	}
+	if me.Message == "" {
+		me.Message = fmt.Sprintf("HTTP %d", e.StatusCode)
+	}
 	switch {
-	case e.StatusCode == 429 && (e.Code == "insufficient_quota" || e.Type == "insufficient_quota"):
+	case e.StatusCode == 402, e.StatusCode == 429 && (e.Code == "insufficient_quota" || e.Type == "insufficient_quota"):
 		me.Kind = agentloop.Billing
 	case e.StatusCode == 429:
 		me.Kind = agentloop.RateLimited
@@ -406,7 +486,8 @@ func classifyAPI(e *oai.Error, now time.Time) *agentloop.ModelError {
 		me.Kind = agentloop.Unauthorized
 	case e.StatusCode == 404:
 		me.Kind = agentloop.NotFound
-	case e.StatusCode >= 500:
+	// 408 and 409 are timeouts and lock conflicts; the API invites a retry.
+	case e.StatusCode == 408, e.StatusCode == 409, e.StatusCode >= 500:
 		me.Kind = agentloop.Overloaded
 	default:
 		me.Kind = agentloop.InvalidRequest
@@ -424,6 +505,9 @@ func classifyAPI(e *oai.Error, now time.Time) *agentloop.ModelError {
 func classifyCode(code, msg string) *agentloop.ModelError {
 	if msg == "" {
 		msg = code
+	}
+	if msg == "" {
+		msg = "the response failed with no reason given"
 	}
 	me := &agentloop.ModelError{Message: msg, Err: errors.New(code + ": " + msg)}
 	switch {
@@ -447,32 +531,53 @@ func classifyCode(code, msg string) *agentloop.ModelError {
 func retryAfter(h http.Header, now time.Time) time.Time {
 	if v := strings.TrimSpace(h.Get("retry-after-ms")); v != "" {
 		if ms, err := strconv.ParseFloat(v, 64); err == nil && ms >= 0 {
-			return now.Add(time.Duration(ms * float64(time.Millisecond)))
+			return now.Add(capped(ms, time.Millisecond, maxRetryAfter))
 		}
 	}
 	if v := strings.TrimSpace(h.Get("retry-after")); v != "" {
 		if s, err := strconv.ParseFloat(v, 64); err == nil && s >= 0 {
-			return now.Add(time.Duration(s * float64(time.Second)))
+			return now.Add(capped(s, time.Second, maxRetryAfter))
 		}
 		if t, err := http.ParseTime(v); err == nil {
+			// A date already gone means retry now, not at some past instant.
+			if t.Before(now) {
+				return now
+			}
 			return t
 		}
 	}
 	return time.Time{}
 }
 
+// capped is n units as a Duration, at most max. Inf and huge values would
+// overflow a Duration into the past.
+func capped(n float64, unit, max time.Duration) time.Duration {
+	if n >= float64(max)/float64(unit) {
+		return max
+	}
+	return time.Duration(n * float64(unit))
+}
+
 // resetsAt is the later of the request and token limit resets. OpenAI
-// writes them as durations such as "1s", "6m0s" or "20ms".
+// writes them as durations such as "1s", "6m0s" or "20ms". A reset that is
+// zero or past has nothing left to wait for.
 func resetsAt(h http.Header, now time.Time) time.Time {
 	var latest time.Time
 	for _, k := range []string{"x-ratelimit-reset-requests", "x-ratelimit-reset-tokens"} {
 		d, err := time.ParseDuration(strings.TrimSpace(h.Get(k)))
-		if err != nil || d < 0 {
+		if err != nil || d <= 0 {
 			continue
 		}
+		d = min(d, maxResetIn)
 		if t := now.Add(d); t.After(latest) {
 			latest = t
 		}
 	}
 	return latest
 }
+
+// Caps that keep absurd header values from overflowing a Duration.
+const (
+	maxRetryAfter = 366 * 24 * time.Hour
+	maxResetIn    = 366 * 24 * time.Hour
+)

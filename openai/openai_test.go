@@ -154,8 +154,10 @@ func TestEffortAndMaxTokens(t *testing.T) {
 	if _, ok := b["max_output_tokens"]; ok {
 		t.Error("max_output_tokens should be omitted")
 	}
-	if _, ok := b["reasoning"].(map[string]any)["effort"]; ok {
-		t.Error("effort should be omitted")
+	// Non-reasoning models reject the reasoning object, so no effort means
+	// no object at all.
+	if r, ok := b["reasoning"]; ok {
+		t.Errorf("reasoning should be omitted without an effort, got %v", r)
 	}
 }
 

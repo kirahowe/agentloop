@@ -5,6 +5,7 @@
 package anthropic
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -81,13 +82,15 @@ func (m *Model) Generate(ctx context.Context, req *agentloop.Request, observe fu
 	defer stream.Close()
 
 	var acc sdk.BetaMessage
-	stopped := false
+	started, stopped := false, false
 	for stream.Next() {
 		ev := stream.Current()
 		if err := acc.Accumulate(ev); err != nil {
 			return nil, fail(ctx, err)
 		}
 		switch ev.Type {
+		case "message_start":
+			started = true
 		case "content_block_delta":
 			if observe == nil {
 				break
@@ -108,7 +111,7 @@ func (m *Model) Generate(ctx context.Context, req *agentloop.Request, observe fu
 	if err := ctx.Err(); err != nil {
 		return nil, fail(ctx, err)
 	}
-	if !stopped {
+	if !started || !stopped {
 		err := errors.New("stream ended before message_stop")
 		return nil, &agentloop.ModelError{Kind: agentloop.Unreachable, Message: err.Error(), Err: err}
 	}
@@ -136,7 +139,7 @@ func (m *Model) params(req *agentloop.Request) (sdk.BetaMessageNewParams, error)
 			Display: sdk.BetaThinkingConfigAdaptiveDisplaySummarized,
 		}},
 	}
-	if req.System != "" {
+	if strings.TrimSpace(req.System) != "" {
 		p.System = []sdk.BetaTextBlockParam{{Text: req.System}}
 	}
 	if req.Effort != "" {
@@ -159,6 +162,9 @@ func (m *Model) params(req *agentloop.Request) (sdk.BetaMessageNewParams, error)
 // tool converts a ToolSpec, keeping every schema keyword.
 func tool(t agentloop.ToolSpec) (sdk.BetaToolParam, error) {
 	tp := sdk.BetaToolParam{Name: t.Name}
+	// input_schema is required, but the SDK omits a zero schema. A non-nil
+	// empty ExtraFields makes it marshal as {"type":"object"}.
+	tp.InputSchema.ExtraFields = map[string]any{}
 	if t.Description != "" {
 		tp.Description = param.NewOpt(t.Description)
 	}
@@ -169,7 +175,7 @@ func tool(t agentloop.ToolSpec) (sdk.BetaToolParam, error) {
 	if err := json.Unmarshal(t.Parameters, &schema); err != nil {
 		return tp, fmt.Errorf("tool %s: parameters are not a JSON object: %w", t.Name, err)
 	}
-	extra := map[string]any{}
+	extra := tp.InputSchema.ExtraFields
 	for k, v := range schema {
 		switch k {
 		case "type":
@@ -177,6 +183,10 @@ func tool(t agentloop.ToolSpec) (sdk.BetaToolParam, error) {
 		case "properties":
 			tp.InputSchema.Properties = v
 		case "required":
+			if string(bytes.TrimSpace(v)) == "null" {
+				extra[k] = v // not a list the SDK can hold; send it as given
+				continue
+			}
 			var req []string
 			if err := json.Unmarshal(v, &req); err != nil {
 				return tp, fmt.Errorf("tool %s: bad required: %w", t.Name, err)
@@ -186,23 +196,27 @@ func tool(t agentloop.ToolSpec) (sdk.BetaToolParam, error) {
 			extra[k] = v
 		}
 	}
-	if len(extra) > 0 {
-		tp.InputSchema.ExtraFields = extra
-	}
 	return tp, nil
+}
+
+// block is one raw content block. result marks a tool_result, which the
+// API wants ahead of everything else in a user message.
+type block struct {
+	raw    json.RawMessage
+	result bool
 }
 
 // outMsg is a message being assembled as raw content blocks.
 type outMsg struct {
 	role   string
-	blocks []json.RawMessage
+	blocks []block
 }
 
 func messages(in []agentloop.Message) ([]sdk.BetaMessageParam, error) {
 	var out []outMsg
 	for _, m := range in {
 		role := string(m.Role)
-		var blocks []json.RawMessage
+		var blocks []block
 		var err error
 		if m.Role == agentloop.Assistant && m.Native != nil && m.Native.Provider == Provider && len(m.Native.Data) > 0 {
 			blocks, err = nativeBlocks(m.Native.Data)
@@ -223,10 +237,23 @@ func messages(in []agentloop.Message) ([]sdk.BetaMessageParam, error) {
 	}
 	res := make([]sdk.BetaMessageParam, len(out))
 	for i, o := range out {
+		// Merging can put text ahead of a tool_result; the API refuses that.
+		// A stable partition keeps every other order.
+		content := make([]json.RawMessage, 0, len(o.blocks))
+		for _, b := range o.blocks {
+			if b.result {
+				content = append(content, b.raw)
+			}
+		}
+		for _, b := range o.blocks {
+			if !b.result {
+				content = append(content, b.raw)
+			}
+		}
 		raw, err := json.Marshal(struct {
 			Role    string            `json:"role"`
 			Content []json.RawMessage `json:"content"`
-		}{o.role, o.blocks})
+		}{o.role, content})
 		if err != nil {
 			return nil, err
 		}
@@ -237,31 +264,36 @@ func messages(in []agentloop.Message) ([]sdk.BetaMessageParam, error) {
 
 // nativeBlocks returns the content blocks of a recorded response exactly
 // as the API sent them.
-func nativeBlocks(data json.RawMessage) ([]json.RawMessage, error) {
+func nativeBlocks(data json.RawMessage) ([]block, error) {
 	var msg struct {
 		Content []json.RawMessage `json:"content"`
 	}
 	if err := json.Unmarshal(data, &msg); err != nil {
 		return nil, fmt.Errorf("native anthropic message: %w", err)
 	}
-	return msg.Content, nil
+	blocks := make([]block, len(msg.Content))
+	for i, raw := range msg.Content {
+		blocks[i] = block{raw: raw}
+	}
+	return blocks, nil
 }
 
-func partBlocks(m agentloop.Message) ([]json.RawMessage, error) {
-	var blocks []json.RawMessage
+func partBlocks(m agentloop.Message) ([]block, error) {
+	var blocks []block
 	add := func(b sdk.BetaContentBlockParamUnion) error {
 		raw, err := json.Marshal(b)
 		if err != nil {
 			return err
 		}
-		blocks = append(blocks, raw)
+		blocks = append(blocks, block{raw: raw})
 		return nil
 	}
 	for _, p := range m.Parts {
 		var err error
 		switch p.Type {
 		case agentloop.TextPart:
-			if p.Text != "" {
+			// The API refuses empty and whitespace-only text blocks.
+			if strings.TrimSpace(p.Text) != "" {
 				err = add(sdk.NewBetaTextBlock(p.Text))
 			}
 		case agentloop.ToolCallPart:
@@ -269,21 +301,60 @@ func partBlocks(m agentloop.Message) ([]json.RawMessage, error) {
 				continue
 			}
 			input := p.ToolCall.Input
-			if len(input) == 0 {
+			if s := bytes.TrimSpace(input); len(s) == 0 || string(s) == "null" {
 				input = json.RawMessage(`{}`)
 			}
-			err = add(sdk.NewBetaToolUseBlock(p.ToolCall.ID, input, p.ToolCall.Name))
+			err = add(sdk.NewBetaToolUseBlock(toolID(p.ToolCall.ID), input, p.ToolCall.Name))
 		case agentloop.ToolResultPart:
 			if m.Role != agentloop.User || p.ToolResult == nil {
 				continue
 			}
-			err = add(sdk.NewBetaToolResultBlock(p.ToolResult.CallID, p.ToolResult.Content, p.ToolResult.IsError))
+			var raw json.RawMessage
+			if raw, err = toolResult(p.ToolResult); err == nil {
+				blocks = append(blocks, block{raw: raw, result: true})
+			}
 		}
 		if err != nil {
 			return nil, err
 		}
 	}
 	return blocks, nil
+}
+
+// toolID makes a tool call id acceptable to the API, which allows only
+// letters, digits, underscores and hyphens. Ids from Anthropic already are;
+// ids from other providers or tools may not be. The same mapping is applied
+// to a call and its result, so they still match.
+func toolID(id string) string {
+	if id == "" {
+		return "_"
+	}
+	return strings.Map(func(r rune) rune {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9', r == '_', r == '-':
+			return r
+		}
+		return '_'
+	}, id)
+}
+
+// toolResult renders a result. A result with no visible text carries no
+// content at all, since the API refuses a blank text block inside one.
+func toolResult(r *agentloop.ToolResult) (json.RawMessage, error) {
+	type text struct {
+		Type string `json:"type"`
+		Text string `json:"text"`
+	}
+	b := struct {
+		Type      string `json:"type"`
+		ToolUseID string `json:"tool_use_id"`
+		Content   []text `json:"content,omitempty"`
+		IsError   bool   `json:"is_error,omitempty"`
+	}{Type: "tool_result", ToolUseID: toolID(r.CallID), IsError: r.IsError}
+	if strings.TrimSpace(r.Content) != "" {
+		b.Content = []text{{"text", r.Content}}
+	}
+	return json.Marshal(b)
 }
 
 func response(acc *sdk.BetaMessage) *agentloop.Response {
@@ -347,6 +418,13 @@ func fail(ctx context.Context, err error) error {
 	if cerr := ctx.Err(); cerr != nil {
 		return fmt.Errorf("anthropic: %w", errors.Join(cerr, err))
 	}
+	// The SDK failed to build the body: nothing was sent and retrying cannot
+	// help.
+	// The SDK has its own copy of encoding/json, so match on the text too.
+	var mje *json.MarshalerError
+	if errors.As(err, &mje) || strings.Contains(err.Error(), "error calling MarshalJSON") {
+		return &agentloop.ModelError{Kind: agentloop.InvalidRequest, Message: err.Error(), Err: err}
+	}
 	var ae *sdk.Error
 	if !errors.As(err, &ae) {
 		return &agentloop.ModelError{Kind: agentloop.Unreachable, Message: err.Error(), Err: err}
@@ -375,7 +453,10 @@ func apiMessage(ae *sdk.Error) string {
 	if raw := strings.TrimSpace(ae.RawJSON()); raw != "" {
 		return raw
 	}
-	return http.StatusText(ae.StatusCode)
+	if text := http.StatusText(ae.StatusCode); text != "" {
+		return text
+	}
+	return fmt.Sprintf("HTTP %d", ae.StatusCode)
 }
 
 func classify(status int, typ, msg string) agentloop.ErrorKind {
@@ -385,7 +466,8 @@ func classify(status int, typ, msg string) agentloop.ErrorKind {
 		return agentloop.Billing
 	case status == 429 || typ == "rate_limit_error":
 		return agentloop.RateLimited
-	case status == 529 || status >= 500 || typ == "overloaded_error" || typ == "api_error":
+	// 408 and 409 are timeouts and conflicts the API invites a retry for.
+	case status == 408 || status == 409 || status == 529 || status >= 500 || typ == "overloaded_error" || typ == "api_error":
 		return agentloop.Overloaded
 	case status == 401 || status == 403 || typ == "authentication_error" || typ == "permission_error":
 		return agentloop.Unauthorized
@@ -403,9 +485,18 @@ func retryAfter(h http.Header, now time.Time) time.Time {
 		return time.Time{}
 	}
 	if s, err := strconv.ParseFloat(v, 64); err == nil && s >= 0 {
-		return now.Add(time.Duration(s * float64(time.Second)))
+		// Inf and huge values would overflow a Duration into the past.
+		d := maxRetryAfter
+		if s < d.Seconds() {
+			d = time.Duration(s * float64(time.Second))
+		}
+		return now.Add(d)
 	}
 	if t, err := http.ParseTime(v); err == nil {
+		// A date already gone means retry now, not at some past instant.
+		if t.Before(now) {
+			return now
+		}
 		return t
 	}
 	return time.Time{}
@@ -426,3 +517,7 @@ func resetsAt(h http.Header, now time.Time) time.Time {
 	}
 	return latest
 }
+
+// maxRetryAfter caps a Retry-After given in seconds, so absurd values
+// cannot overflow a Duration.
+const maxRetryAfter = 366 * 24 * time.Hour
