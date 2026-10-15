@@ -67,7 +67,9 @@ The packages:
 names the provider and model, the system prompt and prompt, the session
 file, the tools, and the command each tool call runs. It prints every
 session entry as a JSON line and then an outcome line. `agentloop chat
-request.json` is the same agent on the terminal. The request format is in
+request.json` is the same agent on the terminal, and `agentloop acp
+request.json` serves it to an [Agent Client Protocol](https://agentclientprotocol.com)
+client over stdin and stdout. The request format is in
 [DESIGN.md](DESIGN.md#the-command).
 
 The API key is fetched by a command named in the request, such as a
@@ -81,6 +83,7 @@ Go 1.27 or later.
 make build    # bin/agentloop
 make test     # gofmt, vet, and every test with the race detector
 make update   # move every dependency to its latest version, then test
+make tck      # the ACP conformance kit against agentloop acp (needs uv)
 ```
 
 The tests need no network and no key. Live tests against the real APIs run

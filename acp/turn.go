@@ -72,8 +72,12 @@ type (
 		ID      PromptID
 		Content []acp.ContentBlock
 	}
-	// RunEnded is the run the machine started returning.
-	RunEnded struct{ Outcome *agentloop.Outcome }
+	// RunEnded is the run the machine started returning: an outcome, or
+	// an error when the store failed or the agent is set up wrongly.
+	RunEnded struct {
+		Outcome *agentloop.Outcome
+		Err     error
+	}
 	// Cancel is session/cancel.
 	Cancel struct{}
 	// Close is session/close.
@@ -125,7 +129,7 @@ func Step(t Turn, in Input) (Turn, []Effect) {
 	case Prompt:
 		return t.prompt(in)
 	case RunEnded:
-		return t.runEnded(in.Outcome)
+		return t.runEnded(in)
 	case Cancel:
 		if t.State == Running {
 			return Turn{State: Cancelling, Prompt: t.Prompt}, []Effect{CancelRun{}}
@@ -163,10 +167,13 @@ func (t Turn) prompt(p Prompt) (Turn, []Effect) {
 	return Turn{State: Running, Prompt: p.ID}, []Effect{StartRun{Prompt: text}}
 }
 
-func (t Turn) runEnded(out *agentloop.Outcome) (Turn, []Effect) {
+func (t Turn) runEnded(in RunEnded) (Turn, []Effect) {
 	switch t.State {
 	case Running:
-		stop, err := Respond(out)
+		if in.Err != nil {
+			return Turn{}, []Effect{RespondError{ID: t.Prompt, Err: internal(in.Err.Error(), nil)}}
+		}
+		stop, err := Respond(in.Outcome)
 		if err != nil {
 			return Turn{}, []Effect{RespondError{ID: t.Prompt, Err: err}}
 		}

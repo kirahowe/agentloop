@@ -4,3 +4,4 @@
 *.prof
 coverage.out
 /testdata/rapid/
+/out/

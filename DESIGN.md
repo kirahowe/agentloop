@@ -276,6 +276,7 @@ again.
 ```
 agentloop run  REQUEST.json   run one agent to an outcome
 agentloop chat REQUEST.json   talk to it on the terminal
+agentloop acp  REQUEST.json   serve it to an ACP client on stdin and stdout
 ```
 
 The request:
@@ -312,6 +313,20 @@ field, a schema that does not compile, a tool name the providers would
 reject, a session path it cannot use. It exits 1 when the session log is
 corrupt or another process holds it. On SIGTERM or SIGINT it cancels the
 run, so the outcome line is still written.
+
+`acp` reads the same request with different rules. It needs
+`session_dir`, and each session the client opens is the log
+`<session_dir>/<id>.jsonl`. It refuses `session`, `prompt` and
+`timeout_seconds`: the client opens sessions and sends prompts, and a
+deadline would end a turn as cancelled, which ACP keeps for the client.
+Two fields are for `acp` alone, and `run` refuses them: `tool_kinds`
+(`{"tool name": "read"}`, using ACP's tool kinds, so a client can show
+each call) and `context_window` (tokens; without it no `usage_update` is
+sent). The client's `cwd` is ignored, and so are its MCP servers, with a
+line on stderr: tools come only from the request. Only JSON-RPC goes to
+stdout. When the client closes stdin, stdout fails, or a SIGTERM or
+SIGINT arrives, agentloop cancels every turn, waits for the runs to end
+and release their sessions, and exits 0. A second signal exits at once.
 
 A session is held under an exclusive lock on `<session>.lock` while a
 process uses it. The OS releases the lock when the process dies, however it

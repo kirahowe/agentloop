@@ -2,6 +2,7 @@
 //
 //	agentloop run  REQUEST.json   run one agent to an outcome
 //	agentloop chat REQUEST.json   talk to it on the terminal
+//	agentloop acp  REQUEST.json   serve it to an ACP client on stdin and stdout
 //	agentloop version
 package main
 
@@ -35,7 +36,7 @@ func main() {
 
 func realMain(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	if len(args) == 0 {
-		fmt.Fprintln(stderr, "usage: agentloop run|chat REQUEST.json | agentloop version")
+		fmt.Fprintln(stderr, "usage: agentloop run|chat|acp REQUEST.json | agentloop version")
 		return 2
 	}
 	var err error
@@ -43,6 +44,16 @@ func realMain(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	case "version":
 		fmt.Fprintln(stdout, "agentloop", version)
 		return 0
+	case "acp":
+		if len(args) != 2 {
+			fmt.Fprintln(stderr, "usage: agentloop acp REQUEST.json")
+			return 2
+		}
+		var req *request.Request
+		req, err = request.Load(args[1], request.ACP)
+		if err == nil {
+			err = acpCmd(req, stdin, stdout, stderr)
+		}
 	case "run", "chat":
 		if len(args) != 2 {
 			fmt.Fprintf(stderr, "usage: agentloop %s REQUEST.json\n", args[0])
@@ -57,7 +68,7 @@ func realMain(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		}
 		defer stop()
 		var req *request.Request
-		req, err = request.Load(args[1])
+		req, err = request.Load(args[1], request.Run)
 		if err == nil {
 			if args[0] == "run" {
 				err = runCmd(ctx, req, stdout, stderr)

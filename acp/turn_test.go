@@ -1,6 +1,7 @@
 package acpagent
 
 import (
+	"errors"
 	"fmt"
 	"reflect"
 	"testing"
@@ -129,6 +130,15 @@ func (m *machine) answer(id PromptID, in Input) {
 	}
 }
 
+// genRunEnded is how a run returns: mostly an outcome, sometimes the
+// error of a failed store.
+func genRunEnded(t *rapid.T) RunEnded {
+	if rapid.IntRange(0, 9).Draw(t, "runerr") == 0 {
+		return RunEnded{Err: errors.New("store: disk full")}
+	}
+	return RunEnded{Outcome: genOutcome(t)}
+}
+
 func genPrompt(t *rapid.T, id PromptID) Prompt {
 	var content []acp.ContentBlock
 	switch rapid.IntRange(0, 5).Draw(t, "prompt") {
@@ -159,10 +169,10 @@ func TestPropertyTurn(t *testing.T) {
 				m.step(genPrompt(t, m.nextID))
 			case 3, 4, 5:
 				if m.outstanding {
-					m.step(RunEnded{Outcome: genOutcome(t)})
+					m.step(genRunEnded(t))
 				} else {
 					before := m.turn
-					if effs := m.step(RunEnded{Outcome: genOutcome(t)}); len(effs) != 0 || m.turn != before {
+					if effs := m.step(genRunEnded(t)); len(effs) != 0 || m.turn != before {
 						t.Fatalf("a stray RunEnded gave %#v", effs)
 					}
 				}
@@ -176,7 +186,7 @@ func TestPropertyTurn(t *testing.T) {
 		}
 		// The run in flight returns, as it always does in the end.
 		if m.outstanding {
-			m.step(RunEnded{Outcome: genOutcome(t)})
+			m.step(genRunEnded(t))
 		}
 		// P2.1: every prompt was answered exactly once.
 		for _, id := range prompts {
@@ -227,5 +237,19 @@ func TestTurnCloseWhileRunning(t *testing.T) {
 	want := []Effect{RespondStop{ID: 7, Stop: acp.StopReasonCancelled}, ReleaseSession{}}
 	if !reflect.DeepEqual(effs, want) || turn.State != Closed {
 		t.Fatalf("%s %#v", turn.State, effs)
+	}
+}
+
+// A run that fails (the store, say) answers its prompt with the error's
+// message rather than a bare "no outcome".
+func TestTurnRunErrorIsTheAnswer(t *testing.T) {
+	turn, _ := Step(Turn{}, Prompt{ID: 3, Content: []acp.ContentBlock{acp.TextBlock("go")}})
+	turn, effs := Step(turn, RunEnded{Err: errors.New("write session: disk full")})
+	if len(effs) != 1 || turn.State != Idle {
+		t.Fatalf("%s %#v", turn.State, effs)
+	}
+	re, ok := effs[0].(RespondError)
+	if !ok || re.ID != 3 || re.Err.Code != -32603 || re.Err.Message != "write session: disk full" {
+		t.Fatalf("%#v", effs)
 	}
 }

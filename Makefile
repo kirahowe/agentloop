@@ -1,4 +1,4 @@
-.PHONY: build test update
+.PHONY: build test update tck
 
 build:
 	go build -o bin/agentloop ./cmd/agentloop
@@ -13,3 +13,6 @@ update:
 	go get -u ./...
 	go mod tidy
 	$(MAKE) test
+
+tck:
+	scripts/tck.sh

@@ -10,10 +10,12 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"net/url"
 	"os"
 	"os/exec"
 	"regexp"
+	"slices"
 	"sort"
 	"strings"
 	"syscall"
@@ -40,6 +42,7 @@ type Request struct {
 	System             string               `json:"system"`
 	Prompt             string               `json:"prompt"`
 	Session            string               `json:"session"`
+	SessionDir         string               `json:"session_dir"`
 	Tools              []agentloop.ToolSpec `json:"tools"`
 	ToolCommand        []string             `json:"tool_command"`
 	ToolEnv            map[string]string    `json:"tool_env"`
@@ -47,6 +50,8 @@ type Request struct {
 	ToolTimeoutSeconds float64              `json:"tool_timeout_seconds"`
 	TimeoutSeconds     float64              `json:"timeout_seconds"`
 	Limits             agentloop.Limits     `json:"limits"`
+	ToolKinds          map[string]string    `json:"tool_kinds"`
+	ContextWindow      int64                `json:"context_window"`
 	Retry              *struct {
 		Retries        int     `json:"retries"`
 		BackoffSeconds float64 `json:"backoff_seconds"`
@@ -54,9 +59,26 @@ type Request struct {
 	} `json:"retry"`
 }
 
-// Load reads and validates the request in the file at path. Every error is
-// a *usage.Error.
-func Load(path string) (*Request, error) {
+// Mode is the command a request is for. The two read the same document
+// with different rules about which fields it must and must not have.
+type Mode int
+
+const (
+	// Run is `agentloop run` and `agentloop chat`: one session file,
+	// named by session.
+	Run Mode = iota
+	// ACP is `agentloop acp`: the client opens sessions, each a file in
+	// session_dir, and sends the prompts. A deadline is refused, because
+	// it would end a turn as cancelled, which ACP keeps for the client.
+	ACP
+)
+
+// ToolKinds are the values tool_kinds may give a tool: ACP's tool kinds.
+var ToolKinds = []string{"read", "edit", "delete", "move", "search", "execute", "think", "fetch", "switch_mode", "other"}
+
+// Load reads and validates the request in the file at path for a mode.
+// Every error is a *usage.Error.
+func Load(path string, mode Mode) (*Request, error) {
 	raw, err := os.ReadFile(path)
 	if err != nil {
 		return nil, usage.Errorf("cannot read request: %v", err)
@@ -70,13 +92,13 @@ func Load(path string) (*Request, error) {
 	if _, err := dec.Token(); err != io.EOF {
 		return nil, usage.Errorf("bad request %s: trailing data after the JSON object", path)
 	}
-	if err := r.validate(); err != nil {
+	if err := r.validate(mode); err != nil {
 		return nil, err
 	}
 	return &r, nil
 }
 
-func (r *Request) validate() error {
+func (r *Request) validate(mode Mode) error {
 	switch r.Provider {
 	case "anthropic", "openai":
 	case "":
@@ -92,8 +114,8 @@ func (r *Request) validate() error {
 	default:
 		return usage.Errorf("unknown effort %q", r.Effort)
 	}
-	if r.Session == "" {
-		return usage.Errorf("request has no session path")
+	if err := r.validateMode(mode); err != nil {
+		return err
 	}
 	if len(r.APIKeyCommand) == 0 {
 		return usage.Errorf("request has no api_key_command")
@@ -148,14 +170,64 @@ func (r *Request) validate() error {
 	return nil
 }
 
+// validateMode checks the fields that differ between the commands.
+func (r *Request) validateMode(mode Mode) error {
+	if mode == Run {
+		if r.Session == "" {
+			return usage.Errorf("request has no session path")
+		}
+		for _, f := range []field{
+			{"session_dir", r.SessionDir != ""}, {"tool_kinds", r.ToolKinds != nil}, {"context_window", r.ContextWindow != 0},
+		} {
+			if f.set {
+				return usage.Errorf("%s is only for agentloop acp", f.name)
+			}
+		}
+		return nil
+	}
+	if r.SessionDir == "" {
+		return usage.Errorf("request has no session_dir")
+	}
+	for _, f := range []field{
+		{"session", r.Session != ""}, {"prompt", r.Prompt != ""}, {"timeout_seconds", r.TimeoutSeconds != 0},
+	} {
+		if f.set {
+			return usage.Errorf("%s is not used by agentloop acp", f.name)
+		}
+	}
+	if r.ContextWindow < 0 {
+		return usage.Errorf("context_window cannot be negative")
+	}
+	tools := map[string]bool{}
+	for _, t := range r.Tools {
+		tools[t.Name] = true
+	}
+	names := slices.Sorted(maps.Keys(r.ToolKinds))
+	for _, name := range names {
+		kind := r.ToolKinds[name]
+		if !tools[name] {
+			return usage.Errorf("tool_kinds names %q, which is not one of the tools", name)
+		}
+		if !slices.Contains(ToolKinds, kind) {
+			return usage.Errorf("tool_kinds gives %q the kind %q (want one of %s)", name, kind, strings.Join(ToolKinds, ", "))
+		}
+	}
+	return nil
+}
+
+type field struct {
+	name string
+	set  bool
+}
+
 var toolName = regexp.MustCompile(`^[A-Za-z0-9_-]{1,64}$`)
 
 // checkNUL refuses strings that no file name, argument or environment
 // entry can hold.
 func (r *Request) checkNUL() error {
 	bad := func(s string) bool { return strings.ContainsRune(s, 0) }
-	if bad(r.Session) || bad(r.ToolDir) {
-		return usage.Errorf("session and tool_dir cannot contain a NUL character")
+	if bad(r.Session) || bad(r.SessionDir) || bad(r.ToolDir) {
+		return usage.Errorf("session, session_dir and tool_dir cannot contain a NUL character")
 	}
 	for _, a := range r.APIKeyCommand {
 		if bad(a) {
