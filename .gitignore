@@ -1,2 +1,6 @@
 /bin/
 /agentloop
+*.test
+*.prof
+coverage.out
+/testdata/rapid/
