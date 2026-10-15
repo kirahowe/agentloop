@@ -40,7 +40,7 @@ func genOutcome(t *rapid.T) *agentloop.Outcome {
 		}
 	}
 	if rapid.Bool().Draw(t, "hasheld") {
-		out.Held = []agentloop.ToolCall{{ID: "c1", Name: "echo"}}
+		out.Held = []agentloop.HeldCall{{ToolCall: agentloop.ToolCall{ID: "c1", Name: "echo"}}}
 	}
 	return out
 }
@@ -114,8 +114,8 @@ func TestRespondModelErrorData(t *testing.T) {
 // A held run is an error naming the held calls: the client cannot decide
 // them, and the prompt may not even have been recorded.
 func TestRespondHeldIsAnError(t *testing.T) {
-	stop, err := Respond(&agentloop.Outcome{Reason: agentloop.ReasonHeld, Held: []agentloop.ToolCall{
-		{ID: "c1", Name: "rm"}, {ID: "c2", Name: "curl"},
+	stop, err := Respond(&agentloop.Outcome{Reason: agentloop.ReasonHeld, Held: []agentloop.HeldCall{
+		{ToolCall: agentloop.ToolCall{ID: "c1", Name: "rm"}}, {ToolCall: agentloop.ToolCall{ID: "c2", Name: "curl"}},
 	}})
 	if stop != "" || err == nil || err.Code != -32603 {
 		t.Fatalf("got %q, %v", stop, err)

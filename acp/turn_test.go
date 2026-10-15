@@ -211,7 +211,7 @@ func TestTurnHeldEndsTheTurn(t *testing.T) {
 		t.Fatalf("%#v", effs)
 	}
 	turn, effs = Step(turn, RunEnded{Outcome: &agentloop.Outcome{Reason: agentloop.ReasonHeld,
-		Held: []agentloop.ToolCall{{ID: "c1", Name: "rm"}}}})
+		Held: []agentloop.HeldCall{{ToolCall: agentloop.ToolCall{ID: "c1", Name: "rm"}}}}})
 	if len(effs) != 1 {
 		t.Fatalf("%#v", effs)
 	}

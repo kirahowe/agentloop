@@ -44,6 +44,8 @@ type CallInfo struct {
 	Call ToolCall
 	// Decision is the latest decision on the call, nil until it is checked.
 	Decision *Decision
+	// Resolved says the latest decision is a person's, on a held call.
+	Resolved bool
 	Started  bool
 	Finished bool
 	// Result is set once Finished.
@@ -178,21 +180,38 @@ func (s *Session) Resolve(callID string, d Decision) error {
 	if d.Verdict != Allow && d.Verdict != Deny {
 		return fmt.Errorf("a held call is resolved with allow or deny, not %q", d.Verdict)
 	}
-	labels := d.Labels
-	if d.Verdict == Allow {
-		// The labels the policy gave with the hold are the call's own: an
-		// allowed call adds them as if it had been allowed at once.
-		labels = union(st.info.Decision.Labels, d.Labels)
-	}
 	_, err := s.appendLocked(Entry{Type: EntryDecision, Decision: &DecisionEntry{
 		CallID:   callID,
 		Tool:     st.info.Call.Name,
 		Verdict:  d.Verdict,
 		Reason:   d.Reason,
-		Labels:   labels,
+		Labels:   d.Labels,
 		Resolved: true,
 	}})
 	return err
+}
+
+// AddLabels adds labels to the session from outside any call, such as an
+// agent's starting labels. It writes an entry only when one of them is
+// new, and returns the entry it wrote, if any.
+func (s *Session) AddLabels(labels []string) (*Entry, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var fresh []string
+	for _, l := range labels {
+		if !s.labels[l] && !slices.Contains(fresh, l) {
+			fresh = append(fresh, l)
+		}
+	}
+	if len(fresh) == 0 {
+		return nil, nil
+	}
+	sort.Strings(fresh)
+	e, err := s.appendLocked(Entry{Type: EntryLabels, Labels: &LabelsEntry{Labels: fresh}})
+	if err != nil {
+		return nil, err
+	}
+	return &e, nil
 }
 
 // record stamps the entry, appends it to the store, and applies it.
@@ -333,6 +352,10 @@ func (s *Session) validate(e Entry) error {
 		if e.RunEnded == nil {
 			return fmt.Errorf("run_ended entry has no payload")
 		}
+	case EntryLabels:
+		if e.Labels == nil {
+			return fmt.Errorf("labels entry has no payload")
+		}
 	default:
 		return fmt.Errorf("unknown entry type %q", e.Type)
 	}
@@ -354,8 +377,8 @@ func (s *Session) openCall(id string) (*callState, error) {
 func (s *Session) mutate(e Entry) {
 	s.entries = append(s.entries, e)
 	switch e.Type {
-	case EntryRunStarted:
-		s.addLabels(e.RunStarted.Labels)
+	case EntryLabels:
+		s.addLabels(e.Labels.Labels)
 	case EntryMessage:
 		m := e.Message
 		s.messages = append(s.messages, m.Message)
@@ -379,6 +402,7 @@ func (s *Session) mutate(e Entry) {
 			}
 		}
 		st.info.Decision = &Decision{Verdict: d.Verdict, Reason: d.Reason, Labels: d.Labels}
+		st.info.Resolved = d.Resolved
 		if d.Verdict == Allow {
 			s.addLabels(d.Labels)
 		}
@@ -444,19 +468,6 @@ func (s *Session) addLabels(labels []string) {
 	for _, l := range labels {
 		s.labels[l] = true
 	}
-}
-
-// union is a and b with no repeats, in order of first appearance.
-func union(a, b []string) []string {
-	var out []string
-	seen := map[string]bool{}
-	for _, l := range append(slices.Clone(a), b...) {
-		if !seen[l] {
-			seen[l] = true
-			out = append(out, l)
-		}
-	}
-	return out
 }
 
 func (s *Session) sortedLabels() []string {

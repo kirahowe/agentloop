@@ -101,11 +101,18 @@ type Outcome struct {
 	// Text is the last assistant text.
 	Text  string      `json:"text,omitempty"`
 	Error *ModelError `json:"error,omitempty"`
-	Held  []ToolCall  `json:"held,omitempty"`
+	Held  []HeldCall  `json:"held,omitempty"`
 	Limit string      `json:"limit,omitempty"`
 	// Turns and Usage count this run only.
 	Turns int   `json:"turns"`
 	Usage Usage `json:"usage"`
+}
+
+// A HeldCall is a call waiting for a person, with the digest of its input
+// that a resolution must name (see Agent.Resolve).
+type HeldCall struct {
+	ToolCall
+	InputSHA256 string `json:"input_sha256"`
 }
 
 // An Event is one thing a run reports to Observe: either an entry just
@@ -139,8 +146,13 @@ func (a *Agent) Run(ctx context.Context, s *Session, prompt string) (*Outcome, e
 	if a.Retry != nil {
 		r.retry = *a.Retry
 	}
-	if err := r.record(Entry{Type: EntryRunStarted, RunStarted: &RunStartedEntry{Prompt: prompt, Labels: a.Labels}}); err != nil {
+	if err := r.record(Entry{Type: EntryRunStarted, RunStarted: &RunStartedEntry{Prompt: prompt}}); err != nil {
 		return nil, err
+	}
+	if e, err := s.AddLabels(a.Labels); err != nil {
+		return nil, err
+	} else if e != nil && a.Observe != nil {
+		a.Observe(Event{Entry: e})
 	}
 	out, err := r.drive(ctx, prompt)
 	if err != nil {
@@ -428,7 +440,9 @@ func (r *runner) settleAndCheck(ctx context.Context) (*Outcome, error) {
 		return r.outcome(ReasonCanceled), nil
 	case len(res.held) > 0:
 		out := r.outcome(ReasonHeld)
-		out.Held = res.held
+		for _, c := range res.held {
+			out.Held = append(out.Held, HeldCall{ToolCall: c, InputSHA256: InputDigest(c.Input)})
+		}
 		return out, nil
 	case res.limit:
 		out := r.outcome(ReasonLimit)
@@ -481,7 +495,11 @@ func (r *runner) settle(ctx context.Context) (settled, error) {
 			res.canceled = true
 			return res, nil
 		}
-		if info.Decision == nil {
+		// An allow a policy gave in an earlier run, to a call that never
+		// started, is stale: the session may have learned more since. It
+		// is decided again. A person's allow stands.
+		stale := info.Decision != nil && info.Decision.Verdict == Allow && !info.Resolved
+		if info.Decision == nil || stale {
 			d := r.decide(ctx, info.Call)
 			if err := r.recordDecision(info.Call, d); err != nil {
 				return res, err
@@ -539,9 +557,14 @@ func (r *runner) decide(ctx context.Context, call ToolCall) Decision {
 }
 
 func (r *runner) recordDecision(call ToolCall, d Decision) error {
-	return r.record(Entry{Type: EntryDecision, Decision: &DecisionEntry{
-		CallID: call.ID, Tool: call.Name, Verdict: d.Verdict, Reason: d.Reason, Labels: d.Labels,
-	}})
+	e := &DecisionEntry{CallID: call.ID, Tool: call.Name, Verdict: d.Verdict, Reason: d.Reason, Labels: d.Labels}
+	if d.Verdict == Hold {
+		// A hold adds nothing: its labels are asked for again when a
+		// person allows the call.
+		e.Labels = nil
+		e.InputSHA256 = InputDigest(call.Input)
+	}
+	return r.record(Entry{Type: EntryDecision, Decision: e})
 }
 
 func (r *runner) finish(id string, res ToolResult, labels []string, log string) error {

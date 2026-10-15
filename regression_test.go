@@ -412,7 +412,7 @@ func TestPropertyHolds(t *testing.T) {
 	})
 }
 
-func ids(calls []agentloop.ToolCall) []string {
+func ids(calls []agentloop.HeldCall) []string {
 	var out []string
 	for _, c := range calls {
 		out = append(out, c.ID)

@@ -34,6 +34,7 @@ const (
 	EntryToolResult  EntryType = "tool_result"
 	EntryModelError  EntryType = "model_error"
 	EntryRunEnded    EntryType = "run_ended"
+	EntryLabels      EntryType = "labels"
 )
 
 // An Entry is one line of a session's log. Exactly one payload field is
@@ -50,14 +51,18 @@ type Entry struct {
 	ToolResult  *ToolResultEntry  `json:"tool_result,omitempty"`
 	ModelError  *ModelErrorEntry  `json:"model_error,omitempty"`
 	RunEnded    *Outcome          `json:"run_ended,omitempty"`
+	Labels      *LabelsEntry      `json:"labels,omitempty"`
 }
 
 // RunStartedEntry records that Run began.
 type RunStartedEntry struct {
 	Prompt string `json:"prompt,omitempty"`
-	// Labels are the agent's starting labels, added to the session as the
-	// run begins.
-	Labels []string `json:"labels,omitempty"`
+}
+
+// LabelsEntry records labels added to the session from outside any call:
+// an agent's starting labels, or what a client's prompt brought in.
+type LabelsEntry struct {
+	Labels []string `json:"labels"`
 }
 
 // MessageEntry records a message joining the conversation. For an
@@ -80,6 +85,9 @@ type DecisionEntry struct {
 	Labels  []string `json:"labels,omitempty"`
 	// Resolved marks the decision of a person on a held call.
 	Resolved bool `json:"resolved,omitempty"`
+	// InputSHA256 is set on a hold: the digest of the call's input (see
+	// InputDigest) that a resolution must name.
+	InputSHA256 string `json:"input_sha256,omitempty"`
 }
 
 // CallStartedEntry is written immediately before a tool runs. If it is

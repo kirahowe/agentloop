@@ -766,6 +766,10 @@ func oracleLabels(es []agentloop.Entry) []string {
 			for _, l := range e.ToolResult.Labels {
 				set[l] = true
 			}
+		case agentloop.EntryLabels:
+			for _, l := range e.Labels.Labels {
+				set[l] = true
+			}
 		}
 	}
 	out := []string{}
@@ -1045,7 +1049,14 @@ func (sc *Scenario) checkRun(s *agentloop.Session, a *agentloop.Agent, out *agen
 		}
 	case agentloop.ReasonHeld:
 		held := s.Held()
-		if len(held) == 0 || !reflect.DeepEqual(held, out.Held) {
+		var outHeld []agentloop.ToolCall
+		for _, h := range out.Held {
+			outHeld = append(outHeld, h.ToolCall)
+			if h.InputSHA256 != agentloop.InputDigest(h.Input) {
+				t.Fatalf("held call %s has digest %q", h.ID, h.InputSHA256)
+			}
+		}
+		if len(held) == 0 || !reflect.DeepEqual(held, outHeld) {
 			t.Fatalf("held outcome %+v, session holds %+v", out.Held, held)
 		}
 		for _, c := range held {
@@ -1251,11 +1262,23 @@ func (sc *Scenario) finalChecks(s *agentloop.Session, complete bool) {
 		}
 	}
 	for id, ds := range decisions {
-		if len(ds) > 2 {
-			t.Fatalf("call %s has %d decisions", id, len(ds))
-		}
-		if len(ds) == 2 && (ds[0].Verdict != agentloop.Hold || !ds[1].Resolved || ds[1].Verdict == agentloop.Hold) {
-			t.Fatalf("call %s decisions %+v", id, ds)
+		// A policy's allow can be followed by another decision only when
+		// the call never started (a stale allow, decided again); a hold
+		// only by a person's allow or deny; nothing follows a deny or a
+		// person's decision.
+		for i, d := range ds {
+			if d.Resolved != (i > 0 && ds[i-1].Verdict == agentloop.Hold) {
+				t.Fatalf("call %s decisions %+v", id, ds)
+			}
+			if i+1 < len(ds) && (d.Verdict == agentloop.Deny || d.Resolved) {
+				t.Fatalf("call %s decisions %+v", id, ds)
+			}
+			if d.Resolved && d.Verdict == agentloop.Hold {
+				t.Fatalf("call %s resolved with hold", id)
+			}
+			if d.Verdict == agentloop.Hold && (d.InputSHA256 == "" || len(d.Labels) > 0) {
+				t.Fatalf("call %s hold %+v", id, d)
+			}
 		}
 		last := ds[len(ds)-1]
 		if r := results[id]; len(r) == 1 && last.Verdict == agentloop.Deny {
