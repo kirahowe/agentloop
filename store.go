@@ -55,6 +55,9 @@ type Entry struct {
 // RunStartedEntry records that Run began.
 type RunStartedEntry struct {
 	Prompt string `json:"prompt,omitempty"`
+	// Labels are the agent's starting labels, added to the session as the
+	// run begins.
+	Labels []string `json:"labels,omitempty"`
 }
 
 // MessageEntry records a message joining the conversation. For an
@@ -90,6 +93,9 @@ type CallStartedEntry struct {
 type ToolResultEntry struct {
 	Result ToolResult `json:"result"`
 	Labels []string   `json:"labels,omitempty"`
+	// Log is what the tool said for the operator alone, such as a
+	// program's stderr. It is never part of the conversation.
+	Log string `json:"log,omitempty"`
 }
 
 // ModelErrorEntry records one failed model call.

@@ -27,6 +27,25 @@ type Result struct {
 	// Labels are added to the session for good, describing what the
 	// result brought into it, such as "private" or "untrusted".
 	Labels []string
+	// Log is for the operator: it is kept in the session's log and never
+	// shown to the model.
+	Log string
+}
+
+// A Call is one call as a CallTool sees it.
+type Call struct {
+	ID    string
+	Input json.RawMessage
+	// Labels are the session's labels as the call runs, which include
+	// the labels its decision added.
+	Labels []string
+}
+
+// A CallTool is a Tool that is told which call it serves and what the
+// session holds. The agent uses CallWith instead of Call.
+type CallTool interface {
+	Tool
+	CallWith(ctx context.Context, call Call) (Result, error)
 }
 
 // Func makes a Tool from a function.

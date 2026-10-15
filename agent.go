@@ -16,6 +16,9 @@ type Agent struct {
 	ModelID string
 	System  string
 	Tools   []Tool
+	// Labels are added to the session whenever a run starts, before
+	// anything else happens in it.
+	Labels []string
 	// Policy decides each call after the tool and its input check out. Nil
 	// allows every call to a tool the agent has.
 	Policy          Policy
@@ -136,7 +139,7 @@ func (a *Agent) Run(ctx context.Context, s *Session, prompt string) (*Outcome, e
 	if a.Retry != nil {
 		r.retry = *a.Retry
 	}
-	if err := r.record(Entry{Type: EntryRunStarted, RunStarted: &RunStartedEntry{Prompt: prompt}}); err != nil {
+	if err := r.record(Entry{Type: EntryRunStarted, RunStarted: &RunStartedEntry{Prompt: prompt, Labels: a.Labels}}); err != nil {
 		return nil, err
 	}
 	out, err := r.drive(ctx, prompt)
@@ -463,13 +466,13 @@ func (r *runner) settle(ctx context.Context) (settled, error) {
 		switch {
 		case cutOff:
 			msg := fmt.Sprintf("This call was not run: the turn ended (%s) before the model finished it.", turn.Stop)
-			if err := r.finish(id, ToolResult{Content: msg, IsError: true}, nil); err != nil {
+			if err := r.finish(id, ToolResult{Content: msg, IsError: true}, nil, ""); err != nil {
 				return res, err
 			}
 			continue
 		case info.Started:
 			msg := stoppedWhileRunning
-			if err := r.finish(id, ToolResult{Content: msg, IsError: true}, nil); err != nil {
+			if err := r.finish(id, ToolResult{Content: msg, IsError: true}, nil, ""); err != nil {
 				return res, err
 			}
 			continue
@@ -491,7 +494,7 @@ func (r *runner) settle(ctx context.Context) (settled, error) {
 		case Allow:
 			if max := r.a.Limits.MaxToolCalls; max > 0 && r.toolCalls >= max {
 				msg := "This call was not run: the limit on tool calls was reached."
-				if err := r.finish(id, ToolResult{Content: msg, IsError: true}, nil); err != nil {
+				if err := r.finish(id, ToolResult{Content: msg, IsError: true}, nil, ""); err != nil {
 					return res, err
 				}
 				res.limit = true
@@ -510,7 +513,7 @@ func (r *runner) settle(ctx context.Context) (settled, error) {
 			if msg == "" {
 				msg = "The call was denied."
 			}
-			if err := r.finish(id, ToolResult{Content: msg, IsError: true}, nil); err != nil {
+			if err := r.finish(id, ToolResult{Content: msg, IsError: true}, nil, ""); err != nil {
 				return res, err
 			}
 		}
@@ -541,9 +544,9 @@ func (r *runner) recordDecision(call ToolCall, d Decision) error {
 	}})
 }
 
-func (r *runner) finish(id string, res ToolResult, labels []string) error {
+func (r *runner) finish(id string, res ToolResult, labels []string, log string) error {
 	res.CallID = id
-	return r.record(Entry{Type: EntryToolResult, ToolResult: &ToolResultEntry{Result: res, Labels: labels}})
+	return r.record(Entry{Type: EntryToolResult, ToolResult: &ToolResultEntry{Result: res, Labels: labels, Log: log}})
 }
 
 // execute runs an allowed call and records its result. It reports
@@ -554,7 +557,7 @@ func (r *runner) execute(ctx context.Context, call ToolCall) (canceled bool, err
 		// Allowed in an earlier run, whose agent had the tool; this one
 		// does not. Nothing runs.
 		msg := fmt.Sprintf("This call was not run: there is no tool called %s.", call.Name)
-		return false, r.finish(call.ID, ToolResult{Content: msg, IsError: true}, nil)
+		return false, r.finish(call.ID, ToolResult{Content: msg, IsError: true}, nil, "")
 	}
 	if err := r.record(Entry{Type: EntryCallStarted, CallStarted: &CallStartedEntry{CallID: call.ID}}); err != nil {
 		return false, err
@@ -564,7 +567,13 @@ func (r *runner) execute(ctx context.Context, call ToolCall) (canceled bool, err
 	if r.a.ToolTimeout > 0 {
 		callCtx, cancel = context.WithTimeout(ctx, r.a.ToolTimeout)
 	}
-	out, callErr := tool.Call(callCtx, call.Input)
+	var out Result
+	var callErr error
+	if ct, ok := tool.(CallTool); ok {
+		out, callErr = ct.CallWith(callCtx, Call{ID: call.ID, Input: call.Input, Labels: r.s.Labels()})
+	} else {
+		out, callErr = tool.Call(callCtx, call.Input)
+	}
 	timedOut := callCtx.Err() == context.DeadlineExceeded && ctx.Err() == nil
 	cancel()
 
@@ -581,7 +590,7 @@ func (r *runner) execute(ctx context.Context, call ToolCall) (canceled bool, err
 			res.Content = fmt.Sprintf("The tool failed: %v", callErr)
 		}
 	}
-	if err := r.finish(call.ID, res, out.Labels); err != nil {
+	if err := r.finish(call.ID, res, out.Labels, out.Log); err != nil {
 		return false, err
 	}
 	return ctx.Err() != nil, nil

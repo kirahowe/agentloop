@@ -178,12 +178,18 @@ func (s *Session) Resolve(callID string, d Decision) error {
 	if d.Verdict != Allow && d.Verdict != Deny {
 		return fmt.Errorf("a held call is resolved with allow or deny, not %q", d.Verdict)
 	}
+	labels := d.Labels
+	if d.Verdict == Allow {
+		// The labels the policy gave with the hold are the call's own: an
+		// allowed call adds them as if it had been allowed at once.
+		labels = union(st.info.Decision.Labels, d.Labels)
+	}
 	_, err := s.appendLocked(Entry{Type: EntryDecision, Decision: &DecisionEntry{
 		CallID:   callID,
 		Tool:     st.info.Call.Name,
 		Verdict:  d.Verdict,
 		Reason:   d.Reason,
-		Labels:   d.Labels,
+		Labels:   labels,
 		Resolved: true,
 	}})
 	return err
@@ -348,6 +354,8 @@ func (s *Session) openCall(id string) (*callState, error) {
 func (s *Session) mutate(e Entry) {
 	s.entries = append(s.entries, e)
 	switch e.Type {
+	case EntryRunStarted:
+		s.addLabels(e.RunStarted.Labels)
 	case EntryMessage:
 		m := e.Message
 		s.messages = append(s.messages, m.Message)
@@ -436,6 +444,19 @@ func (s *Session) addLabels(labels []string) {
 	for _, l := range labels {
 		s.labels[l] = true
 	}
+}
+
+// union is a and b with no repeats, in order of first appearance.
+func union(a, b []string) []string {
+	var out []string
+	seen := map[string]bool{}
+	for _, l := range append(slices.Clone(a), b...) {
+		if !seen[l] {
+			seen[l] = true
+			out = append(out, l)
+		}
+	}
+	return out
 }
 
 func (s *Session) sortedLabels() []string {
