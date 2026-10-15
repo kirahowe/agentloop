@@ -23,7 +23,8 @@ const answerGrace = 5 * time.Second
 // acpCmd serves the agent to one ACP client over stdin and stdout until
 // the client closes stdin, stdout fails, or a signal comes. Each of those
 // cancels every turn, waits for the runs to end and release their
-// sessions, and exits 0. A second signal exits at once.
+// sessions and for the cancelled responses to be written (stdout still
+// works after stdin ends), and exits 0. A second signal exits at once.
 func acpCmd(req *request.Request, stdin io.Reader, stdout, stderr io.Writer) error {
 	sigs := make(chan os.Signal, 2)
 	signal.Notify(sigs, syscall.SIGINT, syscall.SIGTERM)
@@ -33,6 +34,10 @@ func acpCmd(req *request.Request, stdin io.Reader, stdout, stderr io.Writer) err
 	if err != nil {
 		return usage.Errorf("%v", err)
 	}
+	wd, err := os.Getwd()
+	if err != nil {
+		return err
+	}
 	kinds := map[string]acp.ToolKind{}
 	for name, kind := range req.ToolKinds {
 		kinds[name] = acp.ToolKind(kind)
@@ -40,6 +45,7 @@ func acpCmd(req *request.Request, stdin io.Reader, stdout, stderr io.Writer) err
 	srv := acpagent.NewServer(acpagent.Config{
 		Version:    version,
 		SessionDir: req.SessionDir,
+		Cwd:        acpagent.SessionCwd(req.ToolDir, wd),
 		Agent:      req.Agent(key),
 		Options:    acpagent.Options{Kinds: kinds, ContextWindow: req.ContextWindow},
 		Log:        stderr,
@@ -49,6 +55,7 @@ func acpCmd(req *request.Request, stdin io.Reader, stdout, stderr io.Writer) err
 		return err
 	}
 	select {
+	case <-srv.Ended():
 	case <-conn.Done():
 	case <-sigs:
 		go func() {

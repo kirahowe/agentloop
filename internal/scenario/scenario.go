@@ -12,6 +12,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
 	"reflect"
 	"sort"
 	"strings"
@@ -255,6 +256,8 @@ type Scenario struct {
 	cfg    Config
 	faults Faults
 	Store  *CrashStore
+	// file, once set by HandOver, is where the log is kept instead.
+	file string
 	// Observe, if set, sees every event of every run, after the
 	// scenario's own checks.
 	Observe func(agentloop.Event)
@@ -284,8 +287,55 @@ func New(t *rapid.T, cfg Config, f Faults) *Scenario {
 	return sc
 }
 
+// log is where the scenario's log is: the crash store, or the file it was
+// handed over to.
+func (sc *Scenario) log() interface {
+	agentloop.Store
+	Snapshot() [][]byte
+} {
+	if sc.file != "" {
+		return fileLog{agentloop.NewFileStore(sc.file), sc.file}
+	}
+	return sc.Store
+}
+
+// fileLog is a session file read as the scenario reads its crash store.
+type fileLog struct {
+	*agentloop.FileStore
+	path string
+}
+
+func (f fileLog) Snapshot() [][]byte {
+	raw, err := os.ReadFile(f.path)
+	if err != nil {
+		return nil
+	}
+	var out [][]byte
+	for _, l := range bytes.Split(raw, []byte("\n")) {
+		if len(bytes.TrimSpace(l)) > 0 {
+			out = append(out, l)
+		}
+	}
+	return out
+}
+
+// HandOver writes the log to a session file at path and keeps it there
+// from now on: every check reads the file, so whatever runs the session
+// next (an ACP server, say) is held to the same invariants. The scenario
+// does not run the session itself after this.
+func (sc *Scenario) HandOver(path string) {
+	var b []byte
+	for _, l := range sc.Store.Snapshot() {
+		b = append(append(b, l...), '\n')
+	}
+	if err := os.WriteFile(path, b, 0o600); err != nil {
+		sc.t.Fatal(err)
+	}
+	sc.file = path
+}
+
 func (sc *Scenario) entries() []agentloop.Entry {
-	es, err := sc.Store.Load()
+	es, err := sc.log().Load()
 	if err != nil {
 		sc.t.Fatalf("the persisted log does not load: %v", err)
 	}
@@ -740,7 +790,7 @@ func oracleDecided(es []agentloop.Entry) int {
 
 func (sc *Scenario) checkSession(s *agentloop.Session) {
 	t := sc.t
-	lines := sc.Store.Snapshot()
+	lines := sc.log().Snapshot()
 	for i, l := range sc.prevLines {
 		if i >= len(lines) || !bytes.Equal(l, lines[i]) {
 			t.Fatalf("persisted entry %d changed", i+1)
@@ -762,7 +812,7 @@ func (sc *Scenario) checkSession(s *agentloop.Session) {
 		}
 	}
 
-	r, err := agentloop.OpenSession(sc.Store)
+	r, err := agentloop.OpenSession(sc.log())
 	if err != nil {
 		t.Fatalf("the persisted log does not replay: %v", err)
 	}
@@ -825,8 +875,12 @@ func (sc *Scenario) agent() *agentloop.Agent {
 	return a
 }
 
+// Agent is the scenario's agent, for running its session somewhere else
+// after HandOver.
+func (sc *Scenario) Agent() *agentloop.Agent { return sc.agent() }
+
 func (sc *Scenario) open() *agentloop.Session {
-	s, err := agentloop.OpenSession(sc.Store)
+	s, err := agentloop.OpenSession(sc.log())
 	if err != nil {
 		sc.t.Fatalf("a persisted log does not reopen: %v", err)
 	}
@@ -861,6 +915,11 @@ func (sc *Scenario) iterate(prompt string, crashAt int, after bool, cancelMode i
 	sc.Store.arm(crashAt, after)
 	out, err := a.Run(ctx, s, prompt)
 	sc.Store.arm(0, false)
+	// The armed cancel belongs to this run. Left set, it would make the
+	// tools and the model of a later run outside iterate (an agent from
+	// Agent, run by a server) "cancel" a context that is not theirs and
+	// then wait for their own forever.
+	sc.cancel = nil
 	if err != nil {
 		if !errors.Is(err, ErrCrash) {
 			t.Fatalf("Run failed for a reason other than the crash: %v", err)
@@ -1269,6 +1328,31 @@ func (sc *Scenario) finalChecks(s *agentloop.Session, complete bool) {
 // that must reach `completed`.
 func (sc *Scenario) Execute() {
 	t := sc.t
+	sc.Faulty()
+	sc.PrepareDrain()
+	var final *agentloop.Outcome
+	for i := 0; i < sc.DrainRuns(); i++ {
+		out := sc.iterate("continue", 0, false, 0)
+		if out.Reason == agentloop.ReasonHeld {
+			s := sc.open()
+			sc.resolveHeld(s, s.Held(), 0)
+			continue
+		}
+		if out.Reason == agentloop.ReasonCompleted {
+			final = out
+			break
+		}
+	}
+	if final == nil {
+		t.Fatalf("the conversation never completed; entries:\n%s", dump(sc.entries()))
+	}
+	sc.CheckAtRest(true)
+}
+
+// Faulty runs the scenario's iterations with the faults it was made with,
+// each from what the last one left in the log.
+func (sc *Scenario) Faulty() {
+	t := sc.t
 	prompt := "go"
 	for i := 0; i < sc.cfg.Iterations; i++ {
 		crashAt, cancelMode := 0, 0
@@ -1287,31 +1371,30 @@ func (sc *Scenario) Execute() {
 			sc.resolveHeld(s, s.Held(), 0)
 		}
 	}
+}
 
-	// Drain: no faults, no limits, holds approved. The script is finite, so
-	// the conversation must complete.
+// PrepareDrain turns the faults off for the runs that follow: no limits,
+// enough retries for every scripted error, no tool timeout, and holds
+// approved when the scenario resolves them. The script is finite, so the
+// conversation completes within DrainRuns runs unless a call stays held.
+// Agents made after this have the drain's settings.
+func (sc *Scenario) PrepareDrain() {
 	sc.draining, sc.resolveAll = true, true
 	sc.cfg.Limits = agentloop.Limits{}
 	sc.cfg.Retry = &agentloop.RetryPolicy{Retries: len(sc.cfg.Steps) + 1}
 	sc.cfg.ToolTimeout = 0
-	var final *agentloop.Outcome
-	for i := 0; i < 3*len(sc.cfg.Steps)+10; i++ {
-		out := sc.iterate("continue", 0, false, 0)
-		if out.Reason == agentloop.ReasonHeld {
-			s := sc.open()
-			sc.resolveHeld(s, s.Held(), 0)
-			continue
-		}
-		if out.Reason == agentloop.ReasonCompleted {
-			final = out
-			break
-		}
-	}
-	if final == nil {
-		t.Fatalf("the conversation never completed; entries:\n%s", dump(sc.entries()))
-	}
+}
+
+// DrainRuns bounds the runs a drain needs to complete.
+func (sc *Scenario) DrainRuns() int { return 3*len(sc.cfg.Steps) + 10 }
+
+// CheckAtRest holds the invariants of a log at rest: it reloads to the
+// same state, nothing persisted earlier changed, no call ran twice or
+// without being allowed and started, and every result is honest. With
+// complete, nothing is pending or held and every call has its result.
+func (sc *Scenario) CheckAtRest(complete bool) {
 	s := sc.open()
-	sc.finalChecks(s, true)
+	sc.finalChecks(s, complete)
 }
 
 func dump(es []agentloop.Entry) string {

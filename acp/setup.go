@@ -13,15 +13,21 @@ import (
 // InitializeResponse is the answer to initialize. agentloop speaks
 // protocol version 1 whatever the client asks for; a client that cannot
 // speak it closes the connection. Only what the server implements is
-// advertised: text, resource links and embedded text in prompts, and no
-// session loading, listing, resuming or closing yet.
+// advertised: text, resource links and embedded text in prompts, and
+// loading, resuming, listing and closing sessions.
 func InitializeResponse(version string) acp.InitializeResponse {
 	return acp.InitializeResponse{
 		ProtocolVersion: acp.ProtocolVersion(acp.WireProtocolVersion),
 		AgentInfo:       &acp.Implementation{Name: "agentloop", Version: version},
 		AuthMethods:     []acp.AuthMethod{},
 		AgentCapabilities: acp.AgentCapabilities{
+			LoadSession:        true,
 			PromptCapabilities: acp.PromptCapabilities{EmbeddedContext: true},
+			SessionCapabilities: acp.SessionCapabilities{
+				List:   &acp.SessionListCapabilities{},
+				Resume: &acp.SessionResumeCapabilities{},
+				Close:  &acp.SessionCloseCapabilities{},
+			},
 		},
 	}
 }
@@ -33,12 +39,12 @@ func ClientNotices(req acp.InitializeRequest) bool {
 	return s != nil && s.Notices != nil
 }
 
-// NewSessionNotes are the lines logged for a session/new: what the client
-// asked for that agentloop does not do. The cwd is not one of them, since
-// every client sends one. Tools come only from the request, so the client's
-// MCP servers are not connected.
-func NewSessionNotes(req acp.NewSessionRequest) []string {
-	if n := len(req.McpServers); n > 0 {
+// MCPNotes are the lines logged when a session/new, session/load or
+// session/resume names n MCP servers: tools come only from the request,
+// so the client's are not connected. The cwd gets no line, since every
+// client sends one.
+func MCPNotes(n int) []string {
+	if n > 0 {
 		return []string{fmt.Sprintf("agentloop: ignoring %d MCP server(s) from the client: tools come only from the request", n)}
 	}
 	return nil

@@ -69,7 +69,9 @@ file, the tools, and the command each tool call runs. It prints every
 session entry as a JSON line and then an outcome line. `agentloop chat
 request.json` is the same agent on the terminal, and `agentloop acp
 request.json` serves it to an [Agent Client Protocol](https://agentclientprotocol.com)
-client over stdin and stdout. The request format is in
+client over stdin and stdout, where a client can also list, load, resume
+and close the sessions kept in the request's `session_dir`. The request
+format is in
 [DESIGN.md](DESIGN.md#the-command).
 
 The API key is fetched by a command named in the request, such as a

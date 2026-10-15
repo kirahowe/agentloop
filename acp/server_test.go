@@ -165,10 +165,11 @@ func serveIn(t tb, dir string, agent *agentloop.Agent, opts Options, notices boo
 	h.client = acp.NewClientSideConnection(h.cl, h.toAgent, cR)
 	t.Cleanup(func() {
 		h.client.Close()
-		<-conn.Done()
+		h.toAgent.Close()
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 		h.srv.Shutdown(ctx)
+		<-conn.Done()
 	})
 	req := acp.InitializeRequest{ProtocolVersion: acp.ProtocolVersion(acp.WireProtocolVersion)}
 	if notices {
@@ -178,7 +179,7 @@ func serveIn(t tb, dir string, agent *agentloop.Agent, opts Options, notices boo
 	if err != nil {
 		t.Fatal(err)
 	}
-	if resp.ProtocolVersion != 1 || resp.AgentCapabilities.LoadSession {
+	if resp.ProtocolVersion != 1 || !resp.AgentCapabilities.LoadSession {
 		t.Fatalf("initialize: %+v", resp)
 	}
 	return h
@@ -254,7 +255,7 @@ func (h *harness) turnOnWire(id acp.SessionId, n int) (during []json.RawMessage,
 	return during, resp, after
 }
 
-func asJSON(t testing.TB, ups []Update) []string {
+func asJSON(t tb, ups []Update) []string {
 	t.Helper()
 	out := make([]string, len(ups))
 	for i, u := range ups {

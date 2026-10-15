@@ -326,7 +326,27 @@ sent). The client's `cwd` is ignored, and so are its MCP servers, with a
 line on stderr: tools come only from the request. Only JSON-RPC goes to
 stdout. When the client closes stdin, stdout fails, or a SIGTERM or
 SIGINT arrives, agentloop cancels every turn, waits for the runs to end
-and release their sessions, and exits 0. A second signal exits at once.
+and release their sessions, and exits 0. A turn cancelled this way is
+still answered `cancelled` when stdout works: closing stdin does not stop
+agentloop writing. A second signal exits at once.
+
+`session/new` creates the log file straight away, so a session can be
+listed and loaded before anything has been said in it. `session/load`
+sends the session's history and then answers; `session/resume` answers
+without it. Both take the session's lock, so a session open in another
+process, or on another connection in the same process, is refused with
+`-32603` "session in use". A session already open on the same
+connection is taken up again as it is when it is idle, and refused the
+same way while a turn runs. An id that agentloop could not have made (a
+lowercase UUID) is refused as unknown (`-32002`) before any path is built
+from it, as is a valid id with no log. `session/close` cancels the turn
+in flight, if any, and answers once the session is released.
+`session/list` lists every log in `session_dir`, newest first, with the
+time of its last entry. ACP requires a cwd for each session, and since
+the client's is ignored, agentloop reports the directory the tools run
+in: `tool_dir`, made absolute, or agentloop's own working directory when
+`tool_dir` is empty. A `cwd` filter therefore matches every session or
+none.
 
 A session is held under an exclusive lock on `<session>.lock` while a
 process uses it. The OS releases the lock when the process dies, however it

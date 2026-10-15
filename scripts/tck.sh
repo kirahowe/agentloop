@@ -1,6 +1,7 @@
 #!/bin/sh
 # Run the ACP Test Compatibility Kit (agentclientprotocol/acp-tck) against
 # `agentloop acp`, with a mock Anthropic API standing in for the model.
+# The binary is built into out/agentloop.
 #
 #   scripts/tck.sh            (or: make tck)
 #
@@ -17,11 +18,7 @@ TCK_REF=fa00ccdc13dfaa4b288a91877c1f3e468af4aa7d
 # Requirements that may be SKIPPED, each for a capability agentloop does
 # not advertise in initialize (or an opt-in flag this script does not pass).
 ALLOWED_SKIPS="
-ACP-LOAD-001 ACP-LOAD-002 ACP-LOAD-003
-ACP-RESUME-001 ACP-RESUME-002
-ACP-LIST-001 ACP-LIST-002
 ACP-DELETE-001 ACP-DELETE-002
-ACP-CLOSE-001 ACP-CLOSE-002
 ACP-ADDDIRS-001
 ACP-MODES-001 ACP-MODES-002
 ACP-CONFIG-001 ACP-CONFIG-002
@@ -40,7 +37,9 @@ cleanup() {
 }
 trap cleanup EXIT INT TERM
 
-go build -o bin/agentloop ./cmd/agentloop
+# The binary under test goes in out/, not bin/, so a run never replaces a
+# bin/agentloop that something else is using.
+go build -o out/agentloop ./cmd/agentloop
 go build -o "$work/mockprovider" ./internal/cmd/mockprovider
 
 "$work/mockprovider" >"$work/mock.url" 2>"$work/mock.err" &
@@ -75,7 +74,7 @@ uvx --from "git+https://github.com/agentclientprotocol/acp-tck@$TCK_REF" acp-tck
 	--agent-cwd "$work/agent-cwd" \
 	--cancel-prompt "MOCK-SLOW: keep busy until cancelled" \
 	--report-json out/tck.json \
-	-- "$root/bin/agentloop" acp "$work/request.json" || status=$?
+	-- "$root/out/agentloop" acp "$work/request.json" || status=$?
 
 python3 -I - out/tck.json "$ALLOWED_SKIPS" "$status" <<'PY'
 import json, sys

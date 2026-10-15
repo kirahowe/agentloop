@@ -3,9 +3,13 @@ package acpagent
 import (
 	"context"
 	"crypto/rand"
+	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"log/slog"
+	"os"
+	"path/filepath"
 	"sync"
 
 	acp "github.com/caelis-labs/acp-go-sdk"
@@ -31,9 +35,11 @@ type Server struct {
 	sessions map[acp.SessionId]*session
 	nextID   PromptID
 	conn     *acp.AgentSideConnection
+	in       *heldInput
 
 	runs    sync.WaitGroup // runs in flight
 	answers sync.WaitGroup // prompt responses not yet written
+	loads   sync.WaitGroup // loads and resumes holding a session not yet registered
 }
 
 // Config is what the server needs from the request.
@@ -42,6 +48,9 @@ type Config struct {
 	Version string
 	// SessionDir holds a <id>.jsonl log for each session.
 	SessionDir string
+	// Cwd is the absolute directory the tools run in, which session/list
+	// reports for every session (see SessionCwd).
+	Cwd string
 	// Agent is copied for each run. If it has an Observe, that is called
 	// after each event's updates have been sent.
 	Agent *agentloop.Agent
@@ -64,6 +73,8 @@ type session struct {
 	tr      Translator // used only by the run in flight
 	cancel  context.CancelFunc
 	waiting map[PromptID]chan answer
+	// released is closed when the session is let go of.
+	released chan struct{}
 }
 
 type answer struct {
@@ -76,22 +87,70 @@ func NewServer(cfg Config) *Server {
 	if cfg.Log == nil {
 		cfg.Log = io.Discard
 	}
+	if cfg.Cwd == "" {
+		wd, _ := os.Getwd()
+		cfg.Cwd = SessionCwd("", wd)
+	}
 	return &Server{cfg: cfg, sessions: map[acp.SessionId]*session{}}
 }
 
 // Connect serves the client that writes to in and reads from out.
+//
+// The end of in is held back from the connection until Shutdown has
+// written the answers it owes. The SDK takes the end of its input as the
+// end of the connection and stops writing too, so a client that only
+// closed its writing half would otherwise never get the cancelled
+// responses of the turns in flight. Ended says when in has ended.
 func (s *Server) Connect(out io.Writer, in io.Reader) (*acp.AgentSideConnection, error) {
-	conn, err := acp.NewAgentSideConnectionWithOptions(s, out, in, acp.ConnectionOptions{
+	held := &heldInput{r: in, ended: make(chan struct{}), release: make(chan struct{})}
+	conn, err := acp.NewAgentSideConnectionWithOptions(s, out, held, acp.ConnectionOptions{
 		Logger: slog.New(slog.NewTextHandler(s.cfg.Log, nil)),
 	})
 	if err != nil {
 		return nil, err
 	}
 	s.mu.Lock()
-	s.conn = conn
+	s.conn, s.in = conn, held
 	s.mu.Unlock()
 	return conn, nil
 }
+
+// Ended is closed when the client's input has ended (or failed). It is
+// nil before Connect.
+func (s *Server) Ended() <-chan struct{} {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.in == nil {
+		return nil
+	}
+	return s.in.ended
+}
+
+// heldInput reads through to the client's input, but when that ends it
+// says so on ended and keeps the end from its reader until released.
+type heldInput struct {
+	r       io.Reader
+	ended   chan struct{}
+	release chan struct{}
+	once    sync.Once
+	free    sync.Once
+}
+
+func (h *heldInput) Read(p []byte) (int, error) {
+	n, err := h.r.Read(p)
+	if err == nil {
+		return n, nil
+	}
+	h.once.Do(func() { close(h.ended) })
+	if n > 0 {
+		// The data first; the next read meets the end again.
+		return n, nil
+	}
+	<-h.release
+	return 0, err
+}
+
+func (h *heldInput) let() { h.free.Do(func() { close(h.release) }) }
 
 func (s *Server) logf(format string, args ...any) {
 	fmt.Fprintf(s.cfg.Log, format+"\n", args...)
@@ -106,11 +165,11 @@ func (s *Server) Initialize(_ context.Context, req acp.InitializeRequest) (acp.I
 	return InitializeResponse(s.cfg.Version), nil
 }
 
-// NewSession opens a new session log under its lock.
+// NewSession opens a new session log under its lock. The file is made at
+// once, so the session can be listed and loaded before anything is said
+// in it.
 func (s *Server) NewSession(ctx context.Context, req acp.NewSessionRequest) (acp.NewSessionResponse, error) {
-	for _, line := range NewSessionNotes(req) {
-		s.logf("%s", line)
-	}
+	s.note(len(req.McpServers))
 	conn, _ := acp.AgentSideConnectionFromContext(ctx)
 	var b [16]byte
 	rand.Read(b[:])
@@ -121,17 +180,174 @@ func (s *Server) NewSession(ctx context.Context, req acp.NewSessionRequest) (acp
 	if s.lost {
 		return acp.NewSessionResponse{}, errClosing()
 	}
-	sess, unlock, err := sessionfile.Open(SessionPath(s.cfg.SessionDir, id))
+	path := SessionPath(s.cfg.SessionDir, id)
+	sess, unlock, err := sessionfile.Open(path)
 	if err != nil {
 		return acp.NewSessionResponse{}, internal(err.Error(), nil)
 	}
+	if err := sessionfile.Create(path); err != nil {
+		unlock()
+		return acp.NewSessionResponse{}, internal(err.Error(), nil)
+	}
+	s.register(s.newSession(id, conn, sess, unlock))
+	return acp.NewSessionResponse{SessionId: id}, nil
+}
+
+func (s *Server) note(mcpServers int) {
+	for _, line := range MCPNotes(mcpServers) {
+		s.logf("%s", line)
+	}
+}
+
+// newSession is the registry's record of an open session. s.mu is held.
+func (s *Server) newSession(id acp.SessionId, conn *acp.AgentSideConnection, sess *agentloop.Session, unlock func()) *session {
 	opts := s.cfg.Options
 	opts.Notices = s.notices
-	s.sessions[id] = &session{
+	return &session{
 		id: id, conn: conn, sess: sess, unlock: unlock,
 		tr: NewTranslator(opts), waiting: map[PromptID]chan answer{},
+		released: make(chan struct{}),
 	}
-	return acp.NewSessionResponse{SessionId: id}, nil
+}
+
+func (s *Server) register(ss *session) { s.sessions[ss.id] = ss }
+
+// LoadSession opens a session from its log and sends its history, all of
+// it before the response.
+func (s *Server) LoadSession(ctx context.Context, req acp.LoadSessionRequest) (acp.LoadSessionResponse, error) {
+	s.note(len(req.McpServers))
+	if err := s.reopen(ctx, req.SessionId, true); err != nil {
+		return acp.LoadSessionResponse{}, err
+	}
+	return acp.LoadSessionResponse{}, nil
+}
+
+// ResumeSession opens a session from its log without sending its history.
+func (s *Server) ResumeSession(ctx context.Context, req acp.ResumeSessionRequest) (acp.ResumeSessionResponse, error) {
+	s.note(len(req.McpServers))
+	if err := s.reopen(ctx, req.SessionId, false); err != nil {
+		return acp.ResumeSessionResponse{}, err
+	}
+	return acp.ResumeSessionResponse{}, nil
+}
+
+// reopen makes a stored session open on this connection, and with replay
+// sends its history first. A session this connection already has open is
+// taken up as it is, if Reattach allows; any other is opened under its
+// lock, which fails when another process, or another connection in this
+// one, has it open.
+//
+// While the history is sent the session is out of the registry, so no
+// turn can start and mix its updates into the replay: a prompt for it
+// then is for a session not yet open.
+func (s *Server) reopen(ctx context.Context, id acp.SessionId, replay bool) error {
+	path, rpcErr := SessionFile(s.cfg.SessionDir, id)
+	if rpcErr != nil {
+		return rpcErr
+	}
+	conn, _ := acp.AgentSideConnectionFromContext(ctx)
+
+	s.mu.Lock()
+	if s.lost {
+		s.mu.Unlock()
+		return errClosing()
+	}
+	ss, open := s.sessions[id]
+	if open {
+		if err := Reattach(id, ss.turn); err != nil {
+			s.mu.Unlock()
+			return err
+		}
+		if !replay {
+			s.mu.Unlock()
+			return nil
+		}
+		delete(s.sessions, id)
+	}
+	s.loads.Add(1)
+	s.mu.Unlock()
+	defer s.loads.Done()
+
+	if !open {
+		if !sessionfile.Exists(path) {
+			return UnknownSession(id)
+		}
+		sess, unlock, err := sessionfile.Open(path)
+		if errors.Is(err, sessionfile.ErrInUse) {
+			return SessionInUse(id)
+		}
+		if err != nil {
+			return internal(err.Error(), nil)
+		}
+		s.mu.Lock()
+		ss = s.newSession(id, conn, sess, unlock)
+		s.mu.Unlock()
+	}
+	if replay {
+		for _, u := range Replay(ss.tr.opts, ss.sess.Entries()) {
+			if err := conn.SessionUpdate(ctx, acp.SessionNotification{SessionId: id, Update: u}); err != nil {
+				ss.unlock()
+				return err
+			}
+		}
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.lost {
+		ss.unlock()
+		return errClosing()
+	}
+	s.register(ss)
+	return nil
+}
+
+// CloseSession cancels the session's turn, if one is running, and answers
+// once the turn has ended and the session is let go of.
+func (s *Server) CloseSession(ctx context.Context, req acp.CloseSessionRequest) (acp.CloseSessionResponse, error) {
+	s.mu.Lock()
+	ss, ok := s.sessions[req.SessionId]
+	if !ok {
+		s.mu.Unlock()
+		return acp.CloseSessionResponse{}, UnknownSession(req.SessionId)
+	}
+	s.step(ss, Close{})
+	s.mu.Unlock()
+	select {
+	case <-ss.released:
+	case <-ctx.Done():
+		return acp.CloseSessionResponse{}, ctx.Err()
+	}
+	return acp.CloseSessionResponse{}, nil
+}
+
+// ListSessions lists the session logs in session_dir with the time of
+// each one's last entry. A log that cannot be read is listed without one.
+func (s *Server) ListSessions(_ context.Context, req acp.ListSessionsRequest) (acp.ListSessionsResponse, error) {
+	dirents, err := os.ReadDir(s.cfg.SessionDir)
+	if err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return acp.ListSessionsResponse{}, internal(err.Error(), nil)
+	}
+	var found []StoredSession
+	for _, d := range dirents {
+		id, ok := SessionFileID(d.Name())
+		if !ok || !d.Type().IsRegular() {
+			continue
+		}
+		st := StoredSession{ID: id}
+		entries, err := agentloop.NewFileStore(filepath.Join(s.cfg.SessionDir, d.Name())).Load()
+		if err != nil {
+			s.logf("agentloop: session %s: %v", id, err)
+		} else if n := len(entries); n > 0 {
+			st.Updated = entries[n-1].Time
+		}
+		found = append(found, st)
+	}
+	resp, rpcErr := ListResponse(found, s.cfg.Cwd, req)
+	if rpcErr != nil {
+		return acp.ListSessionsResponse{}, rpcErr
+	}
+	return resp, nil
 }
 
 // Prompt runs a turn and answers when the turn machine says so.
@@ -200,11 +416,13 @@ func (s *Server) Lose() {
 }
 
 // Shutdown loses the client, waits for every run to end and its session to
-// be released, then waits until each run's response is written, the
-// connection fails, or ctx ends.
+// be released, and for every load in progress to let go of its session,
+// then waits until each run's response is written, the connection fails,
+// or ctx ends. Last, it lets the connection see the end of its input.
 func (s *Server) Shutdown(ctx context.Context) {
 	s.Lose()
 	s.runs.Wait()
+	s.loads.Wait()
 	s.mu.Lock()
 	conn := s.conn
 	s.mu.Unlock()
@@ -218,6 +436,12 @@ func (s *Server) Shutdown(ctx context.Context) {
 	case <-written:
 	case <-done:
 	case <-ctx.Done():
+	}
+	s.mu.Lock()
+	in := s.in
+	s.mu.Unlock()
+	if in != nil {
+		in.let()
 	}
 }
 
@@ -250,6 +474,7 @@ func (s *Server) step(ss *session, in Input) {
 		case ReleaseSession:
 			ss.unlock()
 			delete(s.sessions, ss.id)
+			close(ss.released)
 		}
 	}
 }

@@ -38,8 +38,9 @@ func TestPropertySessionIDs(t *testing.T) {
 	})
 }
 
-// initialize advertises what A4 implements and nothing more, and the
-// answer validates against the schema.
+// initialize advertises what the server implements and nothing more:
+// loading, resuming, listing and closing sessions, but not deleting them,
+// modes, images, audio or MCP. The answer validates against the schema.
 func TestInitializeResponse(t *testing.T) {
 	r := InitializeResponse("1.2.3")
 	if err := validate("InitializeResponse", r); err != nil {
@@ -47,8 +48,9 @@ func TestInitializeResponse(t *testing.T) {
 	}
 	c := r.AgentCapabilities
 	if r.ProtocolVersion != 1 || r.AgentInfo.Name != "agentloop" || r.AgentInfo.Version != "1.2.3" ||
-		c.LoadSession || c.SessionCapabilities.List != nil || c.SessionCapabilities.Resume != nil ||
-		c.SessionCapabilities.Close != nil || c.PromptCapabilities.Image || c.PromptCapabilities.Audio ||
+		!c.LoadSession || c.SessionCapabilities.List == nil || c.SessionCapabilities.Resume == nil ||
+		c.SessionCapabilities.Close == nil || c.SessionCapabilities.Delete != nil ||
+		c.SessionCapabilities.AdditionalDirectories != nil || c.PromptCapabilities.Image || c.PromptCapabilities.Audio ||
 		!c.PromptCapabilities.EmbeddedContext || c.McpCapabilities.Http || c.McpCapabilities.Sse || len(r.AuthMethods) != 0 {
 		t.Fatalf("%+v", r)
 	}
@@ -72,11 +74,11 @@ func TestClientNotices(t *testing.T) {
 	}
 }
 
-func TestNewSessionNotes(t *testing.T) {
-	if n := NewSessionNotes(acp.NewSessionRequest{Cwd: "/x", McpServers: []acp.McpServer{}}); n != nil {
+func TestMCPNotes(t *testing.T) {
+	if n := MCPNotes(0); n != nil {
 		t.Errorf("notes for no servers: %v", n)
 	}
-	n := NewSessionNotes(acp.NewSessionRequest{McpServers: make([]acp.McpServer, 2)})
+	n := MCPNotes(2)
 	if len(n) != 1 || !strings.Contains(n[0], "ignoring 2 MCP server(s)") {
 		t.Errorf("%v", n)
 	}

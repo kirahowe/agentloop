@@ -599,3 +599,114 @@ func TestACPSIGTERMCancelsTheTurn(t *testing.T) {
 		t.Error("the session is still locked")
 	}
 }
+
+// Regression: when stdin ended with a prompt in flight, the SDK shut the
+// whole connection, writes included, and the process exited without the
+// cancelled response that the turn is owed. A client that only closed its
+// writing half (relay does, on SIGTERM) never got an answer. Closing stdin
+// mid-turn must still deliver the cancelled response before the exit.
+func TestACPStdinEOFAnswersThePromptCancelled(t *testing.T) {
+	for _, stage := range []string{"tool", "streaming"} {
+		t.Run(stage, func(t *testing.T) {
+			api := reflexAPI(t)
+			dir := t.TempDir()
+			r := newACPReq(t, dir, api.URL, "#!/bin/sh\necho started\nsleep 30\n", keycmdBinary(t))
+			p := startACP(t, r.write(t))
+			p.initialize()
+			id := p.newSession()
+			var prompt int
+			if stage == "tool" {
+				prompt = p.prompt(id, "go")
+				p.waitFor("the tool starting", func(l rpcLine) bool { return strings.Contains(string(l.Params), "in_progress") })
+			} else {
+				prompt = p.prompt(id, "hang")
+				p.waitFor("a streamed chunk", func(l rpcLine) bool { return strings.Contains(string(l.Params), "Thinking") })
+			}
+			p.stdin.Close()
+			code, ok := p.wait(5 * time.Second)
+			if !ok || code != 0 {
+				t.Fatalf("exit %d, exited %v; stderr: %s", code, ok, p.stderr.String())
+			}
+			resp := p.response(prompt)
+			if resp.Error != nil || !strings.Contains(string(resp.Result), `"stopReason":"cancelled"`) {
+				t.Fatalf("response: %s %+v", resp.Result, resp.Error)
+			}
+			p.checkFraming(t)
+			if !lockFree(t, filepath.Join(r.sessionDir, id+".jsonl")) {
+				t.Error("the session is still locked")
+			}
+		})
+	}
+}
+
+// sessionFiles is every file in a session directory with its contents,
+// but the lock files, which a lock attempt may create and never writes.
+func sessionFiles(t tb, dir string) map[string]string {
+	t.Helper()
+	ents, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	out := map[string]string{}
+	for _, e := range ents {
+		if strings.HasSuffix(e.Name(), ".lock") {
+			continue
+		}
+		b, err := os.ReadFile(filepath.Join(dir, e.Name()))
+		if err != nil {
+			t.Fatal(err)
+		}
+		out[e.Name()] = string(b)
+	}
+	return out
+}
+
+// TestPropertyACPExclusiveAcrossProcesses is P4.3 across processes: two
+// `agentloop acp` processes share a session directory. A session open in
+// A, idle or with a tool running, cannot be loaded or resumed by B, which
+// gets "session in use", and the attempts change nothing on disk. Once A
+// closes it, B loads it.
+func TestPropertyACPExclusiveAcrossProcesses(t *testing.T) {
+	api := reflexAPI(t)
+	dir := t.TempDir()
+	r := newACPReq(t, dir, api.URL, "#!/bin/sh\necho started\nsleep 30\n", keycmdBinary(t))
+	req := r.write(t)
+	a, b := startACP(t, req), startACP(t, req)
+	a.initialize()
+	b.initialize()
+	rapid.Check(t, func(rt *rapid.T) {
+		a.t, b.t = rt, rt
+		id := a.newSession()
+		busy := rapid.Bool().Draw(rt, "busy")
+		var prompt int
+		if busy {
+			prompt = a.prompt(id, "go")
+			a.waitFor("the tool starting", func(l rpcLine) bool {
+				return l.Method == "session/update" && strings.Contains(string(l.Params), id) &&
+					strings.Contains(string(l.Params), "in_progress")
+			})
+		}
+		disk := sessionFiles(rt, r.sessionDir)
+		for i, n := 0, rapid.IntRange(1, 4).Draw(rt, "attempts"); i < n; i++ {
+			method := rapid.SampledFrom([]string{"session/load", "session/resume"}).Draw(rt, "method")
+			l := b.response(b.request(method, map[string]any{"sessionId": id, "cwd": "/", "mcpServers": []any{}}))
+			if l.Error == nil || l.Error.Code != -32603 || l.Error.Message != "session in use" {
+				rt.Fatalf("%s from B of a session open in A (busy %v): %s %+v", method, busy, l.Result, l.Error)
+			}
+			now := sessionFiles(rt, r.sessionDir)
+			if fmt.Sprint(now) != fmt.Sprint(disk) {
+				rt.Fatalf("%s from B changed the session directory", method)
+			}
+		}
+		if busy {
+			a.send(map[string]any{"jsonrpc": "2.0", "method": "session/cancel", "params": map[string]any{"sessionId": id}})
+			if l := a.response(prompt); l.Error != nil || !strings.Contains(string(l.Result), `"cancelled"`) {
+				rt.Fatalf("the cancelled turn: %s %+v", l.Result, l.Error)
+			}
+		}
+		a.call("session/close", map[string]any{"sessionId": id})
+		b.call("session/load", map[string]any{"sessionId": id, "cwd": "/", "mcpServers": []any{}})
+		b.call("session/close", map[string]any{"sessionId": id})
+	})
+	a.t, b.t = t, t
+}

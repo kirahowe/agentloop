@@ -13,6 +13,11 @@ import (
 	"github.com/kirahowe/agentloop/internal/usage"
 )
 
+// ErrInUse is the error of Open when another open of the session holds
+// its lock: another process, or another open in this one, since the lock
+// belongs to the open file and not to the process.
+var ErrInUse = errors.New("in use by another agentloop")
+
 // Exists reports whether a session file is already there. It creates
 // nothing.
 func Exists(path string) bool {
@@ -38,7 +43,7 @@ func Open(path string) (*agentloop.Session, func(), error) {
 	}
 	if err := syscall.Flock(int(lock.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
 		lock.Close()
-		return nil, nil, fmt.Errorf("session %s is in use by another agentloop", path)
+		return nil, nil, fmt.Errorf("session %s is %w", path, ErrInUse)
 	}
 	sess, err := agentloop.OpenSession(agentloop.NewFileStore(path))
 	if err != nil {
@@ -46,4 +51,27 @@ func Open(path string) (*agentloop.Session, func(), error) {
 		return nil, nil, err
 	}
 	return sess, func() { lock.Close() }, nil
+}
+
+// Create makes an empty session file if there is none, and makes it
+// durable, so a session exists from the moment it has an id and not only
+// once something has been logged in it.
+func Create(path string) error {
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY, 0o600)
+	if err != nil {
+		return err
+	}
+	if err := f.Sync(); err != nil {
+		f.Close()
+		return err
+	}
+	if err := f.Close(); err != nil {
+		return err
+	}
+	d, err := os.Open(filepath.Dir(path))
+	if err != nil {
+		return err
+	}
+	defer d.Close()
+	return d.Sync()
 }
