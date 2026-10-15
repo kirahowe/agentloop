@@ -274,9 +274,8 @@ again.
 ## The command
 
 ```
-agentloop run  REQUEST.json   run one agent to an outcome
-agentloop chat REQUEST.json   talk to it on the terminal
-agentloop acp  REQUEST.json   serve it to an ACP client on stdin and stdout
+agentloop run REQUEST.json   run one agent to an outcome
+agentloop acp REQUEST.json   serve it to an ACP client on stdin and stdout
 ```
 
 The request:
@@ -290,7 +289,7 @@ The request:
   "api_key_command": ["security", "find-generic-password", "-s", "anthropic", "-w"],
                                       // run to get the key; required
   "system": "…",
-  "prompt": "…",                      // not used by chat
+  "prompt": "…",
   "session": "/path/to/session.jsonl",
   "tools": [{"name": "…", "description": "…", "parameters": {}}],
   "tool_command": ["relay", "tool"],  // a call runs tool_command + [name], input on stdin
@@ -348,6 +347,45 @@ in: `tool_dir`, made absolute, or agentloop's own working directory when
 `tool_dir` is empty. A `cwd` filter therefore matches every session or
 none.
 
+What a client sees of a run comes from the run's events, translated by
+pure functions in `acp/` (`Translator.Step` for a live turn, `Replay` for
+`session/load`):
+
+| agentloop | ACP `session/update` |
+|---|---|
+| text delta, or text not streamed | `agent_message_chunk`, id `a<seq>` |
+| reasoning delta | `agent_thought_chunk`, id `a<seq>` |
+| a refusal the provider explained outside the text | one more `agent_message_chunk` with the explanation |
+| a tool call in an assistant message | `tool_call`, `pending`, with the request's kind for the tool (`other` if none) |
+| `call_started` | `tool_call_update`, `in_progress` |
+| `tool_result` | `tool_call_update`, `completed` or `failed`, the content as text, `rawOutput` `{content, is_error}` |
+| an assistant message, with `context_window` set | `usage_update`, used = the turn's input, cache and output tokens |
+| `model_error` | `notice`, only to a client that advertises notices |
+| a user message | nothing live (the client showed it); `user_message_chunk`, id `u<seq>`, on load |
+
+The outcome of the turn answers `session/prompt`:
+
+| outcome | answer |
+|---|---|
+| `completed` | `end_turn` |
+| `max_tokens`, or `limit` on tokens | `max_tokens` |
+| `limit`, any other | `max_turn_requests` |
+| `refused` | `refusal` |
+| `canceled` | `cancelled` |
+| `model_error` | error `-32603`, data: the error's kind, status, message and times |
+| `held` | error `-32603`, data: the held calls |
+
+Two `_meta` keys carry what ACP has no field for:
+`_meta["agentloop/labels"]` on a tool call's result holds the policy
+labels of the call, and `_meta["agentloop/retry"]` on a notice for a
+model call that will be retried holds `kind`, `wait_ms`, `retry_at`,
+`attempt` and, when there was one, the HTTP `status`, so a client can
+count down to the retry.
+
+After `refusal`, ACP says the refused prompt and what follows it are left
+out of the next prompt. agentloop's log is append-only and keeps the
+refused turn, so the model sees it next time.
+
 A session is held under an exclusive lock on `<session>.lock` while a
 process uses it. The OS releases the lock when the process dies, however it
 dies.
@@ -362,7 +400,8 @@ If the command cannot start, exits non-zero, times out or prints nothing,
 `run` calls nothing and reports `model_error` with kind `unauthorized`
 and a message such as `The api_key_command exited 1: item not found.`
 The message may carry the end of the command's stderr, never its stdout.
-`chat` prints the same message and exits 2. A request with no
+`acp` prints the same message and exits 2 before reading anything from
+the client. A request with no
 `api_key_command`, an empty one, or one with an empty program name or a NUL
 character is unusable and exits 2.
 

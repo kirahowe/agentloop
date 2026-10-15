@@ -66,9 +66,8 @@ The packages:
 `agentloop run request.json` runs one agent to an outcome. The request
 names the provider and model, the system prompt and prompt, the session
 file, the tools, and the command each tool call runs. It prints every
-session entry as a JSON line and then an outcome line. `agentloop chat
-request.json` is the same agent on the terminal, and `agentloop acp
-request.json` serves it to an [Agent Client Protocol](https://agentclientprotocol.com)
+session entry as a JSON line and then an outcome line. `agentloop acp
+request.json` serves the same agent to an [Agent Client Protocol](https://agentclientprotocol.com)
 client over stdin and stdout, where a client can also list, load, resume
 and close the sessions kept in the request's `session_dir`. The request
 format is in

@@ -7,7 +7,6 @@ require (
 	github.com/caelis-labs/acp-go-sdk v1.5.0
 	github.com/openai/openai-go/v3 v3.78.0
 	github.com/santhosh-tekuri/jsonschema/v6 v6.0.3
-	golang.org/x/term v0.47.0
 	pgregory.net/rapid v1.3.0
 )
 

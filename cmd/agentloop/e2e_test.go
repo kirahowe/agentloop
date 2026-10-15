@@ -406,28 +406,6 @@ func TestTimeout(t *testing.T) {
 	checkResumes(t, f, api)
 }
 
-func TestChat(t *testing.T) {
-	api := newFakeAPI(t, textReply("hi there"), textReply("again"))
-	f := newFixture(t, api, probeScript)
-	delete(f.req, "prompt")
-	cmd := f.command("chat", f.writeReq())
-	cmd.Stdin = strings.NewReader("hello\n\nmore\n")
-	var out, errb bytes.Buffer
-	cmd.Stdout, cmd.Stderr = &out, &errb
-	if err := cmd.Run(); err != nil {
-		t.Fatalf("%v: %s", err, errb.String())
-	}
-	if out.String() != "hi there\nagain\n" {
-		t.Errorf("stdout = %q", out.String())
-	}
-	if !strings.Contains(errb.String(), "> ") {
-		t.Errorf("stderr = %q", errb.String())
-	}
-	if n := len(api.requests()); n != 2 {
-		t.Errorf("requests = %d", n)
-	}
-}
-
 func TestVersion(t *testing.T) {
 	out, err := exec.Command(binary, "version").Output()
 	if err != nil || !strings.HasPrefix(string(out), "agentloop ") {

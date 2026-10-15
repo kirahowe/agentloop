@@ -64,8 +64,7 @@ type Request struct {
 type Mode int
 
 const (
-	// Run is `agentloop run` and `agentloop chat`: one session file,
-	// named by session.
+	// Run is `agentloop run`: one session file, named by session.
 	Run Mode = iota
 	// ACP is `agentloop acp`: the client opens sessions, each a file in
 	// session_dir, and sends the prompts. A deadline is refused, because

@@ -23,6 +23,24 @@ import (
 	"github.com/kirahowe/agentloop"
 )
 
+// syncBuf is a buffer that a process's output and the test can share.
+type syncBuf struct {
+	mu  chan struct{}
+	buf bytes.Buffer
+}
+
+func newSyncBuf() *syncBuf { s := &syncBuf{mu: make(chan struct{}, 1)}; return s }
+func (s *syncBuf) Write(p []byte) (int, error) {
+	s.mu <- struct{}{}
+	defer func() { <-s.mu }()
+	return s.buf.Write(p)
+}
+func (s *syncBuf) String() string {
+	s.mu <- struct{}{}
+	defer func() { <-s.mu }()
+	return s.buf.String()
+}
+
 // --- an ACP client for the real binary ---
 
 // acpProc is `agentloop acp` with pipes on stdin and stdout. Every stdout

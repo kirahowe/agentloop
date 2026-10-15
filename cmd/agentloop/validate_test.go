@@ -213,7 +213,7 @@ func TestUnusableRawInputs(t *testing.T) {
 
 func TestUsageErrorsOnCommandLine(t *testing.T) {
 	for _, args := range [][]string{
-		nil, {"run"}, {"run", "a", "b"}, {"chat"}, {"bogus"}, {"run", "/nonexistent/request.json"}, {"run", t.TempDir()}, {"RUN", "x"}, {""},
+		nil, {"run"}, {"run", "a", "b"}, {"bogus"}, {"run", "/nonexistent/request.json"}, {"run", t.TempDir()}, {"RUN", "x"}, {""},
 	} {
 		r := chaosExec(t, args, chaosEnv(), nil)
 		if r.code != 2 || r.stdout != "" || r.stderr == "" {

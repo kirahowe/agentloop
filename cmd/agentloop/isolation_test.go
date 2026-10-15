@@ -1,7 +1,9 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net"
 	"net/http"
@@ -13,7 +15,6 @@ import (
 	"strings"
 	"sync"
 	"testing"
-	"time"
 )
 
 var (
@@ -287,24 +288,33 @@ func TestNoKey(t *testing.T) {
 	}
 }
 
-// TestNoKeyChat: chat exits 2 with the same message and calls nothing.
-func TestNoKeyChat(t *testing.T) {
+// TestNoKeyACP: acp exits 2 with the same message before it answers the
+// client, and calls nothing.
+func TestNoKeyACP(t *testing.T) {
 	for name, c := range keyCmdFailures(t) {
 		t.Run(name, func(t *testing.T) {
-			w := newChaosWorld(t, newTestRand())
-			w.req["api_key_command"] = c.cmd
-			p := startChat(t, w, chaosEnv())
-			code, signaled := p.wait(20 * time.Second)
-			if signaled || code != 2 {
-				t.Fatalf("exit %d (signaled %v), stderr %q", code, signaled, p.errb.String())
+			api := newFakeAPI(t)
+			r := newACPReq(t, t.TempDir(), api.URL, probeScript, keycmdBinary(t))
+			r.req["api_key_command"] = c.cmd
+			cmd := exec.Command(binary, "acp", r.write(t))
+			cmd.Stdin = strings.NewReader(`{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":1}}` + "\n")
+			var out, errb bytes.Buffer
+			cmd.Stdout, cmd.Stderr = &out, &errb
+			err := cmd.Run()
+			var ee *exec.ExitError
+			if !errors.As(err, &ee) || ee.ExitCode() != 2 {
+				t.Fatalf("exit %v, stderr %q", err, errb.String())
 			}
-			if !strings.Contains(p.errb.String(), c.want) {
-				t.Errorf("stderr %q, want %q", p.errb.String(), c.want)
+			if out.Len() != 0 {
+				t.Errorf("stdout %q, want nothing", out.String())
 			}
-			if strings.Contains(p.out.String()+p.errb.String(), chaosKey) {
+			if !strings.Contains(errb.String(), c.want) {
+				t.Errorf("stderr %q, want %q", errb.String(), c.want)
+			}
+			if strings.Contains(out.String()+errb.String(), chaosKey) {
 				t.Error("the command's stdout leaked")
 			}
-			if n := w.api.count(); n != 0 {
+			if n := len(api.requests()); n != 0 {
 				t.Errorf("%d HTTP requests", n)
 			}
 		})
