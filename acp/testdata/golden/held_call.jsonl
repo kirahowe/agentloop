@@ -1,0 +1,4 @@
+{"content":{"text":"I need to check.","type":"text"},"messageId":"a3","sessionUpdate":"agent_message_chunk"}
+{"kind":"read","name":"echo","rawInput":{"text":"hi"},"sessionUpdate":"tool_call","status":"pending","title":"echo {\"text\":\"hi\"}","toolCallId":"call_1"}
+{"sessionUpdate":"usage_update","size":200000,"used":15}
+{"error":{"code":-32603,"message":"tool calls are waiting for a decision this agent cannot ask the client for","data":{"held":[{"name":"echo","toolCallId":"call_1"}],"reason":"held"}}}

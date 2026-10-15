@@ -1,0 +1,4 @@
+{"content":{"text":"Say hi.","type":"text"},"messageId":"u2","sessionUpdate":"user_message_chunk"}
+{"content":[{"content":{"text":"Echo is switched off.","type":"text"},"type":"content"}],"kind":"read","name":"echo","rawInput":{"text":"hi"},"rawOutput":{"content":"Echo is switched off.","is_error":true},"sessionUpdate":"tool_call","status":"failed","title":"echo {\"text\":\"hi\"}","toolCallId":"call_1"}
+{"content":{"text":"I was not allowed.","type":"text"},"messageId":"a6","sessionUpdate":"agent_message_chunk"}
+{"sessionUpdate":"usage_update","size":200000,"used":15}

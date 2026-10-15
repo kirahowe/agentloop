@@ -1,0 +1,6 @@
+{"content":{"text":"Running it.","type":"text"},"messageId":"a3","sessionUpdate":"agent_message_chunk"}
+{"kind":"read","name":"echo","rawInput":{"text":"hi"},"sessionUpdate":"tool_call","status":"pending","title":"echo {\"text\":\"hi\"}","toolCallId":"call_1"}
+{"sessionUpdate":"usage_update","size":200000,"used":15}
+{"sessionUpdate":"tool_call_update","status":"in_progress","toolCallId":"call_1"}
+{"content":[{"content":{"text":"The run stopped while this call was running, so it may or may not have taken effect. It was not run again.","type":"text"},"type":"content"}],"rawOutput":{"content":"The run stopped while this call was running, so it may or may not have taken effect. It was not run again.","is_error":true},"sessionUpdate":"tool_call_update","status":"failed","toolCallId":"call_1"}
+{"stopReason":"cancelled"}

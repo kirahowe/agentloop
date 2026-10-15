@@ -1,0 +1,4 @@
+{"content":{"text":"I can't help with that.","type":"text"},"messageId":"a3","sessionUpdate":"agent_message_chunk"}
+{"content":{"text":"\n\nThe request was declined by the safety system.","type":"text"},"messageId":"a3","sessionUpdate":"agent_message_chunk"}
+{"sessionUpdate":"usage_update","size":200000,"used":15}
+{"stopReason":"refusal"}

@@ -1,0 +1,2 @@
+{"description":"invalid x-api-key","sessionUpdate":"notice","severity":"error","title":"The model call failed: unauthorized"}
+{"error":{"code":-32603,"message":"unauthorized (401): invalid x-api-key","data":{"kind":"unauthorized","message":"invalid x-api-key","status":401}}}

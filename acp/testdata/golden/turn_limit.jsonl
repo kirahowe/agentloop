@@ -1,0 +1,5 @@
+{"kind":"read","name":"echo","rawInput":{"text":"hi"},"sessionUpdate":"tool_call","status":"pending","title":"echo {\"text\":\"hi\"}","toolCallId":"call_1"}
+{"sessionUpdate":"usage_update","size":200000,"used":15}
+{"sessionUpdate":"tool_call_update","status":"in_progress","toolCallId":"call_1"}
+{"_meta":{"agentloop/labels":["read"]},"content":[{"content":{"text":"echo: hi","type":"text"},"type":"content"}],"rawOutput":{"content":"echo: hi","is_error":false},"sessionUpdate":"tool_call_update","status":"completed","toolCallId":"call_1"}
+{"stopReason":"max_turn_requests"}

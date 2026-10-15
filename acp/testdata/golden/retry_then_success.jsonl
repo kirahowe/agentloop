@@ -1,0 +1,4 @@
+{"_meta":{"agentloop/retry":{"attempt":1,"kind":"rate_limited","retry_at":"2026-10-15T09:00:15Z","status":429,"wait_ms":12000}},"description":"rate limit exceeded","sessionUpdate":"notice","severity":"warning","title":"Rate limited, retrying in 12 s"}
+{"content":{"text":"Sorry for the wait.","type":"text"},"messageId":"a4","sessionUpdate":"agent_message_chunk"}
+{"sessionUpdate":"usage_update","size":200000,"used":15}
+{"stopReason":"end_turn"}

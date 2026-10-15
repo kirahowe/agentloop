@@ -255,8 +255,11 @@ type Scenario struct {
 	cfg    Config
 	faults Faults
 	Store  *CrashStore
-	model  *fake.Model
-	clock  time.Time
+	// Observe, if set, sees every event of every run, after the
+	// scenario's own checks.
+	Observe func(agentloop.Event)
+	model   *fake.Model
+	clock   time.Time
 
 	mu          sync.Mutex
 	modelIdx    int
@@ -840,6 +843,9 @@ func (sc *Scenario) iterate(prompt string, crashAt int, after bool, cancelMode i
 	a.Observe = func(ev agentloop.Event) {
 		if ev.Entry != nil {
 			sc.checkSession(s)
+		}
+		if sc.Observe != nil {
+			sc.Observe(ev)
 		}
 	}
 	ctx, cancel := context.WithCancel(context.Background())

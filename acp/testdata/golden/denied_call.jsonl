@@ -1,0 +1,6 @@
+{"kind":"read","name":"echo","rawInput":{"text":"hi"},"sessionUpdate":"tool_call","status":"pending","title":"echo {\"text\":\"hi\"}","toolCallId":"call_1"}
+{"sessionUpdate":"usage_update","size":200000,"used":15}
+{"content":[{"content":{"text":"Echo is switched off.","type":"text"},"type":"content"}],"rawOutput":{"content":"Echo is switched off.","is_error":true},"sessionUpdate":"tool_call_update","status":"failed","toolCallId":"call_1"}
+{"content":{"text":"I was not allowed.","type":"text"},"messageId":"a6","sessionUpdate":"agent_message_chunk"}
+{"sessionUpdate":"usage_update","size":200000,"used":15}
+{"stopReason":"end_turn"}

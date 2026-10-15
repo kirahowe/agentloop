@@ -1,0 +1,4 @@
+{"content":{"text":"The user said hi.","type":"text"},"messageId":"a3","sessionUpdate":"agent_thought_chunk"}
+{"content":{"text":"Hello there.","type":"text"},"messageId":"a3","sessionUpdate":"agent_message_chunk"}
+{"sessionUpdate":"usage_update","size":200000,"used":15}
+{"stopReason":"end_turn"}

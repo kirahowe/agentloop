@@ -1,0 +1,5 @@
+{"content":{"text":"Say hi.","type":"text"},"messageId":"u2","sessionUpdate":"user_message_chunk"}
+{"content":{"text":"Let me echo that.","type":"text"},"messageId":"a3","sessionUpdate":"agent_message_chunk"}
+{"_meta":{"agentloop/labels":["read"]},"content":[{"content":{"text":"echo: hi","type":"text"},"type":"content"}],"kind":"read","name":"echo","rawInput":{"text":"hi"},"rawOutput":{"content":"echo: hi","is_error":false},"sessionUpdate":"tool_call","status":"completed","title":"echo {\"text\":\"hi\"}","toolCallId":"call_1"}
+{"content":{"text":"It said hi.","type":"text"},"messageId":"a7","sessionUpdate":"agent_message_chunk"}
+{"sessionUpdate":"usage_update","size":200000,"used":15}
