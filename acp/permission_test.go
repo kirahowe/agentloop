@@ -50,7 +50,15 @@ func TestPropertyPermissionVerdict(t *testing.T) {
 func TestPermissionRequestShowsTheWholeInput(t *testing.T) {
 	long := `{"body":"` + strings.Repeat("é‮x", 200) + `"}`
 	held := agentloop.HeldCall{ToolCall: agentloop.ToolCall{ID: "c1", Name: "post", Input: json.RawMessage(long)}}
-	req := PermissionRequest("s1", held, map[string]acp.ToolKind{"post": acp.ToolKindFetch}, []string{"contaminated", "private"})
+	sources := map[string]agentloop.LabelSource{
+		"contaminated": {Kind: agentloop.LabelTool, Tool: "slk-reviews", CallID: "c0", Seq: 9},
+		"private":      {Kind: agentloop.LabelSeed, Seq: 2},
+	}
+	req := PermissionRequest("s1", held, map[string]acp.ToolKind{"post": acp.ToolKindFetch}, []string{"contaminated", "private"}, sources)
+	want := `{"contaminated":{"kind":"tool","tool":"slk-reviews","call_id":"c0","seq":9},"private":{"kind":"seed","seq":2}}`
+	if got := string(req.ToolCall.Meta["agentloop/label_sources"]); got != want {
+		t.Fatalf("label_sources %s", got)
+	}
 	if err := req.Validate(); err != nil {
 		t.Fatal(err)
 	}

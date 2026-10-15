@@ -149,7 +149,11 @@ does the same from outside a run.
 decision entry records `input_sha256`, the SHA-256 in hex of the call's
 input as canonical JSON (keys sorted, no whitespace, no HTML escaping,
 numbers as written; `InputDigest`). The run ends with reason `held` and
-lists the held calls, each with its `input_sha256`.
+lists the held calls, each with its `input_sha256`, and `label_sources`:
+for each label the session holds, the entry that first added it, as
+`{"kind": "seed"|"prompt"|"tool", "tool", "call_id", "seq"}` (`tool` and
+`call_id` for a tool's decision or result). `Session.LabelSources` gives
+the same, so whoever decides can be told why the session holds a label.
 
 `Agent.Resolve(ctx, session, Resolution)` records the person's decision:
 a call id, `allow` or `deny`, an optional reason, and the input digest,
@@ -213,7 +217,7 @@ An `Entry` has a sequence number, a time, a type and one payload:
 | Type | Payload | Written |
 |---|---|---|
 | `run_started` | the prompt, if any | when `Run` starts |
-| `labels` | labels added from outside any call | when a run's starting labels, or `AddLabels`, add one the session lacks |
+| `labels` | labels added from outside any call, and their `source`: `seed` or `prompt` | when a run's starting labels, or `AddLabels`, add one the session lacks |
 | `message` | a `Message`, and for an assistant turn its `Stop`, `Usage` and serving model | when a user prompt is added or a response arrives |
 | `decision` | call id, tool name, verdict, reason, labels; `resolved` for a person's; `input_sha256` for a hold | when a call is checked, or when a held call is resolved |
 | `call_started` | call id | immediately before the tool runs |
@@ -303,7 +307,10 @@ A run:
 5. Writes `run_ended`.
 
 A response that repeats a tool call id, or has a call with no id, is not
-recorded: the run ends with `model_error`, kind `invalid_request`.
+recorded: the run ends with `model_error`, kind `invalid_request`. So is
+a response whose tool call input, or the provider's record of the turn,
+nests deeper than 64 levels or has a number longer than 100 characters:
+every line agentloop writes stays readable by strict JSON parsers.
 
 A call refused because the run reached `MaxToolCalls` keeps the labels its
 decision added, though it never ran. Labels err toward caution.
@@ -318,7 +325,8 @@ in order:
   the run stopped while it was running, so it may or may not have taken
   effect. It is never run again.
 - A call with no decision is checked (tool exists, input is JSON that
-  names no key twice in any object and matches the schema, policy) and the decision is recorded. A failed check is a deny
+  names no key twice in any object, nests no deeper than 64 levels, has
+  no number longer than 100 characters and matches the schema, policy) and the decision is recorded. A failed check is a deny
   with the reason. So is a call the policy allowed in an earlier run that
   never started: that allow is stale, since the session may hold more
   labels now, and the call is decided again. A person's allow stands.
@@ -426,7 +434,8 @@ a cancel is reported by the loop as for any tool.
 
 `run` writes every session entry of the run to stdout as one JSON line,
 and then a last line `{"type": "outcome", ...}` with the outcome, the
-session path and the session's `labels` when the run ended. Nothing else
+session path and the session's `labels` when the run ended (left out
+when an outcome that never opened the session cannot read it). Nothing else
 goes to stdout. For a held run the outcome's `held` lists each call as
 `{"id", "name", "input", "input_sha256"}`.
 
@@ -435,7 +444,9 @@ the decision entries it writes come first on stdout. The whole list is
 checked against the session first: a call the session does not have, a
 digest that does not match, or a call that is not held (other than one
 already resolved the same way) makes the request unusable, and nothing is
-written. `acp` refuses `resolve`.
+written. An allow the policy now denies outright (its tool is gone, say)
+is recorded as a deny with the reason "The tool is no longer allowed.",
+and the run carries on; the same allow sent again is that deny again. `acp` refuses `resolve`.
 
 It exits 0 whenever it reaches an outcome, whatever the reason. It exits 2
 when the request is unusable, before writing anything: bad JSON, an unknown
@@ -488,7 +499,8 @@ label or changes the policy.
 **Held calls.** When a run ends `held`, the server asks the client about
 each held call with `session/request_permission`: the tool call's id,
 title, name, kind, its whole input as `rawInput`, and the session's labels
-in `_meta["agentloop/labels"]`, with two options, `allow_once` and
+in `_meta["agentloop/labels"]` and their sources (as in a held outcome)
+in `_meta["agentloop/label_sources"]`, with two options, `allow_once` and
 `reject_once`. The turn waits for the answers. Only the `allow_once`
 option allows; a reject, an option that was not offered, a `cancelled`
 outcome, an error or a lost connection is a deny, recorded through

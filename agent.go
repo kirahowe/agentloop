@@ -6,6 +6,8 @@ import (
 	"errors"
 	"fmt"
 	"time"
+
+	"github.com/kirahowe/agentloop/internal/strictjson"
 )
 
 // An Agent is a model, the tools it was given and the rules around them.
@@ -102,7 +104,10 @@ type Outcome struct {
 	Text  string      `json:"text,omitempty"`
 	Error *ModelError `json:"error,omitempty"`
 	Held  []HeldCall  `json:"held,omitempty"`
-	Limit string      `json:"limit,omitempty"`
+	// LabelSources, for held, says which entry first gave the session
+	// each of its labels, so whoever decides can see why it holds them.
+	LabelSources map[string]LabelSource `json:"label_sources,omitempty"`
+	Limit        string                 `json:"limit,omitempty"`
 	// Turns and Usage count this run only.
 	Turns int   `json:"turns"`
 	Usage Usage `json:"usage"`
@@ -149,7 +154,7 @@ func (a *Agent) Run(ctx context.Context, s *Session, prompt string) (*Outcome, e
 	if err := r.record(Entry{Type: EntryRunStarted, RunStarted: &RunStartedEntry{Prompt: prompt}}); err != nil {
 		return nil, err
 	}
-	if e, err := s.AddLabels(a.Labels); err != nil {
+	if e, err := s.AddLabels(a.Labels, LabelSeed); err != nil {
 		return nil, err
 	} else if e != nil && a.Observe != nil {
 		a.Observe(Event{Entry: e})
@@ -216,7 +221,7 @@ func (r *runner) drive(ctx context.Context, prompt string) (*Outcome, error) {
 			return out, err
 		}
 		msg := keepable(resp.Message)
-		if bad := badCallID(r.s, msg); bad != "" {
+		if bad := firstBad(badCallID(r.s, msg), unbounded(msg)); bad != "" {
 			// The provider broke its own contract. Nothing of the turn is
 			// kept, and asking again would not change what it says.
 			out := r.outcome(ReasonModelError)
@@ -271,6 +276,33 @@ func (r *runner) drive(ctx context.Context, prompt string) (*Outcome, error) {
 func (r *runner) settleCutOff(ctx context.Context) error {
 	_, err := r.settle(ctx)
 	return err
+}
+
+func firstBad(problems ...string) string {
+	for _, p := range problems {
+		if p != "" {
+			return p
+		}
+	}
+	return ""
+}
+
+// unbounded says why a response cannot be written to the log, if its tool
+// calls' input or the provider's record is nested deeper, or has a longer
+// number, than strictjson allows: every line agentloop writes must stay
+// readable by strict parsers.
+func unbounded(m Message) string {
+	for _, c := range m.ToolCalls() {
+		if err := strictjson.Bounded(c.Input); err != nil {
+			return "the model returned a tool call whose input has " + err.Error()
+		}
+	}
+	if m.Native != nil && len(m.Native.Data) > 0 {
+		if err := strictjson.Bounded(m.Native.Data); err != nil {
+			return "the provider's record of the turn has " + err.Error()
+		}
+	}
+	return ""
 }
 
 // badCallID says what is wrong with the tool call ids of a message, or
@@ -443,6 +475,7 @@ func (r *runner) settleAndCheck(ctx context.Context) (*Outcome, error) {
 		for _, c := range res.held {
 			out.Held = append(out.Held, HeldCall{ToolCall: c, InputSHA256: InputDigest(c.Input)})
 		}
+		out.LabelSources = r.s.LabelSources()
 		return out, nil
 	case res.limit:
 		out := r.outcome(ReasonLimit)

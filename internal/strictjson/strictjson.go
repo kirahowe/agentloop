@@ -23,15 +23,49 @@ var rawMessage = reflect.TypeFor[json.RawMessage]()
 // check anything else (types, required fields, trailing data); decoding
 // does that.
 func Check(data []byte, t reflect.Type) error {
-	dec := json.NewDecoder(bytes.NewReader(data))
-	dec.UseNumber()
-	return walk(dec, t, "")
+	return checker{}.run(data, t)
 }
 
 // DuplicateKeys reports a key named twice in one object anywhere in data.
 func DuplicateKeys(data []byte) error { return Check(data, nil) }
 
-func walk(dec *json.Decoder, t reflect.Type, path string) error {
+// The bounds every JSON value agentloop takes from a model must keep, so
+// that every line it writes can be read by stricter parsers (Jackson, for
+// one, refuses numbers of more than 1000 digits and nesting deeper than
+// 1000).
+const (
+	MaxDepth        = 64
+	MaxNumberLength = 100
+)
+
+// Input checks a tool call's input: no key twice in one object, nesting
+// no deeper than MaxDepth, and no number literal longer than
+// MaxNumberLength characters.
+func Input(data []byte) error {
+	return checker{dups: true, depth: MaxDepth, number: MaxNumberLength}.run(data, nil)
+}
+
+// Bounded checks only the depth and number bounds of Input.
+func Bounded(data []byte) error {
+	return checker{depth: MaxDepth, number: MaxNumberLength}.run(data, nil)
+}
+
+// checker is one way of checking: the zero value checks keys only.
+type checker struct {
+	dups          bool // refuse repeated keys even where no type applies
+	depth, number int  // limits; zero means none
+}
+
+func (c checker) run(data []byte, t reflect.Type) error {
+	dec := json.NewDecoder(bytes.NewReader(data))
+	dec.UseNumber()
+	if c.depth == 0 {
+		c.dups = true
+	}
+	return c.walk(dec, t, "", 0)
+}
+
+func (c checker) walk(dec *json.Decoder, t reflect.Type, path string, depth int) error {
 	for t != nil && t.Kind() == reflect.Pointer {
 		t = t.Elem()
 	}
@@ -44,7 +78,13 @@ func walk(dec *json.Decoder, t reflect.Type, path string) error {
 	}
 	d, ok := tok.(json.Delim)
 	if !ok {
+		if n, isNum := tok.(json.Number); isNum && c.number > 0 && len(n) > c.number {
+			return fmt.Errorf("a number longer than %d characters", c.number)
+		}
 		return nil
+	}
+	if c.depth > 0 && depth+1 > c.depth {
+		return fmt.Errorf("nesting deeper than %d levels", c.depth)
 	}
 	switch d {
 	case '[':
@@ -53,7 +93,7 @@ func walk(dec *json.Decoder, t reflect.Type, path string) error {
 			elem = t.Elem()
 		}
 		for i := 0; dec.More(); i++ {
-			if err := walk(dec, elem, fmt.Sprintf("%s[%d]", path, i)); err != nil {
+			if err := c.walk(dec, elem, fmt.Sprintf("%s[%d]", path, i), depth+1); err != nil {
 				return err
 			}
 		}
@@ -77,7 +117,7 @@ func walk(dec *json.Decoder, t reflect.Type, path string) error {
 			}
 			key := tok.(string)
 			at := path + "." + key
-			if seen[key] {
+			if seen[key] && c.dups {
 				return fmt.Errorf("%s is given twice", strings.TrimPrefix(at, "."))
 			}
 			seen[key] = true
@@ -89,7 +129,7 @@ func walk(dec *json.Decoder, t reflect.Type, path string) error {
 				}
 				next = ft
 			}
-			if err := walk(dec, next, at); err != nil {
+			if err := c.walk(dec, next, at, depth+1); err != nil {
 				return err
 			}
 		}

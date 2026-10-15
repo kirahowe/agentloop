@@ -1009,6 +1009,16 @@ func (sc *Scenario) checkSession(s *agentloop.Session) {
 	eq("entries", s.Entries(), r.Entries())
 	eq("messages", s.Messages(), r.Messages())
 	eq("labels", s.Labels(), r.Labels())
+	eq("label sources", s.LabelSources(), r.LabelSources())
+	for _, l := range s.Labels() {
+		src, ok := s.LabelSources()[l]
+		if !ok || src.Seq < 1 || src.Seq > len(live) || !slices.Contains(oracleLabels(live[src.Seq-1:src.Seq]), l) {
+			t.Fatalf("label %s has source %+v, which did not add it", l, src)
+		}
+		if slices.Contains(oracleLabels(live[:src.Seq-1]), l) {
+			t.Fatalf("label %s was held before its source %+v", l, src)
+		}
+	}
 	eq("usage", s.Usage(), r.Usage())
 	eq("held", s.Held(), r.Held())
 	eq("pending", s.Pending(), r.Pending())

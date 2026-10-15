@@ -17,7 +17,6 @@ import (
 
 	"github.com/kirahowe/agentloop"
 	"github.com/kirahowe/agentloop/internal/sessionfile"
-	"github.com/kirahowe/agentloop/trifecta"
 )
 
 // Server is the imperative shell: it serves one ACP connection, keeps the
@@ -263,7 +262,7 @@ func (s *Server) seed(sess *agentloop.Session) error {
 	if s.cfg.Agent == nil {
 		return nil
 	}
-	_, err := sess.AddLabels(s.cfg.Agent.Labels)
+	_, err := sess.AddLabels(s.cfg.Agent.Labels, agentloop.LabelSeed)
 	return err
 }
 
@@ -610,7 +609,6 @@ func (s *Server) start(ss *session, prompt string, labels []string) {
 	ctx, cancel := context.WithCancel(context.Background())
 	ss.cancel = cancel
 	agent := *s.cfg.Agent
-	agent.Labels = trifecta.Union(agent.Labels, labels)
 	observe := agent.Observe
 	added := false // the prompt is in the conversation
 	agent.Observe = func(ev agentloop.Event) {
@@ -635,8 +633,11 @@ func (s *Server) start(ss *session, prompt string, labels []string) {
 	go func() {
 		defer s.runs.Done()
 		var out *agentloop.Outcome
-		var err error
-		for {
+		e, err := ss.sess.AddLabels(labels, agentloop.LabelPrompt)
+		if e != nil {
+			agent.Observe(agentloop.Event{Entry: e})
+		}
+		for err == nil {
 			p := prompt
 			if added {
 				p = ""
@@ -667,7 +668,7 @@ func (s *Server) ask(ctx context.Context, ss *session, agent *agentloop.Agent, h
 	for _, h := range held {
 		verdict := agentloop.Deny
 		if ss.conn != nil && ctx.Err() == nil {
-			req := PermissionRequest(ss.id, h, s.cfg.Options.Kinds, ss.sess.Labels())
+			req := PermissionRequest(ss.id, h, s.cfg.Options.Kinds, ss.sess.Labels(), ss.sess.LabelSources())
 			resp, err := ss.conn.RequestPermission(ctx, req)
 			verdict = PermissionVerdict(resp, err, ctx.Err() != nil)
 		}

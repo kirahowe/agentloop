@@ -3,6 +3,7 @@ package agentloop
 import (
 	"encoding/json"
 	"fmt"
+	"maps"
 	"slices"
 	"sort"
 	"sync"
@@ -21,6 +22,7 @@ type Session struct {
 	entries  []Entry
 	messages []Message
 	labels   map[string]bool
+	sources  map[string]LabelSource
 	usage    Usage
 	calls    map[string]*callState
 	turns    []Turn
@@ -71,9 +73,10 @@ func OpenSession(store Store) (*Session, error) {
 		return nil, err
 	}
 	s := &Session{
-		store:  store,
-		labels: map[string]bool{},
-		calls:  map[string]*callState{},
+		store:   store,
+		labels:  map[string]bool{},
+		sources: map[string]LabelSource{},
+		calls:   map[string]*callState{},
 	}
 	for i, e := range entries {
 		if e.Seq != i+1 {
@@ -208,10 +211,40 @@ func (s *Session) Resolve(callID string, d Decision) error {
 	return err
 }
 
-// AddLabels adds labels to the session from outside any call, such as an
-// agent's starting labels. It writes an entry only when one of them is
-// new, and returns the entry it wrote, if any.
-func (s *Session) AddLabels(labels []string) (*Entry, error) {
+// Where a label can come from, other than a tool call.
+const (
+	// LabelSeed: the agent's starting labels.
+	LabelSeed = "seed"
+	// LabelPrompt: what a prompt's content brought in.
+	LabelPrompt = "prompt"
+	// LabelTool: a tool call's decision or result.
+	LabelTool = "tool"
+)
+
+// A LabelSource is the entry that first gave the session a label, so a
+// person can be told why the session holds it.
+type LabelSource struct {
+	// Kind is LabelSeed, LabelPrompt or LabelTool.
+	Kind string `json:"kind"`
+	// Tool and CallID name the call, for LabelTool.
+	Tool   string `json:"tool,omitempty"`
+	CallID string `json:"call_id,omitempty"`
+	// Seq is the entry's sequence number.
+	Seq int `json:"seq"`
+}
+
+// LabelSources gives, for each label the session holds, the entry that
+// first added it.
+func (s *Session) LabelSources() map[string]LabelSource {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return maps.Clone(s.sources)
+}
+
+// AddLabels adds labels to the session from outside any call, from
+// source (LabelSeed or LabelPrompt). It writes an entry only when one of
+// them is new, and returns the entry it wrote, if any.
+func (s *Session) AddLabels(labels []string, source string) (*Entry, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	var fresh []string
@@ -224,7 +257,7 @@ func (s *Session) AddLabels(labels []string) (*Entry, error) {
 		return nil, nil
 	}
 	sort.Strings(fresh)
-	e, err := s.appendLocked(Entry{Type: EntryLabels, Labels: &LabelsEntry{Labels: fresh}})
+	e, err := s.appendLocked(Entry{Type: EntryLabels, Labels: &LabelsEntry{Labels: fresh, Source: source}})
 	if err != nil {
 		return nil, err
 	}
@@ -395,7 +428,11 @@ func (s *Session) mutate(e Entry) {
 	s.entries = append(s.entries, e)
 	switch e.Type {
 	case EntryLabels:
-		s.addLabels(e.Labels.Labels)
+		kind := e.Labels.Source
+		if kind == "" {
+			kind = LabelSeed
+		}
+		s.addLabels(e.Labels.Labels, LabelSource{Kind: kind, Seq: e.Seq})
 	case EntryMessage:
 		m := e.Message
 		s.messages = append(s.messages, m.Message)
@@ -421,7 +458,7 @@ func (s *Session) mutate(e Entry) {
 		st.info.Decision = &Decision{Verdict: d.Verdict, Reason: d.Reason, Labels: d.Labels}
 		st.info.Resolved = d.Resolved
 		if d.Verdict == Allow {
-			s.addLabels(d.Labels)
+			s.addLabels(d.Labels, LabelSource{Kind: LabelTool, Tool: d.Tool, CallID: d.CallID, Seq: e.Seq})
 		}
 	case EntryCallStarted:
 		s.calls[e.CallStarted.CallID].info.Started = true
@@ -431,7 +468,7 @@ func (s *Session) mutate(e Entry) {
 		res := r.Result
 		st.info.Finished = true
 		st.info.Result = &res
-		s.addLabels(r.Labels)
+		s.addLabels(r.Labels, LabelSource{Kind: LabelTool, Tool: st.info.Call.Name, CallID: res.CallID, Seq: e.Seq})
 		s.placeResult(st, res)
 	}
 }
@@ -481,8 +518,11 @@ func isResultMessage(m Message) bool {
 	return true
 }
 
-func (s *Session) addLabels(labels []string) {
+func (s *Session) addLabels(labels []string, src LabelSource) {
 	for _, l := range labels {
+		if !s.labels[l] {
+			s.sources[l] = src
+		}
 		s.labels[l] = true
 	}
 }

@@ -144,9 +144,11 @@ func (tb *toolbox) check(name string, input json.RawMessage) string {
 		return fmt.Sprintf("The input to %s is not valid JSON: %v", name, err)
 	}
 	// A key given twice means different things to different readers (the
-	// schema, the digest a person approves, the tool), so it is refused.
-	if err := strictjson.DuplicateKeys(input); err != nil {
-		return fmt.Sprintf("The input to %s is not valid: %v", name, err)
+	// schema, the digest a person approves, the tool), so it is refused;
+	// so is input nested too deep or with a number too long for a strict
+	// reader of the log.
+	if err := strictjson.Input(input); err != nil {
+		return fmt.Sprintf("The input to %s is not acceptable: %v.", name, err)
 	}
 	if err := schema.Validate(v); err != nil {
 		return fmt.Sprintf("The input to %s does not match its schema: %v", name, err)

@@ -63,6 +63,8 @@ type RunStartedEntry struct {
 // an agent's starting labels, or what a client's prompt brought in.
 type LabelsEntry struct {
 	Labels []string `json:"labels"`
+	// Source says where they came from: LabelSeed or LabelPrompt.
+	Source string `json:"source,omitempty"`
 }
 
 // MessageEntry records a message joining the conversation. For an

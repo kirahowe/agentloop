@@ -3,6 +3,7 @@ package strictjson
 import (
 	"encoding/json"
 	"reflect"
+	"strings"
 	"testing"
 
 	"pgregory.net/rapid"
@@ -74,4 +75,37 @@ func TestPropertyDuplicateKeys(t *testing.T) {
 			t.Fatalf("%s: %v", b, err)
 		}
 	})
+}
+
+func TestInputBounds(t *testing.T) {
+	nest := func(n int) []byte {
+		b := []byte{}
+		for range n {
+			b = append(b, '[')
+		}
+		for range n {
+			b = append(b, ']')
+		}
+		return b
+	}
+	num := func(n int) []byte {
+		b := []byte(`{"n":`)
+		for range n {
+			b = append(b, '9')
+		}
+		return append(b, '}')
+	}
+	for _, ok := range [][]byte{nest(MaxDepth), num(MaxNumberLength), []byte(`{"a":{"b":[1,2.5e10,"` + strings.Repeat("9", 500) + `"]}}`)} {
+		if err := Input(ok); err != nil {
+			t.Errorf("%.40s: %v", ok, err)
+		}
+	}
+	for _, bad := range [][]byte{nest(MaxDepth + 1), nest(1001), num(MaxNumberLength + 1), num(1001), []byte(`{"a":1,"a":2}`)} {
+		if Input(bad) == nil {
+			t.Errorf("%.40s passed", bad)
+		}
+	}
+	if Bounded([]byte(`{"a":1,"a":2}`)) != nil || Bounded(nest(MaxDepth+1)) == nil {
+		t.Error("Bounded checks keys, or not depth")
+	}
 }

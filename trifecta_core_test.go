@@ -312,3 +312,71 @@ func TestResolveAllowNeedsAPolicyThatDoesNotDeny(t *testing.T) {
 		t.Fatal("an empty session is policed")
 	}
 }
+
+// Each label's source is the entry that first added it, as the log says.
+func TestLabelSources(t *testing.T) {
+	tool := &callTool{spec: agentloop.ToolSpec{Name: "reviews"}, res: agentloop.Result{Content: "x", Labels: []string{"contaminated"}}}
+	a := &agentloop.Agent{
+		Model:  fake.Script(fake.ToolUse("", fake.Call("c1", "reviews", `{}`)), fake.Text("done")),
+		Tools:  []agentloop.Tool{tool},
+		Labels: []string{"private"},
+	}
+	store := agentloop.NewMemoryStore()
+	s := reopen(t, store)
+	wantReason(t, run(t, a, s, "go"), agentloop.ReasonCompleted)
+	if _, err := s.AddLabels([]string{"private", "prompt-only"}, agentloop.LabelPrompt); err != nil {
+		t.Fatal(err)
+	}
+	got := reopen(t, store).LabelSources()
+	if got["private"].Kind != agentloop.LabelSeed || got["prompt-only"].Kind != agentloop.LabelPrompt {
+		t.Fatalf("%+v", got)
+	}
+	if c := got["contaminated"]; c.Kind != agentloop.LabelTool || c.Tool != "reviews" || c.CallID != "c1" {
+		t.Fatalf("%+v", got)
+	}
+}
+
+// Regression: input a stricter parser (relay's Jackson) cannot read, too
+// deep or with too long a number, is denied before the policy sees it;
+// and a response whose input or provider record is beyond the bounds is
+// not written to the log at all.
+func TestUnboundedInput(t *testing.T) {
+	deep := strings.Repeat(`{"a":`, 65) + "1" + strings.Repeat("}", 65)
+	long := `{"n":` + strings.Repeat("9", 101) + `}`
+	c := newCounter()
+	asked := 0
+	policy := agentloop.PolicyFunc(func(context.Context, agentloop.ToolCall, agentloop.View) agentloop.Decision {
+		asked++
+		return agentloop.Decision{Verdict: agentloop.Allow}
+	})
+	any := agentloop.Func(agentloop.ToolSpec{Name: "any"}, func(context.Context, json.RawMessage) (agentloop.Result, error) {
+		c.hit("any")
+		return agentloop.Result{Content: "ok"}, nil
+	})
+	// A response with such input is refused whole.
+	for _, in := range []string{deep, long} {
+		s, _ := newSession(t)
+		a := &agentloop.Agent{Model: fake.Script(fake.ToolUse("", fake.Call("a", "any", in))), Tools: []agentloop.Tool{any}, Policy: policy}
+		out := run(t, a, s, "go")
+		wantReason(t, out, agentloop.ReasonModelError)
+		for _, e := range s.Entries() {
+			if b, _ := json.Marshal(e); strings.Contains(string(b), "999999999") || strings.Count(string(b), `{"a":`) > 64 {
+				t.Fatalf("the input reached the log: %s", b)
+			}
+		}
+	}
+	// One already in a log (written before these bounds) is denied.
+	store := seqStore(
+		agentloop.Entry{Type: agentloop.EntryMessage, Message: &agentloop.MessageEntry{Message: agentloop.Text(agentloop.User, "go")}},
+		agentloop.Entry{Type: agentloop.EntryMessage, Message: &agentloop.MessageEntry{
+			Message: fake.ToolUse("", fake.Call("a", "any", deep), fake.Call("b", "any", long)).Message, Stop: agentloop.StopToolUse,
+		}},
+	)
+	s := reopen(t, store)
+	a := &agentloop.Agent{Model: fake.Script(fake.Text("done")), Tools: []agentloop.Tool{any}, Policy: policy}
+	wantReason(t, run(t, a, s, ""), agentloop.ReasonCompleted)
+	res := resultsOf(s.Messages())
+	if asked != 0 || c.all() != 0 || !strings.Contains(res["a"].Content, "nesting deeper than 64") || !strings.Contains(res["b"].Content, "longer than 100") {
+		t.Fatalf("asked %d ran %d results %+v", asked, c.all(), res)
+	}
+}

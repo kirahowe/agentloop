@@ -1,6 +1,8 @@
 package acpagent
 
 import (
+	"encoding/json"
+
 	acp "github.com/caelis-labs/acp-go-sdk"
 
 	"github.com/kirahowe/agentloop"
@@ -18,12 +20,18 @@ const (
 )
 
 // PermissionRequest asks the client about one held call: the tool, its
-// kind, a title, the whole input as rawInput (never cut short), and the
-// session's labels under _meta["agentloop/labels"].
-func PermissionRequest(id acp.SessionId, held agentloop.HeldCall, kinds map[string]acp.ToolKind, labels []string) acp.RequestPermissionRequest {
+// kind, a title, the whole input as rawInput (never cut short), the
+// session's labels under _meta["agentloop/labels"], and where each came
+// from under _meta["agentloop/label_sources"].
+func PermissionRequest(id acp.SessionId, held agentloop.HeldCall, kinds map[string]acp.ToolKind, labels []string, sources map[string]agentloop.LabelSource) acp.RequestPermissionRequest {
 	c := held.ToolCall
 	kind := Kind(c.Name, kinds)
 	status := acp.ToolCallStatusPending
+	meta := labelsMeta(labels)
+	if sources == nil {
+		sources = map[string]agentloop.LabelSource{}
+	}
+	meta["agentloop/label_sources"], _ = json.Marshal(sources)
 	return acp.RequestPermissionRequest{
 		SessionId: id,
 		Options: []acp.PermissionOption{
@@ -37,7 +45,7 @@ func PermissionRequest(id acp.SessionId, held agentloop.HeldCall, kinds map[stri
 			Kind:       &kind,
 			Status:     &status,
 			RawInput:   rawJSON(c.Input),
-			Meta:       labelsMeta(labels),
+			Meta:       meta,
 		},
 	}
 }
