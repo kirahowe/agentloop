@@ -461,11 +461,30 @@ func (t guardTool) Call(ctx context.Context, in json.RawMessage) (res agentloop.
 	return t.Tool.Call(ctx, in)
 }
 
+type guardCallTool struct {
+	guardTool
+	ct agentloop.CallTool
+}
+
+func (t guardCallTool) CallWith(ctx context.Context, c agentloop.Call) (res agentloop.Result, err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			t.g.catch(r)
+			res, err = agentloop.Result{}, errors.New("the test failed")
+		}
+	}()
+	return t.ct.CallWith(ctx, c)
+}
+
 func (g *guard) agent(a *agentloop.Agent) *agentloop.Agent {
 	b := *a
 	b.Model = guardModel{a.Model, g}
 	b.Tools = nil
 	for _, t := range a.Tools {
+		if ct, ok := t.(agentloop.CallTool); ok {
+			b.Tools = append(b.Tools, guardCallTool{guardTool{t, g}, ct})
+			continue
+		}
 		b.Tools = append(b.Tools, guardTool{t, g})
 	}
 	if p := a.Policy; p != nil {
@@ -517,8 +536,9 @@ func checkReplay(t *rapid.T, h *harness, mark int, id acp.SessionId, opts Option
 // a session file. A fresh server loads it, which replays exactly that
 // log, and the conversation is then driven over ACP alone, one prompt at
 // a time, as the core harness drains it: every prompt is answered with
-// Respond of its run's outcome, and the conversation completes unless a
-// call is left held (deciding held calls needs Phase A6). Throughout, the
+// Respond of its run's outcome, and the conversation completes. The
+// client answers every question about a held call with cancelled, which
+// denies it. Throughout, the
 // scenario's own checks hold for every model call, policy decision and
 // tool run the server makes, and at rest the log reloads to the same
 // state, kept everything persisted before, ran no call twice, and

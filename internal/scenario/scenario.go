@@ -14,6 +14,7 @@ import (
 	"fmt"
 	"os"
 	"reflect"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -23,6 +24,7 @@ import (
 
 	"github.com/kirahowe/agentloop"
 	"github.com/kirahowe/agentloop/fake"
+	"github.com/kirahowe/agentloop/trifecta"
 )
 
 var ErrCrash = errors.New("simulated crash")
@@ -36,6 +38,11 @@ type CrashStore struct {
 	crashAt int
 	after   bool
 	dead    bool
+	// atDecision, when set, makes crashAt count decision entries only,
+	// and the crash comes just after one is durable: the window between
+	// a call being allowed and it starting.
+	atDecision bool
+	decisions  int
 }
 
 func (c *CrashStore) Load() ([]agentloop.Entry, error) {
@@ -63,6 +70,18 @@ func (c *CrashStore) Append(e agentloop.Entry) error {
 		return ErrCrash
 	}
 	c.appends++
+	if c.atDecision {
+		if e.Type == agentloop.EntryDecision {
+			c.decisions++
+			if c.crashAt > 0 && c.decisions == c.crashAt {
+				c.dead = true
+				c.lines = append(c.lines, b)
+				return ErrCrash
+			}
+		}
+		c.lines = append(c.lines, b)
+		return nil
+	}
 	if c.crashAt > 0 && c.appends == c.crashAt {
 		c.dead = true
 		if c.after {
@@ -80,6 +99,7 @@ func (c *CrashStore) arm(n int, after bool) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.dead, c.appends, c.crashAt, c.after = false, 0, n, after
+	c.atDecision, c.decisions = false, 0
 }
 
 func (c *CrashStore) Snapshot() [][]byte {
@@ -209,6 +229,32 @@ type Config struct {
 	ToolTimeout time.Duration
 	Iterations  int
 	Wild        bool
+	// Trifecta runs the scenario under trifecta.Policy: Policy gives each
+	// tool its class, labels and always_hold, the tools are CallTools
+	// whose results carry only the trifecta's labels, each run starts
+	// with random seed labels, and holds are resolved through
+	// Agent.Resolve. Rules and NilPolicy are then unused.
+	Trifecta bool
+	Policy   map[string]trifecta.Tool
+}
+
+// GenTrifecta makes a scenario for the trifecta's invariants.
+func GenTrifecta(t *rapid.T) Config {
+	c := GenConfig(t)
+	c.Trifecta, c.NilPolicy = true, false
+	c.Policy = map[string]trifecta.Tool{}
+	labels := rapid.SliceOfN(rapid.SampledFrom(trifecta.Labels), 0, 2)
+	for _, n := range []string{"echo", "any", "lab"} {
+		c.Policy[n] = trifecta.Tool{
+			Class:      rapid.SampledFrom(trifecta.Classes).Draw(t, "class"),
+			Labels:     labels.Draw(t, "static"),
+			AlwaysHold: rapid.IntRange(0, 2).Draw(t, "alwayshold") == 0,
+		}
+		b := c.Behaviors[n]
+		b.Labels = labels.Draw(t, "dynamic")
+		c.Behaviors[n] = b
+	}
+	return c
 }
 
 func GenConfig(t *rapid.T) Config {
@@ -278,6 +324,10 @@ type Scenario struct {
 	prevSeen    []string // labels seen at the last check
 	resolveAll  bool     // the drain phase approves held calls
 	draining    bool
+	seeds       []string // the starting labels of the next run
+	// crashAtDecision makes the next iteration's crash count decisions.
+	crashAtDecision bool
+	applied         []string // every seed a run is known to have applied
 }
 
 func New(t *rapid.T, cfg Config, f Faults) *Scenario {
@@ -515,6 +565,9 @@ func assistants(msgs []agentloop.Message) []agentloop.Message {
 // made, unchanged.
 func (sc *Scenario) checkRequest(req *agentloop.Request) {
 	t := sc.t
+	if sc.cfg.Trifecta {
+		sc.checkSeen(req)
+	}
 	msgs := req.Messages
 	if len(msgs) == 0 || msgs[0].Role != agentloop.User {
 		t.Fatalf("the first message is not from the user: %+v", msgs)
@@ -633,11 +686,125 @@ func (sc *Scenario) tools() []agentloop.Tool {
 		case "lab":
 			spec.Parameters = json.RawMessage(`{"type":"object","properties":{"text":{"type":"string"}},"required":["text"]}`)
 		}
+		if sc.cfg.Trifecta {
+			out = append(out, callTool{spec, func(ctx context.Context, c agentloop.Call) (agentloop.Result, error) {
+				sc.checkCall(name, c)
+				return sc.callTool(ctx, name, c.Input)
+			}})
+			continue
+		}
 		out = append(out, agentloop.Func(spec, func(ctx context.Context, in json.RawMessage) (agentloop.Result, error) {
 			return sc.callTool(ctx, name, in)
 		}))
 	}
 	return out
+}
+
+type callTool struct {
+	spec agentloop.ToolSpec
+	call func(context.Context, agentloop.Call) (agentloop.Result, error)
+}
+
+func (c callTool) Spec() agentloop.ToolSpec { return c.spec }
+func (c callTool) Call(ctx context.Context, in json.RawMessage) (agentloop.Result, error) {
+	panic("a CallTool is called through CallWith")
+}
+func (c callTool) CallWith(ctx context.Context, call agentloop.Call) (agentloop.Result, error) {
+	return c.call(ctx, call)
+}
+
+// checkCall holds the trifecta's invariants as a call reaches its tool,
+// from the persisted log alone:
+//
+//   - an egress call runs while the session holds both private and
+//     contaminated, or an act call while it holds contaminated, or an
+//     always_hold call at all, only if a person resolved it allow. The
+//     labels counted are all the session holds as the call runs, but for
+//     those the call's own decision added, so this holds at decision and
+//     also covers a decision gone stale before its call ran;
+//   - the labels the tool is given (its stdin envelope) hold every label
+//     the session had when the call was decided, and the call's own
+//     static labels.
+func (sc *Scenario) checkCall(name string, c agentloop.Call) {
+	t := sc.t
+	es := sc.entries()
+	at := -1
+	for i, e := range es {
+		if e.Type == agentloop.EntryDecision && e.Decision.CallID == c.ID {
+			at = i
+		}
+	}
+	if at < 0 {
+		t.Fatalf("call %s runs with no decision", c.ID)
+	}
+	d := es[at].Decision
+	// What the session holds as the call runs, but for what the call's own
+	// decision added: a label that arrived after the decision (a seed of
+	// a later run, say) counts as much as one before it.
+	before := oracleLabels(slices.Delete(slices.Clone(es), at, at+1))
+	pol := sc.cfg.Policy[name]
+	if !d.Resolved {
+		has := func(l string) bool { return slices.Contains(before, l) }
+		switch {
+		case pol.AlwaysHold:
+			t.Fatalf("always_hold call %s ran without a person", c.ID)
+		case pol.Class == trifecta.Egress && has(trifecta.Private) && has(trifecta.Contaminated):
+			t.Fatalf("egress call %s ran on a private, contaminated session (%v) without a person", c.ID, before)
+		case pol.Class == trifecta.Act && has(trifecta.Contaminated):
+			t.Fatalf("act call %s ran on a contaminated session (%v) without a person", c.ID, before)
+		}
+	} else if d.Verdict != agentloop.Allow {
+		t.Fatalf("call %s runs on a person's %s", c.ID, d.Verdict)
+	}
+	for _, l := range append(oracleLabels(es[:at+1]), pol.Labels...) {
+		if !slices.Contains(c.Labels, l) {
+			t.Fatalf("call %s was given labels %v, missing %s", c.ID, c.Labels, l)
+		}
+	}
+	if !reflect.DeepEqual(append([]string{}, c.Labels...), oracleLabels(es)) {
+		t.Fatalf("call %s was given labels %v, the session holds %v", c.ID, c.Labels, oracleLabels(es))
+	}
+}
+
+// checkSeen holds that every piece of tool output the model is shown came
+// into the session with its labels: the tool's static labels, for any
+// result of a call that was allowed (errors, timeouts and cut-off runs
+// included), and its result's labels, for a result the tool produced.
+func (sc *Scenario) checkSeen(req *agentloop.Request) {
+	t := sc.t
+	labels := oracleLabels(sc.entries())
+	names := map[string]string{}
+	for _, m := range req.Messages {
+		for _, c := range m.ToolCalls() {
+			names[c.ID] = c.Name
+		}
+	}
+	allowed := map[string]bool{}
+	for _, e := range sc.entries() {
+		if e.Type == agentloop.EntryDecision && e.Decision.Verdict == agentloop.Allow {
+			allowed[e.Decision.CallID] = true
+		}
+	}
+	for _, m := range req.Messages {
+		for _, p := range m.Parts {
+			if p.ToolResult == nil {
+				continue
+			}
+			id := p.ToolResult.CallID
+			var want []string
+			if allowed[id] {
+				want = append(want, sc.cfg.Policy[names[id]].Labels...)
+			}
+			if strings.Contains(p.ToolResult.Content, ":"+id) {
+				want = append(want, sc.cfg.Behaviors[names[id]].Labels...)
+			}
+			for _, l := range want {
+				if !slices.Contains(labels, l) {
+					t.Fatalf("the model sees the result of %s without the label %s (session %v)", id, l, labels)
+				}
+			}
+		}
+	}
 }
 
 // callTool is where properties 1 and 2 are checked, from the persisted log
@@ -719,6 +886,20 @@ func (sc *Scenario) callTool(ctx context.Context, name string, in json.RawMessag
 // ---- policy ----
 
 func (sc *Scenario) policy() agentloop.Policy {
+	if sc.cfg.Trifecta {
+		inner := trifecta.Policy{Tools: sc.cfg.Policy}
+		return agentloop.PolicyFunc(func(ctx context.Context, call agentloop.ToolCall, v agentloop.View) agentloop.Decision {
+			if want := oracleLabels(sc.entries()); !reflect.DeepEqual(append([]string{}, v.Labels...), want) {
+				sc.t.Fatalf("the policy saw labels %v, the log holds %v", v.Labels, want)
+			}
+			d := inner.Decide(ctx, call, v)
+			sc.handed = append(sc.handed, d.Labels)
+			sc.mu.Lock()
+			sc.asked[call.ID] = d.Verdict
+			sc.mu.Unlock()
+			return d
+		})
+	}
 	if sc.cfg.NilPolicy {
 		return nil
 	}
@@ -853,6 +1034,11 @@ func (sc *Scenario) checkSession(s *agentloop.Session) {
 	}
 	sc.prevSeen = labels
 	eq("labels vs oracle", append([]string{}, labels...), oracleLabels(sc.entries()))
+	for _, l := range sc.applied {
+		if !slices.Contains(labels, l) {
+			t.Fatalf("the seed label %s was lost: %v", l, labels)
+		}
+	}
 }
 
 // ---- driving ----
@@ -863,6 +1049,7 @@ func (sc *Scenario) agent() *agentloop.Agent {
 		ModelID:     "fake-model",
 		System:      "sys",
 		Tools:       sc.tools(),
+		Labels:      slices.Clone(sc.seeds),
 		Policy:      sc.policy(),
 		Limits:      sc.cfg.Limits,
 		Retry:       sc.cfg.Retry,
@@ -897,6 +1084,9 @@ func (sc *Scenario) open() *agentloop.Session {
 func (sc *Scenario) iterate(prompt string, crashAt int, after bool, cancelMode int) *agentloop.Outcome {
 	t := sc.t
 	s := sc.open()
+	if sc.cfg.Trifecta {
+		sc.seeds = rapid.SliceOfN(rapid.SampledFrom(trifecta.Labels), 0, 2).Draw(t, "seeds")
+	}
 	a := sc.agent()
 	a.Observe = func(ev agentloop.Event) {
 		if ev.Entry != nil {
@@ -917,6 +1107,7 @@ func (sc *Scenario) iterate(prompt string, crashAt int, after bool, cancelMode i
 		sc.cancel = cancel
 	}
 	sc.Store.arm(crashAt, after)
+	sc.Store.atDecision = sc.crashAtDecision
 	out, err := a.Run(ctx, s, prompt)
 	sc.Store.arm(0, false)
 	// The armed cancel belongs to this run. Left set, it would make the
@@ -930,6 +1121,7 @@ func (sc *Scenario) iterate(prompt string, crashAt int, after bool, cancelMode i
 		}
 		return nil
 	}
+	sc.applied = trifecta.Union(sc.applied, sc.seeds)
 	sc.checkRun(s, a, out, prompt)
 	// A caller may do what it likes with what it was handed; the session
 	// must not notice.
@@ -1222,6 +1414,10 @@ func (sc *Scenario) resolveHeld(s *agentloop.Session, held []agentloop.ToolCall,
 		if choice == 1 {
 			d = agentloop.Decision{Verdict: agentloop.Deny, Reason: "no by person"}
 		}
+		if sc.cfg.Trifecta {
+			sc.resolveTrifecta(s, c, d)
+			continue
+		}
 		d.Labels = append([]string(nil), genLabels().Draw(t, "resolvelabels")...)
 		sc.handed = append(sc.handed, d.Labels)
 		if err := s.Resolve(c.ID, d); err != nil {
@@ -1235,6 +1431,38 @@ func (sc *Scenario) resolveHeld(s *agentloop.Session, held []agentloop.ToolCall,
 		if err := s.Resolve(c.ID, d); err == nil {
 			t.Fatalf("resolving %s twice succeeded", c.ID)
 		}
+	}
+}
+
+// resolveTrifecta resolves a held call through Agent.Resolve, as a
+// person's tooling does: by verdict and input digest, never labels. A
+// wrong digest is refused, and a repeat changes nothing.
+func (sc *Scenario) resolveTrifecta(s *agentloop.Session, c agentloop.ToolCall, d agentloop.Decision) {
+	t := sc.t
+	a := sc.agent()
+	a.Observe = sc.Observe
+	r := agentloop.Resolution{CallID: c.ID, Verdict: d.Verdict, Reason: d.Reason, InputSHA256: agentloop.InputDigest(c.Input)}
+	wrong := r
+	wrong.InputSHA256 = agentloop.InputDigest(json.RawMessage(`{"other":true}`))
+	if err := a.Resolve(context.Background(), s, wrong); err == nil {
+		t.Fatalf("resolved %s with the wrong digest", c.ID)
+	}
+	if err := a.Resolve(context.Background(), s, r); err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+	es := s.Entries()
+	last := es[len(es)-1].Decision
+	want := []string(nil)
+	if d.Verdict == agentloop.Allow {
+		want = sc.cfg.Policy[c.Name].Labels
+	}
+	if last == nil || !last.Resolved || !reflect.DeepEqual(append([]string{}, last.Labels...), append([]string{}, want...)) {
+		t.Fatalf("resolution of %s recorded %+v, want labels %v", c.ID, last, want)
+	}
+	sc.checkSession(s)
+	n := len(s.Entries())
+	if err := a.Resolve(context.Background(), s, r); err != nil || len(s.Entries()) != n {
+		t.Fatalf("repeating the resolution of %s: %v", c.ID, err)
 	}
 }
 
@@ -1384,10 +1612,16 @@ func (sc *Scenario) Faulty() {
 	for i := 0; i < sc.cfg.Iterations; i++ {
 		crashAt, cancelMode := 0, 0
 		after := false
+		atDecision := false
 		if sc.faults.Crash && rapid.IntRange(0, 2).Draw(t, "crash?") > 0 {
 			crashAt = rapid.IntRange(1, 25).Draw(t, "crashAt")
 			after = rapid.Bool().Draw(t, "crashAfter")
+			if sc.cfg.Trifecta && rapid.Bool().Draw(t, "atDecision") {
+				crashAt = rapid.IntRange(1, 3).Draw(t, "crashAtDecision")
+				atDecision = true
+			}
 		}
+		sc.crashAtDecision = atDecision
 		if sc.faults.Cancel {
 			cancelMode = rapid.SampledFrom([]int{0, 0, 1, 2, 2}).Draw(t, "cancelMode")
 		}
