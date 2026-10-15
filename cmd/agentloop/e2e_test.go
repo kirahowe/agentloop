@@ -49,6 +49,9 @@ type fakeAPI struct {
 func newFakeAPI(t *testing.T, replies ...func(http.ResponseWriter)) *fakeAPI {
 	f := &fakeAPI{replies: replies}
 	f.Server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if serveModel(w, r) {
+			return
+		}
 		b, _ := io.ReadAll(r.Body)
 		f.mu.Lock()
 		n := len(f.bodies)
@@ -64,6 +67,27 @@ func newFakeAPI(t *testing.T, replies ...func(http.ResponseWriter)) *fakeAPI {
 	return f
 }
 
+// The fake Models API describes every model with this window, a number
+// no test request names, so a usage size that matches it came from here.
+const (
+	fakeWindow      = 987654
+	fakeDisplayName = "Claude Test"
+)
+
+// serveModel answers GET /v1/models/{id} as the Models API does, and
+// reports whether the request was one.
+func serveModel(w http.ResponseWriter, r *http.Request) bool {
+	id, ok := strings.CutPrefix(r.URL.Path, "/v1/models/")
+	if r.Method != http.MethodGet || !ok {
+		return false
+	}
+	w.Header().Set("Content-Type", "application/json")
+	fmt.Fprintf(w, `{"type":"model","id":%q,"display_name":%q,"created_at":"2026-01-01T00:00:00Z","max_input_tokens":%d,"max_tokens":64000,"capabilities":{}}`,
+		id, fakeDisplayName, fakeWindow)
+	return true
+}
+
+// requests are the bodies of the Messages API requests, in order.
 func (f *fakeAPI) requests() []string {
 	f.mu.Lock()
 	defer f.mu.Unlock()

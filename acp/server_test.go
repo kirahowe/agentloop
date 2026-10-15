@@ -151,6 +151,13 @@ func serve(t testing.TB, agent *agentloop.Agent, opts Options, notices bool) *ha
 func serveIn(t tb, dir string, agent *agentloop.Agent, opts Options, notices bool) *harness {
 	t.Helper()
 	h := &harness{t: t, dir: dir, log: &bytes.Buffer{}, logMu: &sync.Mutex{}, cl: &testClient{}}
+	if opts.ContextWindow > 0 {
+		// The window comes from the model's description, never from the
+		// options, so a window the test asks for is the model's.
+		a := *agent
+		a.Model = describedModel{a.Model, agentloop.ModelInfo{ID: a.ModelID, ContextWindow: opts.ContextWindow}, nil}
+		agent = &a
+	}
 	h.srv = NewServer(Config{Version: "test", SessionDir: h.dir, Agent: agent, Options: opts,
 		Log: lockedWriter{h.logMu, h.log}})
 	aR, aW := io.Pipe() // client to agent
@@ -612,4 +619,16 @@ func TestShutdownCancelsAndReleases(t *testing.T) {
 	if err == nil {
 		t.Fatal("a new session after shutdown")
 	}
+}
+
+// describedModel is a model whose provider describes it as info, or fails
+// with err.
+type describedModel struct {
+	agentloop.Model
+	info agentloop.ModelInfo
+	err  error
+}
+
+func (d describedModel) Describe(context.Context, string) (agentloop.ModelInfo, error) {
+	return d.info, d.err
 }

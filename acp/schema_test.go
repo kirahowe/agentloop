@@ -30,7 +30,7 @@ var compiled = sync.OnceValues(func() (map[string]*jsonschema.Schema, error) {
 	}
 	out := map[string]*jsonschema.Schema{}
 	for _, def := range []string{"SessionNotification", "PromptResponse", "ContentBlock", "InitializeResponse", "NewSessionResponse",
-		"LoadSessionResponse", "ResumeSessionResponse", "ListSessionsResponse", "CloseSessionResponse"} {
+		"LoadSessionResponse", "ResumeSessionResponse", "ListSessionsResponse", "CloseSessionResponse", "SetSessionConfigOptionResponse"} {
 		s, err := c.Compile(schemaURL + "#/$defs/" + def)
 		if err != nil {
 			return nil, err

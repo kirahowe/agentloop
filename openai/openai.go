@@ -45,10 +45,14 @@ type Config struct {
 // Model is an agentloop.Model backed by the Responses API.
 type Model struct {
 	svc       responses.ResponseService
+	models    oai.ModelService
 	maxTokens int
 }
 
-var _ agentloop.Model = (*Model)(nil)
+var (
+	_ agentloop.Model     = (*Model)(nil)
+	_ agentloop.Describer = (*Model)(nil)
+)
 
 // New builds a Model. The SDK's own retries are off.
 //
@@ -63,13 +67,15 @@ func New(cfg Config) *Model {
 	if hc == nil {
 		hc = http.DefaultClient
 	}
+	opts := []option.RequestOption{
+		option.WithBaseURL(base),
+		option.WithAPIKey(cfg.APIKey),
+		option.WithHTTPClient(hc),
+		option.WithMaxRetries(0),
+	}
 	return &Model{
-		svc: responses.NewResponseService(
-			option.WithBaseURL(base),
-			option.WithAPIKey(cfg.APIKey),
-			option.WithHTTPClient(hc),
-			option.WithMaxRetries(0),
-		),
+		svc:       responses.NewResponseService(opts...),
+		models:    oai.NewModelService(opts...),
 		maxTokens: cfg.DefaultMaxTokens,
 	}
 }
@@ -87,6 +93,18 @@ func (m *Model) Generate(ctx context.Context, req *agentloop.Request, observe fu
 	stream := m.svc.NewStreaming(ctx, params, option.WithMiddleware(seen.tap))
 	defer stream.Close()
 	return m.consume(ctx, req, stream, observe, &seen)
+}
+
+// Describe asks the Models API about a model. OpenAI's answer holds the
+// id, the owner and the creation time, and no display name or context
+// window, so those stay unknown.
+func (m *Model) Describe(ctx context.Context, model string) (agentloop.ModelInfo, error) {
+	var seen httpFailure
+	info, err := m.models.Get(ctx, model, option.WithMiddleware(seen.tap))
+	if err != nil {
+		return agentloop.ModelInfo{}, m.classify(ctx, err, &seen)
+	}
+	return agentloop.ModelInfo{ID: info.ID}, nil
 }
 
 func (m *Model) buildParams(req *agentloop.Request) (responses.ResponseNewParams, error) {

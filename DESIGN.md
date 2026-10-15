@@ -82,6 +82,17 @@ An adapter, given `Request.Messages`:
   `ResetsAt` from the provider's rate-limit reset headers;
 - turns its SDK's own retries off.
 
+A model can also implement `Describer`, which is optional. `Describe`
+asks the provider about a model with one request and returns a
+`ModelInfo`: the id, the display name and the context window, where empty
+or zero means the provider did not say. The window always comes from the
+provider and never from a table in agentloop. Anthropic's adapter asks
+`GET /v1/models/{id}` under its base URL, with the Messages API's key,
+and takes the window from `max_input_tokens` (`max_tokens` is the output
+cap). OpenAI's Models API returns only the id, owner and creation time,
+so its adapter returns the id and leaves the name and window unknown.
+`fake` does not describe its models.
+
 ### Tools
 
 `Tool`, `Result` and `Func` are in `tool.go`. A tool's parameters are a
@@ -318,12 +329,26 @@ run, so the outcome line is still written.
 `<session_dir>/<id>.jsonl`. It refuses `session`, `prompt` and
 `timeout_seconds`: the client opens sessions and sends prompts, and a
 deadline would end a turn as cancelled, which ACP keeps for the client.
-Three fields are for `acp` alone, and `run` refuses them: `tool_kinds`
+Two fields are for `acp` alone, and `run` refuses them: `tool_kinds`
 (`{"tool name": "read"}`, using ACP's tool kinds, so a client can show
-each call) and `context_window` (tokens; without it no `usage_update` is
-sent) and `title` (the agent's display name in `agentInfo.title`, which
-a client can show; omitted when empty). The client's `cwd` is ignored, and so are its MCP servers, with a
-line on stderr: tools come only from the request. Only JSON-RPC goes to
+each call) and `title` (the agent's display name in `agentInfo.title`,
+which a client can show; omitted when empty). The client's `cwd` is
+ignored, and so are its MCP servers, with a line on stderr: tools come
+only from the request.
+
+The request does not give the model's context window. When the first
+session is opened, `acp` asks the provider to describe the model, once
+per process, and keeps the answer. If that fails it writes one line to
+stderr and carries on: the model is shown by its id, and since the window
+is unknown no `usage_update` is sent. Every `session/new`, `session/load`
+and `session/resume` response carries the model as ACP's session config
+option in the `model` category: a select with id `model` whose only
+value, and current value, is the request's model id, named by the
+provider's display name (or the id when there is none). A client such as
+acp-tui can show it. `session/set_config_option` that sets the model to
+itself answers the options unchanged. Anything else, including switching
+to another model, is refused with `-32602`. The model is fixed by the
+request. Only JSON-RPC goes to
 stdout. When the client closes stdin, stdout fails, or a SIGTERM or
 SIGINT arrives, agentloop cancels every turn, waits for the runs to end
 and release their sessions, and exits 0. A turn cancelled this way is
@@ -360,7 +385,7 @@ pure functions in `acp/` (`Translator.Step` for a live turn, `Replay` for
 | a tool call in an assistant message | `tool_call`, `pending`, with the request's kind for the tool (`other` if none) |
 | `call_started` | `tool_call_update`, `in_progress` |
 | `tool_result` | `tool_call_update`, `completed` or `failed`, the content as text, `rawOutput` `{content, is_error}` |
-| an assistant message, with `context_window` set | `usage_update`, used = the turn's input, cache and output tokens |
+| an assistant message, when the provider gave the window | `usage_update`, used = the turn's input, cache and output tokens, size = the window |
 | `model_error` | `notice`, only to a client that advertises notices |
 | a user message | nothing live (the client showed it); `user_message_chunk`, id `u<seq>`, on load |
 

@@ -82,12 +82,11 @@ func newACPReq(t tb, dir, apiURL, script, keycmd string) *acpReq {
 			"name": "probe", "description": "probe",
 			"parameters": map[string]any{"type": "object"},
 		}},
-		"tool_kinds":     map[string]string{"probe": "execute"},
-		"context_window": 200000,
-		"tool_command":   []string{"/bin/sh", scriptPath},
-		"tool_env":       map[string]string{"PATH": "/usr/bin:/bin", "OUT": filepath.Join(dir, "out.bin")},
-		"tool_dir":       dir,
-		"retry":          map[string]any{"retries": 0},
+		"tool_kinds":   map[string]string{"probe": "execute"},
+		"tool_command": []string{"/bin/sh", scriptPath},
+		"tool_env":     map[string]string{"PATH": "/usr/bin:/bin", "OUT": filepath.Join(dir, "out.bin")},
+		"tool_dir":     dir,
+		"retry":        map[string]any{"retries": 0},
 	}
 	return r
 }
@@ -341,7 +340,25 @@ func TestACPEndToEnd(t *testing.T) {
 	r := newACPReq(t, dir, api.URL, probeScript, keycmdBinary(t))
 	p := startACP(t, r.write(t))
 	p.initialize()
-	id := p.newSession()
+	created := p.call("session/new", map[string]any{"cwd": "/", "mcpServers": []any{}})
+	var opened struct {
+		SessionID     string `json:"sessionId"`
+		ConfigOptions []struct {
+			ID           string `json:"id"`
+			Category     string `json:"category"`
+			CurrentValue string `json:"currentValue"`
+			Options      []struct {
+				Value, Name string
+			} `json:"options"`
+		} `json:"configOptions"`
+	}
+	json.Unmarshal(created.Result, &opened)
+	id := opened.SessionID
+	// The model, as the Models API described it.
+	if o := opened.ConfigOptions; len(o) != 1 || o[0].ID != "model" || o[0].Category != "model" || o[0].CurrentValue != "claude-test" ||
+		len(o[0].Options) != 1 || o[0].Options[0].Value != "claude-test" || o[0].Options[0].Name != fakeDisplayName {
+		t.Fatalf("configOptions: %s", created.Result)
+	}
 	resp := p.response(p.prompt(id, "go"))
 	if resp.Error != nil || !strings.Contains(string(resp.Result), `"stopReason":"end_turn"`) {
 		t.Fatalf("prompt: %s %+v", resp.Result, resp.Error)
@@ -369,6 +386,11 @@ func TestACPEndToEnd(t *testing.T) {
 			}
 		case "agent_message_chunk":
 			kind += ":" + u["content"].(map[string]any)["text"].(string)
+		case "usage_update":
+			// The window the Models API gave, not one from the request.
+			if u["size"] != float64(fakeWindow) {
+				t.Errorf("usage_update size %v, want %d", u["size"], fakeWindow)
+			}
 		}
 		seen = append(seen, kind)
 	}
@@ -429,6 +451,9 @@ func TestACPUnusableRequests(t *testing.T) {
 // client to go away.
 func reflexAPI(t tb) *httptest.Server {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if serveModel(w, r) {
+			return
+		}
 		b, _ := io.ReadAll(r.Body)
 		switch {
 		case bytes.Contains(b, []byte("tool_result")):

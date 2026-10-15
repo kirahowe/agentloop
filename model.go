@@ -20,6 +20,28 @@ type Model interface {
 	Generate(ctx context.Context, req *Request, observe func(Delta)) (*Response, error)
 }
 
+// ModelInfo is what a provider says about one of its models.
+type ModelInfo struct {
+	// ID is the model's identifier, as the provider gives it.
+	ID string
+	// DisplayName is the provider's name for people. Empty means it gave
+	// none.
+	DisplayName string
+	// ContextWindow is how many input tokens the model takes. Zero means
+	// the provider did not say.
+	ContextWindow int64
+}
+
+// A Describer is a Model whose provider can describe a model. It is
+// optional: a Model that does not implement it is described by its id
+// alone.
+//
+// Describe makes one request, with no retries, and returns a *ModelError
+// for anything the provider refused or could not do.
+type Describer interface {
+	Describe(ctx context.Context, model string) (ModelInfo, error)
+}
+
 // A Request is everything one model call is given.
 type Request struct {
 	Model    string

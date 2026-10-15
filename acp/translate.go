@@ -24,8 +24,9 @@ type Options struct {
 	// Kinds is the ACP kind of each tool, by name (the request's
 	// tool_kinds). A tool not listed is "other".
 	Kinds map[string]acp.ToolKind
-	// ContextWindow is the model's context window in tokens. Zero means
-	// unknown, and then no usage_update is sent: its size is required.
+	// ContextWindow is the model's context window in tokens, as its
+	// provider describes it. Zero means unknown, and then no usage_update
+	// is sent: its size is required.
 	ContextWindow int64
 	// Notices says the client advertised session notices, which carry
 	// retry status. Without them nothing is sent for a model error.

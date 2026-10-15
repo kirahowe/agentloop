@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"time"
 
 	acp "github.com/caelis-labs/acp-go-sdk"
 
@@ -28,6 +29,9 @@ import (
 // session/prompt response, which is sent only once the run has returned.
 type Server struct {
 	cfg Config
+	// model is what the provider says about the model, asked once, by the
+	// first session opened.
+	model func() agentloop.ModelInfo
 
 	mu       sync.Mutex
 	notices  bool
@@ -54,10 +58,13 @@ type Config struct {
 	// reports for every session (see SessionCwd).
 	Cwd string
 	// Agent is copied for each run. If it has an Observe, that is called
-	// after each event's updates have been sent.
+	// after each event's updates have been sent. If its Model is an
+	// agentloop.Describer, the model is described once, when the first
+	// session is opened.
 	Agent *agentloop.Agent
 	// Options are for the translation. Notices is set from the client's
-	// initialize, whatever it says here.
+	// initialize, and ContextWindow from the model's description, whatever
+	// they say here.
 	Options Options
 	// Log takes the server's diagnostics. Nothing is ever written to the
 	// connection but JSON-RPC.
@@ -93,7 +100,34 @@ func NewServer(cfg Config) *Server {
 		wd, _ := os.Getwd()
 		cfg.Cwd = SessionCwd("", wd)
 	}
-	return &Server{cfg: cfg, sessions: map[acp.SessionId]*session{}}
+	s := &Server{cfg: cfg, sessions: map[acp.SessionId]*session{}}
+	s.model = sync.OnceValue(s.describe)
+	return s
+}
+
+// describeTimeout bounds the one request that describes the model.
+const describeTimeout = 15 * time.Second
+
+// describe asks the provider about the model. A failure costs only what
+// the description would have added (the display name and the window), so
+// it is logged and the model is shown by its id.
+func (s *Server) describe() agentloop.ModelInfo {
+	a := s.cfg.Agent
+	if a == nil {
+		return agentloop.ModelInfo{}
+	}
+	d, ok := a.Model.(agentloop.Describer)
+	if !ok {
+		return Described(a.ModelID, agentloop.ModelInfo{})
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), describeTimeout)
+	defer cancel()
+	got, err := d.Describe(ctx, a.ModelID)
+	if err != nil {
+		s.logf("agentloop: cannot describe model %s, so its context window is unknown: %v", a.ModelID, err)
+		got = agentloop.ModelInfo{}
+	}
+	return Described(a.ModelID, got)
 }
 
 // Connect serves the client that writes to in and reads from out.
@@ -172,6 +206,7 @@ func (s *Server) Initialize(_ context.Context, req acp.InitializeRequest) (acp.I
 // in it.
 func (s *Server) NewSession(ctx context.Context, req acp.NewSessionRequest) (acp.NewSessionResponse, error) {
 	s.note(len(req.McpServers))
+	info := s.model()
 	conn, _ := acp.AgentSideConnectionFromContext(ctx)
 	var b [16]byte
 	rand.Read(b[:])
@@ -191,8 +226,8 @@ func (s *Server) NewSession(ctx context.Context, req acp.NewSessionRequest) (acp
 		unlock()
 		return acp.NewSessionResponse{}, internal(err.Error(), nil)
 	}
-	s.register(s.newSession(id, conn, sess, unlock))
-	return acp.NewSessionResponse{SessionId: id}, nil
+	s.register(s.newSession(id, conn, sess, unlock, info))
+	return acp.NewSessionResponse{SessionId: id, ConfigOptions: ConfigOptions(info)}, nil
 }
 
 func (s *Server) note(mcpServers int) {
@@ -202,9 +237,10 @@ func (s *Server) note(mcpServers int) {
 }
 
 // newSession is the registry's record of an open session. s.mu is held.
-func (s *Server) newSession(id acp.SessionId, conn *acp.AgentSideConnection, sess *agentloop.Session, unlock func()) *session {
+func (s *Server) newSession(id acp.SessionId, conn *acp.AgentSideConnection, sess *agentloop.Session, unlock func(), info agentloop.ModelInfo) *session {
 	opts := s.cfg.Options
 	opts.Notices = s.notices
+	opts.ContextWindow = info.ContextWindow
 	return &session{
 		id: id, conn: conn, sess: sess, unlock: unlock,
 		tr: NewTranslator(opts), waiting: map[PromptID]chan answer{},
@@ -218,19 +254,21 @@ func (s *Server) register(ss *session) { s.sessions[ss.id] = ss }
 // it before the response.
 func (s *Server) LoadSession(ctx context.Context, req acp.LoadSessionRequest) (acp.LoadSessionResponse, error) {
 	s.note(len(req.McpServers))
-	if err := s.reopen(ctx, req.SessionId, true); err != nil {
+	info := s.model()
+	if err := s.reopen(ctx, req.SessionId, true, info); err != nil {
 		return acp.LoadSessionResponse{}, err
 	}
-	return acp.LoadSessionResponse{}, nil
+	return acp.LoadSessionResponse{ConfigOptions: ConfigOptions(info)}, nil
 }
 
 // ResumeSession opens a session from its log without sending its history.
 func (s *Server) ResumeSession(ctx context.Context, req acp.ResumeSessionRequest) (acp.ResumeSessionResponse, error) {
 	s.note(len(req.McpServers))
-	if err := s.reopen(ctx, req.SessionId, false); err != nil {
+	info := s.model()
+	if err := s.reopen(ctx, req.SessionId, false, info); err != nil {
 		return acp.ResumeSessionResponse{}, err
 	}
-	return acp.ResumeSessionResponse{}, nil
+	return acp.ResumeSessionResponse{ConfigOptions: ConfigOptions(info)}, nil
 }
 
 // reopen makes a stored session open on this connection, and with replay
@@ -242,7 +280,7 @@ func (s *Server) ResumeSession(ctx context.Context, req acp.ResumeSessionRequest
 // While the history is sent the session is out of the registry, so no
 // turn can start and mix its updates into the replay: a prompt for it
 // then is for a session not yet open.
-func (s *Server) reopen(ctx context.Context, id acp.SessionId, replay bool) error {
+func (s *Server) reopen(ctx context.Context, id acp.SessionId, replay bool, info agentloop.ModelInfo) error {
 	path, rpcErr := SessionFile(s.cfg.SessionDir, id)
 	if rpcErr != nil {
 		return rpcErr
@@ -282,7 +320,7 @@ func (s *Server) reopen(ctx context.Context, id acp.SessionId, replay bool) erro
 			return internal(err.Error(), nil)
 		}
 		s.mu.Lock()
-		ss = s.newSession(id, conn, sess, unlock)
+		ss = s.newSession(id, conn, sess, unlock, info)
 		s.mu.Unlock()
 	}
 	if replay {
@@ -302,6 +340,30 @@ func (s *Server) reopen(ctx context.Context, id acp.SessionId, replay bool) erro
 	}
 	s.register(ss)
 	return nil
+}
+
+// SetSessionConfigOption answers session/set_config_option for an open
+// session, as SetConfigOption decides: the model can only be set to
+// itself.
+func (s *Server) SetSessionConfigOption(_ context.Context, req acp.SetSessionConfigOptionRequest) (acp.SetSessionConfigOptionResponse, error) {
+	var id acp.SessionId
+	switch {
+	case req.ValueId != nil:
+		id = req.ValueId.SessionId
+	case req.Boolean != nil:
+		id = req.Boolean.SessionId
+	}
+	s.mu.Lock()
+	_, ok := s.sessions[id]
+	s.mu.Unlock()
+	if !ok {
+		return acp.SetSessionConfigOptionResponse{}, UnknownSession(id)
+	}
+	resp, rpcErr := SetConfigOption(s.model(), req)
+	if rpcErr != nil {
+		return acp.SetSessionConfigOptionResponse{}, rpcErr
+	}
+	return resp, nil
 }
 
 // CloseSession cancels the session's turn, if one is running, and answers

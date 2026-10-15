@@ -51,7 +51,6 @@ type Request struct {
 	TimeoutSeconds     float64              `json:"timeout_seconds"`
 	Limits             agentloop.Limits     `json:"limits"`
 	ToolKinds          map[string]string    `json:"tool_kinds"`
-	ContextWindow      int64                `json:"context_window"`
 	Title              string               `json:"title"`
 	Retry              *struct {
 		Retries        int     `json:"retries"`
@@ -177,7 +176,7 @@ func (r *Request) validateMode(mode Mode) error {
 			return usage.Errorf("request has no session path")
 		}
 		for _, f := range []field{
-			{"session_dir", r.SessionDir != ""}, {"tool_kinds", r.ToolKinds != nil}, {"context_window", r.ContextWindow != 0}, {"title", r.Title != ""},
+			{"session_dir", r.SessionDir != ""}, {"tool_kinds", r.ToolKinds != nil}, {"title", r.Title != ""},
 		} {
 			if f.set {
 				return usage.Errorf("%s is only for agentloop acp", f.name)
@@ -194,9 +193,6 @@ func (r *Request) validateMode(mode Mode) error {
 		if f.set {
 			return usage.Errorf("%s is not used by agentloop acp", f.name)
 		}
-	}
-	if r.ContextWindow < 0 {
-		return usage.Errorf("context_window cannot be negative")
 	}
 	tools := map[string]bool{}
 	for _, t := range r.Tools {

@@ -48,7 +48,7 @@ func acpCmd(req *request.Request, stdin io.Reader, stdout, stderr io.Writer) err
 		SessionDir: req.SessionDir,
 		Cwd:        acpagent.SessionCwd(req.ToolDir, wd),
 		Agent:      req.Agent(key),
-		Options:    acpagent.Options{Kinds: kinds, ContextWindow: req.ContextWindow},
+		Options:    acpagent.Options{Kinds: kinds},
 		Log:        stderr,
 	})
 	conn, err := srv.Connect(stdout, stdin)

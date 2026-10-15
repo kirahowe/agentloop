@@ -69,8 +69,10 @@ file, the tools, and the command each tool call runs. It prints every
 session entry as a JSON line and then an outcome line. `agentloop acp
 request.json` serves the same agent to an [Agent Client Protocol](https://agentclientprotocol.com)
 client over stdin and stdout, where a client can also list, load, resume
-and close the sessions kept in the request's `session_dir`. The request
-format is in
+and close the sessions kept in the request's `session_dir`. It asks the
+provider for the model's display name and context window, and shows the
+model to the client as a session config option, so nothing in the request
+can drift from the model. The request format is in
 [DESIGN.md](DESIGN.md#the-command).
 
 The API key is fetched by a command named in the request, such as a

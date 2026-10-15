@@ -17,11 +17,14 @@ TCK_REF=fa00ccdc13dfaa4b288a91877c1f3e468af4aa7d
 
 # Requirements that may be SKIPPED, each for a capability agentloop does
 # not advertise in initialize (or an opt-in flag this script does not pass).
+# ACP-CONFIG-001 runs, since sessions carry the model as a config option.
+# ACP-CONFIG-002 skips: it needs a second value to switch to, and the
+# model option has only one.
 ALLOWED_SKIPS="
 ACP-DELETE-001 ACP-DELETE-002
 ACP-ADDDIRS-001
 ACP-MODES-001 ACP-MODES-002
-ACP-CONFIG-001 ACP-CONFIG-002
+ACP-CONFIG-002
 ACP-PROMPTCAP-001 ACP-PROMPTCAP-002
 ACP-AUTH-003 ACP-AUTH-004
 "

@@ -49,7 +49,10 @@ type Model struct {
 	cfg    Config
 }
 
-var _ agentloop.Model = (*Model)(nil)
+var (
+	_ agentloop.Model     = (*Model)(nil)
+	_ agentloop.Describer = (*Model)(nil)
+)
 
 // New builds a Model from cfg.
 func New(cfg Config) *Model {
@@ -116,6 +119,20 @@ func (m *Model) Generate(ctx context.Context, req *agentloop.Request, observe fu
 		return nil, &agentloop.ModelError{Kind: agentloop.Unreachable, Message: err.Error(), Err: err}
 	}
 	return response(&acc), nil
+}
+
+// Describe asks the Models API about a model: its display name and its
+// context window, which the API calls max_input_tokens.
+func (m *Model) Describe(ctx context.Context, model string) (agentloop.ModelInfo, error) {
+	info, err := m.client.Models.Get(ctx, model, sdk.ModelGetParams{})
+	if err != nil {
+		return agentloop.ModelInfo{}, fail(ctx, err)
+	}
+	return describe(info), nil
+}
+
+func describe(info *sdk.ModelInfo) agentloop.ModelInfo {
+	return agentloop.ModelInfo{ID: info.ID, DisplayName: info.DisplayName, ContextWindow: max(info.MaxInputTokens, 0)}
 }
 
 func (m *Model) params(req *agentloop.Request) (sdk.BetaMessageNewParams, error) {
