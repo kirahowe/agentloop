@@ -78,6 +78,7 @@ func newACPReq(t tb, dir, apiURL, script, keycmd string) *acpReq {
 		"base_url":        apiURL,
 		"api_key_command": []string{keycmd, secretKey},
 		"session_dir":     r.sessionDir,
+		"policy":          map[string]any{"unrestricted": true},
 		"tools": []map[string]any{{
 			"name": "probe", "description": "probe",
 			"parameters": map[string]any{"type": "object"},

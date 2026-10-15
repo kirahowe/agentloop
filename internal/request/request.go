@@ -26,6 +26,7 @@ import (
 	"github.com/kirahowe/agentloop/command"
 	"github.com/kirahowe/agentloop/internal/usage"
 	"github.com/kirahowe/agentloop/openai"
+	"github.com/kirahowe/agentloop/trifecta"
 )
 
 // KeyTimeout is how long api_key_command may run.
@@ -33,31 +34,52 @@ const KeyTimeout = 30 * time.Second
 
 // Request is the JSON document that says what to run.
 type Request struct {
-	Provider           string               `json:"provider"`
-	Model              string               `json:"model"`
-	Effort             string               `json:"effort"`
-	BaseURL            string               `json:"base_url"`
-	APIKeyCommand      []string             `json:"api_key_command"`
-	RefusalFallback    *bool                `json:"refusal_fallback"`
-	System             string               `json:"system"`
-	Prompt             string               `json:"prompt"`
-	Session            string               `json:"session"`
-	SessionDir         string               `json:"session_dir"`
-	Tools              []agentloop.ToolSpec `json:"tools"`
-	ToolCommand        []string             `json:"tool_command"`
-	ToolEnv            map[string]string    `json:"tool_env"`
-	ToolDir            string               `json:"tool_dir"`
-	ToolTimeoutSeconds float64              `json:"tool_timeout_seconds"`
-	TimeoutSeconds     float64              `json:"timeout_seconds"`
-	Limits             agentloop.Limits     `json:"limits"`
-	ToolKinds          map[string]string    `json:"tool_kinds"`
-	Title              string               `json:"title"`
+	Provider           string                 `json:"provider"`
+	Model              string                 `json:"model"`
+	Effort             string                 `json:"effort"`
+	BaseURL            string                 `json:"base_url"`
+	APIKeyCommand      []string               `json:"api_key_command"`
+	RefusalFallback    *bool                  `json:"refusal_fallback"`
+	System             string                 `json:"system"`
+	Prompt             string                 `json:"prompt"`
+	Session            string                 `json:"session"`
+	SessionDir         string                 `json:"session_dir"`
+	Tools              []agentloop.ToolSpec   `json:"tools"`
+	ToolCommand        []string               `json:"tool_command"`
+	ToolEnv            map[string]string      `json:"tool_env"`
+	ToolDir            string                 `json:"tool_dir"`
+	ToolTimeoutSeconds float64                `json:"tool_timeout_seconds"`
+	TimeoutSeconds     float64                `json:"timeout_seconds"`
+	Limits             agentloop.Limits       `json:"limits"`
+	ToolKinds          map[string]string      `json:"tool_kinds"`
+	Title              string                 `json:"title"`
+	Policy             *Policy                `json:"policy"`
+	ToolProtocol       string                 `json:"tool_protocol"`
+	Resolve            []agentloop.Resolution `json:"resolve"`
 	Retry              *struct {
 		Retries        int     `json:"retries"`
 		BackoffSeconds float64 `json:"backoff_seconds"`
 		MaxWaitSeconds float64 `json:"max_wait_seconds"`
 	} `json:"retry"`
 }
+
+// Policy is the request's trifecta policy: the session's starting labels
+// and each tool's class and labels. {"unrestricted": true} instead turns
+// the policy off; it is for agentloop's own examples and tests.
+type Policy struct {
+	Unrestricted *bool                    `json:"unrestricted"`
+	Labels       []string                 `json:"labels"`
+	Tools        map[string]trifecta.Tool `json:"tools"`
+}
+
+// Restricted reports whether the request has a real policy.
+func (r *Request) Restricted() bool {
+	return r.Policy != nil && r.Policy.Unrestricted == nil
+}
+
+// ToolProtocolEnvelope is the tool_protocol for envelope tools; the plain
+// protocol is the empty string.
+const ToolProtocolEnvelope = "envelope"
 
 // Mode is the command a request is for. The two read the same document
 // with different rules about which fields it must and must not have.
@@ -138,6 +160,9 @@ func (r *Request) validate(mode Mode) error {
 			return usage.Errorf("tool %q: parameters must be a JSON Schema object", t.Name)
 		}
 	}
+	if err := r.validatePolicy(); err != nil {
+		return err
+	}
 	if r.ToolTimeoutSeconds < 0 || r.TimeoutSeconds < 0 {
 		return usage.Errorf("timeouts cannot be negative")
 	}
@@ -169,6 +194,59 @@ func (r *Request) validate(mode Mode) error {
 	return nil
 }
 
+// validatePolicy fails closed: a request with tools must say how they are
+// policed, every tool needs a known class, and every label must be one
+// agentloop knows, so a typo cannot drop one.
+func (r *Request) validatePolicy() error {
+	switch r.ToolProtocol {
+	case "", ToolProtocolEnvelope:
+	default:
+		return usage.Errorf("unknown tool_protocol %q (want %q or none)", r.ToolProtocol, ToolProtocolEnvelope)
+	}
+	p := r.Policy
+	if p == nil {
+		if len(r.Tools) > 0 {
+			return usage.Errorf(`request has tools but no policy (give one, or {"unrestricted": true})`)
+		}
+		return nil
+	}
+	if p.Unrestricted != nil {
+		if !*p.Unrestricted {
+			return usage.Errorf(`policy.unrestricted can only be true; leave it out for a real policy`)
+		}
+		if p.Labels != nil || p.Tools != nil {
+			return usage.Errorf("an unrestricted policy cannot have labels or tools")
+		}
+		return nil
+	}
+	if r.ToolProtocol != ToolProtocolEnvelope {
+		return usage.Errorf(`a request with a policy needs "tool_protocol": %q`, ToolProtocolEnvelope)
+	}
+	if err := trifecta.CheckLabels(p.Labels); err != nil {
+		return usage.Errorf("policy.labels: %v", err)
+	}
+	tools := map[string]bool{}
+	for _, t := range r.Tools {
+		tools[t.Name] = true
+		if _, ok := p.Tools[t.Name]; !ok {
+			return usage.Errorf("policy.tools has no entry for the tool %q", t.Name)
+		}
+	}
+	for _, name := range slices.Sorted(maps.Keys(p.Tools)) {
+		e := p.Tools[name]
+		if !tools[name] {
+			return usage.Errorf("policy.tools names %q, which is not one of the tools", name)
+		}
+		if !trifecta.KnownClass(e.Class) {
+			return usage.Errorf("policy.tools gives %q the class %q (want one of %v)", name, e.Class, trifecta.Classes)
+		}
+		if err := trifecta.CheckLabels(e.Labels); err != nil {
+			return usage.Errorf("policy.tools %q: %v", name, err)
+		}
+	}
+	return nil
+}
+
 // validateMode checks the fields that differ between the commands.
 func (r *Request) validateMode(mode Mode) error {
 	if mode == Run {
@@ -182,6 +260,22 @@ func (r *Request) validateMode(mode Mode) error {
 				return usage.Errorf("%s is only for agentloop acp", f.name)
 			}
 		}
+		seen := map[string]bool{}
+		for _, res := range r.Resolve {
+			if res.CallID == "" {
+				return usage.Errorf("a resolve entry has no call_id")
+			}
+			if seen[res.CallID] {
+				return usage.Errorf("resolve names the call %q twice", res.CallID)
+			}
+			seen[res.CallID] = true
+			if res.Verdict != agentloop.Allow && res.Verdict != agentloop.Deny {
+				return usage.Errorf("resolve gives the call %q the verdict %q (want allow or deny)", res.CallID, res.Verdict)
+			}
+			if res.InputSHA256 == "" {
+				return usage.Errorf("resolve gives the call %q no input_sha256", res.CallID)
+			}
+		}
 		return nil
 	}
 	if r.SessionDir == "" {
@@ -189,6 +283,7 @@ func (r *Request) validateMode(mode Mode) error {
 	}
 	for _, f := range []field{
 		{"session", r.Session != ""}, {"prompt", r.Prompt != ""}, {"timeout_seconds", r.TimeoutSeconds != 0},
+		{"resolve", r.Resolve != nil},
 	} {
 		if f.set {
 			return usage.Errorf("%s is not used by agentloop acp", f.name)
@@ -367,7 +462,10 @@ func (r *Request) Agent(key string) *agentloop.Agent {
 	var tools []agentloop.Tool
 	for _, spec := range r.Tools {
 		argv := append(append([]string{}, r.ToolCommand...), spec.Name)
-		tools = append(tools, &command.Tool{Def: spec, Argv: argv, Env: env, Dir: r.ToolDir})
+		tools = append(tools, &command.Tool{
+			Def: spec, Argv: argv, Env: env, Dir: r.ToolDir,
+			Envelope: r.ToolProtocol == ToolProtocolEnvelope, KnownLabel: trifecta.KnownLabel,
+		})
 	}
 	a := &agentloop.Agent{
 		Model:       r.newModel(key),
@@ -377,6 +475,10 @@ func (r *Request) Agent(key string) *agentloop.Agent {
 		Effort:      agentloop.Effort(r.Effort),
 		Limits:      r.Limits,
 		ToolTimeout: Seconds(r.ToolTimeoutSeconds),
+	}
+	if r.Restricted() {
+		a.Labels = slices.Clone(r.Policy.Labels)
+		a.Policy = trifecta.Policy{Tools: maps.Clone(r.Policy.Tools)}
 	}
 	if r.Retry != nil {
 		a.Retry = &agentloop.RetryPolicy{

@@ -83,6 +83,8 @@ type outcomeLine struct {
 	Type string `json:"type"`
 	agentloop.Outcome
 	Session string `json:"session"`
+	// Labels are the session's labels when the run ended.
+	Labels []string `json:"labels"`
 }
 
 func noKeyOutcome(err error) agentloop.Outcome {
@@ -102,7 +104,7 @@ func runCmd(ctx context.Context, req *request.Request, stdout, stderr io.Writer)
 		err = nil
 	}
 	if err != nil {
-		return writeJSON(stdout, outcomeLine{Type: "outcome", Outcome: noKeyOutcome(err), Session: req.Session})
+		return writeJSON(stdout, outcomeLine{Type: "outcome", Outcome: noKeyOutcome(err), Session: req.Session, Labels: storedLabels(req.Session)})
 	}
 	if req.Prompt == "" {
 		// Nothing to resume if there is no session yet; say so without
@@ -124,13 +126,23 @@ func runCmd(ctx context.Context, req *request.Request, stdout, stderr io.Writer)
 		return usage.Errorf("run has no prompt and the session has no conversation to resume")
 	}
 
+	agent := req.Agent(key)
+	resolved, err := resolve(ctx, agent, sess, req.Resolve)
+	if err != nil {
+		return err
+	}
+	for _, e := range resolved {
+		if err := writeJSON(stdout, e); err != nil {
+			return err
+		}
+	}
+
 	if req.TimeoutSeconds > 0 {
 		var cancel context.CancelFunc
 		ctx, cancel = context.WithTimeout(ctx, request.Seconds(req.TimeoutSeconds))
 		defer cancel()
 	}
 
-	agent := req.Agent(key)
 	var writeErr error
 	agent.Observe = func(ev agentloop.Event) {
 		if ev.Entry != nil && writeErr == nil {
@@ -144,7 +156,46 @@ func runCmd(ctx context.Context, req *request.Request, stdout, stderr io.Writer)
 	if writeErr != nil {
 		return writeErr
 	}
-	return writeJSON(stdout, outcomeLine{Type: "outcome", Outcome: *out, Session: req.Session})
+	return writeJSON(stdout, outcomeLine{Type: "outcome", Outcome: *out, Session: req.Session, Labels: sess.Labels()})
+}
+
+// resolve records a person's decisions on held calls, from the request's
+// resolve list, and returns the entries that wrote. It checks every one
+// against the session before writing any, so a bad list writes nothing.
+// A call already resolved the same way is passed over (see Agent.Resolve).
+func resolve(ctx context.Context, agent *agentloop.Agent, sess *agentloop.Session, list []agentloop.Resolution) ([]agentloop.Entry, error) {
+	for _, r := range list {
+		info, ok := sess.Call(r.CallID)
+		switch {
+		case !ok:
+			return nil, usage.Errorf("resolve names the call %q, which the session does not have", r.CallID)
+		case r.InputSHA256 != agentloop.InputDigest(info.Call.Input):
+			return nil, usage.Errorf("resolve gives the call %q an input_sha256 that does not match its input", r.CallID)
+		case !info.Held() && !(info.Resolved && info.Decision.Verdict == r.Verdict):
+			return nil, usage.Errorf("resolve names the call %q, which is not held", r.CallID)
+		}
+	}
+	before := len(sess.Entries())
+	for _, r := range list {
+		if err := agent.Resolve(ctx, sess, r); err != nil {
+			return nil, err
+		}
+	}
+	return sess.Entries()[before:], nil
+}
+
+// storedLabels reads the labels of the session at path without locking
+// it, for an outcome that never opened it. A session that does not exist
+// or cannot be read has none that can be told.
+func storedLabels(path string) []string {
+	if !sessionfile.Exists(path) {
+		return []string{}
+	}
+	sess, err := agentloop.OpenSession(agentloop.NewFileStore(path))
+	if err != nil {
+		return []string{}
+	}
+	return sess.Labels()
 }
 
 func writeJSON(w io.Writer, v any) error {

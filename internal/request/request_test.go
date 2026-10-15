@@ -5,19 +5,23 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"reflect"
 	"slices"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/kirahowe/agentloop"
+	"github.com/kirahowe/agentloop/command"
 	"github.com/kirahowe/agentloop/internal/usage"
+	"github.com/kirahowe/agentloop/trifecta"
 )
 
 func FuzzLoadRequest(f *testing.F) {
 	good, _ := json.Marshal(map[string]any{
 		"provider": "anthropic", "model": "m", "session": "/tmp/x/s.jsonl", "prompt": "p",
 		"api_key_command": []string{"printf", "k"},
+		"policy":          map[string]any{"unrestricted": true},
 		"tools":           []map[string]any{{"name": "t", "description": "d", "parameters": map[string]any{"type": "object", "properties": map[string]any{"a": map[string]any{"type": "string"}}}}},
 		"tool_command":    []string{"x"}, "tool_env": map[string]string{"A": "b"},
 		"limits": map[string]any{"max_turns": 3}, "retry": map[string]any{"retries": 1},
@@ -120,6 +124,57 @@ func TestFetchKeyTrimsAndFails(t *testing.T) {
 	}
 }
 
+// A real policy becomes the agent's labels and a trifecta policy, and
+// envelope tools; an unrestricted one adds neither.
+func TestPolicyBuildsTheAgent(t *testing.T) {
+	dir := t.TempDir()
+	load := func(m map[string]any) *Request {
+		t.Helper()
+		b, _ := json.Marshal(m)
+		path := filepath.Join(dir, "r.json")
+		os.WriteFile(path, b, 0o644)
+		req, err := Load(path, Run)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return req
+	}
+	base := map[string]any{
+		"provider": "anthropic", "model": "m", "api_key_command": []string{"printf", "k"},
+		"session": "/tmp/s.jsonl", "prompt": "p",
+		"tools":        []map[string]any{{"name": "web_fetch"}, {"name": "memo_send"}},
+		"tool_command": []string{"x"},
+		"policy": map[string]any{
+			"labels": []string{"private"},
+			"tools": map[string]any{
+				"web_fetch": map[string]any{"class": "egress", "labels": []string{"contaminated"}},
+				"memo_send": map[string]any{"class": "write", "always_hold": true},
+			},
+		},
+		"tool_protocol": "envelope",
+	}
+	a := load(base).Agent("")
+	if !reflect.DeepEqual(a.Labels, []string{"private"}) {
+		t.Fatalf("labels %v", a.Labels)
+	}
+	p, ok := a.Policy.(trifecta.Policy)
+	if !ok || p.Tools["web_fetch"].Class != trifecta.Egress || !p.Tools["memo_send"].AlwaysHold ||
+		!reflect.DeepEqual(p.Tools["web_fetch"].Labels, []string{"contaminated"}) {
+		t.Fatalf("policy %+v", a.Policy)
+	}
+	for _, tool := range a.Tools {
+		if ct := tool.(*command.Tool); !ct.Envelope || !ct.KnownLabel("private") || ct.KnownLabel("x") {
+			t.Fatalf("tool %+v", ct)
+		}
+	}
+	base["policy"] = map[string]any{"unrestricted": true}
+	delete(base, "tool_protocol")
+	a = load(base).Agent("")
+	if a.Policy != nil || a.Labels != nil || a.Tools[0].(*command.Tool).Envelope {
+		t.Fatalf("an unrestricted request got %+v", a)
+	}
+}
+
 // TestModes checks the fields that differ between run and acp (design
 // section 2.4): acp needs session_dir and refuses session, prompt and
 // timeout_seconds; run refuses the acp-only fields.
@@ -127,6 +182,7 @@ func TestModes(t *testing.T) {
 	base := func() map[string]any {
 		return map[string]any{
 			"provider": "anthropic", "model": "m", "api_key_command": []string{"printf", "k"},
+			"policy":       map[string]any{"unrestricted": true},
 			"tools":        []map[string]any{{"name": "look", "parameters": map[string]any{"type": "object"}}},
 			"tool_command": []string{"x"},
 		}
@@ -163,6 +219,12 @@ func TestModes(t *testing.T) {
 		{"acp refuses context_window", ACP, acp(func(m map[string]any) { m["context_window"] = 200000 }), `unknown field "context_window"`},
 		{"acp refuses NUL in session_dir", ACP, acp(func(m map[string]any) { m["session_dir"] = "/tmp/a\x00b" }), "NUL"},
 		{"run minimal", Run, run(same), ""},
+		{"run with resolve", Run, run(func(m map[string]any) {
+			m["resolve"] = []map[string]any{{"call_id": "a", "verdict": "allow", "input_sha256": "x"}, {"call_id": "b", "verdict": "deny", "reason": "no", "input_sha256": "y"}}
+		}), ""},
+		{"acp refuses resolve", ACP, acp(func(m map[string]any) {
+			m["resolve"] = []map[string]any{{"call_id": "a", "verdict": "allow"}}
+		}), "resolve is not used"},
 		{"run refuses session_dir", Run, run(func(m map[string]any) { m["session_dir"] = "/tmp" }), "session_dir is only for agentloop acp"},
 		{"run refuses tool_kinds", Run, run(func(m map[string]any) { m["tool_kinds"] = map[string]string{} }), "tool_kinds is only"},
 		{"run refuses title", Run, run(func(m map[string]any) { m["title"] = "x" }), "title is only"},
