@@ -1,8 +1,16 @@
 // Package command provides an agentloop.Tool that runs a program.
 //
-// The program gets the call's input JSON on stdin and exactly the
-// environment it is configured with: nothing is inherited from the
-// calling process.
+// The program gets exactly the environment it is configured with: nothing
+// is inherited from the calling process. It speaks one of two protocols.
+//
+// Plain: the call's input JSON on stdin, and stdout as the result (stderr
+// when stdout is empty, and both when the program fails).
+//
+// Envelope: one JSON object on stdin, {"input", "labels", "call_id"}, and
+// exactly one on stdout, {"content", "is_error", "labels"}. Anything else
+// (a non-zero exit, output past the cap, or stdout that is not one valid
+// envelope with known labels) gives the model only "The tool <name>
+// failed.", and what went wrong, with stderr, goes to the operator's log.
 package command
 
 import (
@@ -39,61 +47,38 @@ type Tool struct {
 	// MaxOutputBytes caps what is kept of stdout and of stderr. Zero means
 	// DefaultMaxOutputBytes.
 	MaxOutputBytes int
+	// Envelope selects the envelope protocol. KnownLabel then says which
+	// labels a result may carry; nil allows none.
+	Envelope   bool
+	KnownLabel func(string) bool
 }
 
-var _ agentloop.Tool = (*Tool)(nil)
+var _ agentloop.CallTool = (*Tool)(nil)
 
 // Spec returns the tool's definition.
 func (t *Tool) Spec() agentloop.ToolSpec { return t.Def }
 
-// Call runs the program with input on stdin.
+// Call runs the program with the plain protocol's stdin, or with an
+// envelope that has no call id and no labels.
 func (t *Tool) Call(ctx context.Context, input json.RawMessage) (agentloop.Result, error) {
+	return t.CallWith(ctx, agentloop.Call{Input: input})
+}
+
+// CallWith runs the program for one call.
+func (t *Tool) CallWith(ctx context.Context, call agentloop.Call) (agentloop.Result, error) {
+	if t.Envelope {
+		return t.envelope(ctx, call)
+	}
 	if len(t.Argv) == 0 {
 		return agentloop.Result{}, errors.New("command tool has no argv")
 	}
 	if err := ctx.Err(); err != nil {
 		return agentloop.Result{}, err
 	}
-	max := t.MaxOutputBytes
-	if max <= 0 {
-		max = DefaultMaxOutputBytes
+	stdout, stderr, waitErr, err := t.run(ctx, call.Input)
+	if err != nil {
+		return agentloop.Result{}, err
 	}
-	cmd := exec.Command(t.Argv[0], t.Argv[1:]...)
-	cmd.Env = append([]string{}, t.Env...)
-	cmd.Dir = t.Dir
-	cmd.Stdin = bytes.NewReader(input)
-	stdout, stderr := &capped{max: max}, &capped{max: max}
-	cmd.Stdout, cmd.Stderr = stdout, stderr
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-	// If something outside the group keeps the pipes open, do not wait on it.
-	cmd.WaitDelay = killGrace
-	if err := cmd.Start(); err != nil {
-		return agentloop.Result{}, fmt.Errorf("start %s: %w", t.Argv[0], err)
-	}
-	pgid := cmd.Process.Pid
-
-	done := make(chan struct{})
-	killed := make(chan struct{})
-	go func() {
-		defer close(killed)
-		select {
-		case <-done:
-		case <-ctx.Done():
-			syscall.Kill(-pgid, syscall.SIGTERM)
-			select {
-			case <-done:
-			case <-time.After(killGrace):
-			}
-			// Always sweep the group, whatever the leader did.
-			syscall.Kill(-pgid, syscall.SIGKILL)
-		}
-	}()
-	waitErr := cmd.Wait()
-	close(done)
-	<-killed
-	// Leave nothing of the call running behind it.
-	syscall.Kill(-pgid, syscall.SIGKILL)
-
 	if err := ctx.Err(); err != nil {
 		return agentloop.Result{}, err
 	}
@@ -120,6 +105,51 @@ func (t *Tool) Call(ctx context.Context, input json.RawMessage) (agentloop.Resul
 	default:
 		return agentloop.Result{}, waitErr
 	}
+}
+
+// run runs the program with stdin, under the context, and returns what it
+// wrote and how it ended. err is set only when it could not start.
+func (t *Tool) run(ctx context.Context, stdin []byte) (stdout, stderr *capped, waitErr, err error) {
+	max := t.MaxOutputBytes
+	if max <= 0 {
+		max = DefaultMaxOutputBytes
+	}
+	cmd := exec.Command(t.Argv[0], t.Argv[1:]...)
+	cmd.Env = append([]string{}, t.Env...)
+	cmd.Dir = t.Dir
+	cmd.Stdin = bytes.NewReader(stdin)
+	stdout, stderr = &capped{max: max}, &capped{max: max}
+	cmd.Stdout, cmd.Stderr = stdout, stderr
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	// If something outside the group keeps the pipes open, do not wait on it.
+	cmd.WaitDelay = killGrace
+	if err := cmd.Start(); err != nil {
+		return nil, nil, nil, fmt.Errorf("start %s: %w", t.Argv[0], err)
+	}
+	pgid := cmd.Process.Pid
+
+	done := make(chan struct{})
+	killed := make(chan struct{})
+	go func() {
+		defer close(killed)
+		select {
+		case <-done:
+		case <-ctx.Done():
+			syscall.Kill(-pgid, syscall.SIGTERM)
+			select {
+			case <-done:
+			case <-time.After(killGrace):
+			}
+			// Always sweep the group, whatever the leader did.
+			syscall.Kill(-pgid, syscall.SIGKILL)
+		}
+	}()
+	waitErr = cmd.Wait()
+	close(done)
+	<-killed
+	// Leave nothing of the call running behind it.
+	syscall.Kill(-pgid, syscall.SIGKILL)
+	return stdout, stderr, waitErr, nil
 }
 
 func text(c *capped) string {
