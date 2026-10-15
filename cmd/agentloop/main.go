@@ -6,7 +6,6 @@
 package main
 
 import (
-	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -552,10 +551,9 @@ func chatCmd(req *request, stdin io.Reader, stdout, stderr io.Writer) error {
 		}
 	}
 
-	in := bufio.NewReader(stdin)
+	in := newLineReader(stdin, stderr)
 	for {
-		fmt.Fprint(stderr, "> ")
-		line, rerr := in.ReadString('\n')
+		line, rerr := in.readLine("> ")
 		line = strings.TrimSpace(line)
 		if line != "" {
 			ctx, cancel := context.WithCancel(context.Background())

@@ -6,6 +6,8 @@ require (
 	github.com/anthropics/anthropic-sdk-go v1.81.0
 	github.com/openai/openai-go/v3 v3.78.0
 	github.com/santhosh-tekuri/jsonschema/v6 v6.0.3
+	golang.org/x/term v0.47.0
+	pgregory.net/rapid v1.3.0
 )
 
 require (
@@ -27,6 +29,6 @@ require (
 	go.opentelemetry.io/otel/trace v1.33.0 // indirect
 	go.yaml.in/yaml/v4 v4.0.0-rc.2 // indirect
 	golang.org/x/sync v0.23.0 // indirect
+	golang.org/x/sys v0.49.0 // indirect
 	golang.org/x/text v0.42.0 // indirect
-	pgregory.net/rapid v1.3.0 // indirect
 )
