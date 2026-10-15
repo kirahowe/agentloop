@@ -46,6 +46,8 @@ type Server struct {
 type Config struct {
 	// Version is agentloop's, for initialize.
 	Version string
+	// Title is the agent's display name for initialize; empty omits it.
+	Title string
 	// SessionDir holds a <id>.jsonl log for each session.
 	SessionDir string
 	// Cwd is the absolute directory the tools run in, which session/list
@@ -162,7 +164,7 @@ func (s *Server) Initialize(_ context.Context, req acp.InitializeRequest) (acp.I
 	s.mu.Lock()
 	s.notices = ClientNotices(req)
 	s.mu.Unlock()
-	return InitializeResponse(s.cfg.Version), nil
+	return InitializeResponse(s.cfg.Version, s.cfg.Title), nil
 }
 
 // NewSession opens a new session log under its lock. The file is made at

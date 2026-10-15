@@ -60,7 +60,7 @@ func checkAccepted(t *testing.T, req *Request, mode Mode) {
 	}
 	switch mode {
 	case Run:
-		if req.Session == "" || req.SessionDir != "" || req.ToolKinds != nil || req.ContextWindow != 0 {
+		if req.Session == "" || req.SessionDir != "" || req.ToolKinds != nil || req.ContextWindow != 0 || req.Title != "" {
 			t.Fatalf("run accepted %+v", req)
 		}
 	case ACP:
@@ -154,6 +154,7 @@ func TestModes(t *testing.T) {
 		{"acp with kinds and window", ACP, acp(func(m map[string]any) {
 			m["tool_kinds"], m["context_window"] = map[string]string{"look": "read"}, 200000
 		}), ""},
+		{"acp with a title", ACP, acp(func(m map[string]any) { m["title"] = "relay · hub" }), ""},
 		{"acp needs session_dir", ACP, acp(func(m map[string]any) { delete(m, "session_dir") }), "no session_dir"},
 		{"acp refuses session", ACP, acp(func(m map[string]any) { m["session"] = "/tmp/s.jsonl" }), "session is not used"},
 		{"acp refuses prompt", ACP, acp(func(m map[string]any) { m["prompt"] = "hi" }), "prompt is not used"},
@@ -165,6 +166,7 @@ func TestModes(t *testing.T) {
 		{"run minimal", Run, run(same), ""},
 		{"run refuses session_dir", Run, run(func(m map[string]any) { m["session_dir"] = "/tmp" }), "session_dir is only for agentloop acp"},
 		{"run refuses tool_kinds", Run, run(func(m map[string]any) { m["tool_kinds"] = map[string]string{} }), "tool_kinds is only"},
+		{"run refuses title", Run, run(func(m map[string]any) { m["title"] = "x" }), "title is only"},
 		{"run refuses context_window", Run, run(func(m map[string]any) { m["context_window"] = 1 }), "context_window is only"},
 	}
 	dir := t.TempDir()

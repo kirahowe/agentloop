@@ -318,10 +318,11 @@ run, so the outcome line is still written.
 `<session_dir>/<id>.jsonl`. It refuses `session`, `prompt` and
 `timeout_seconds`: the client opens sessions and sends prompts, and a
 deadline would end a turn as cancelled, which ACP keeps for the client.
-Two fields are for `acp` alone, and `run` refuses them: `tool_kinds`
+Three fields are for `acp` alone, and `run` refuses them: `tool_kinds`
 (`{"tool name": "read"}`, using ACP's tool kinds, so a client can show
 each call) and `context_window` (tokens; without it no `usage_update` is
-sent). The client's `cwd` is ignored, and so are its MCP servers, with a
+sent) and `title` (the agent's display name in `agentInfo.title`, which
+a client can show; omitted when empty). The client's `cwd` is ignored, and so are its MCP servers, with a
 line on stderr: tools come only from the request. Only JSON-RPC goes to
 stdout. When the client closes stdin, stdout fails, or a SIGTERM or
 SIGINT arrives, agentloop cancels every turn, waits for the runs to end

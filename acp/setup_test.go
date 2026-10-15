@@ -1,6 +1,7 @@
 package acpagent
 
 import (
+	"encoding/json"
 	"path/filepath"
 	"regexp"
 	"slices"
@@ -42,7 +43,7 @@ func TestPropertySessionIDs(t *testing.T) {
 // loading, resuming, listing and closing sessions, but not deleting them,
 // modes, images, audio or MCP. The answer validates against the schema.
 func TestInitializeResponse(t *testing.T) {
-	r := InitializeResponse("1.2.3")
+	r := InitializeResponse("1.2.3", "")
 	if err := validate("InitializeResponse", r); err != nil {
 		t.Fatal(err)
 	}
@@ -100,5 +101,24 @@ func TestRequestToolKindsAreACPs(t *testing.T) {
 		if got := Kind("t", map[string]acp.ToolKind{"t": acp.ToolKind(k)}); string(got) != k {
 			t.Errorf("Kind(%s) = %s", k, got)
 		}
+	}
+}
+
+// TestInitializeTitle: a title becomes agentInfo.title, and no title
+// leaves the field out of the JSON.
+func TestInitializeTitle(t *testing.T) {
+	r := InitializeResponse("1.2.3", "relay · hub")
+	if err := validate("InitializeResponse", r); err != nil {
+		t.Fatal(err)
+	}
+	if r.AgentInfo.Title == nil || *r.AgentInfo.Title != "relay · hub" {
+		t.Fatalf("%+v", r.AgentInfo)
+	}
+	b, err := json.Marshal(InitializeResponse("1.2.3", ""))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(b), `"title"`) {
+		t.Fatalf("empty title was sent: %s", b)
 	}
 }

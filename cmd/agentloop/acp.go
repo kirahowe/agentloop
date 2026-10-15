@@ -44,6 +44,7 @@ func acpCmd(req *request.Request, stdin io.Reader, stdout, stderr io.Writer) err
 	}
 	srv := acpagent.NewServer(acpagent.Config{
 		Version:    version,
+		Title:      req.Title,
 		SessionDir: req.SessionDir,
 		Cwd:        acpagent.SessionCwd(req.ToolDir, wd),
 		Agent:      req.Agent(key),

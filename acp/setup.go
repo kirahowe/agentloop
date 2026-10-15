@@ -12,13 +12,18 @@ import (
 
 // InitializeResponse is the answer to initialize. agentloop speaks
 // protocol version 1 whatever the client asks for; a client that cannot
-// speak it closes the connection. Only what the server implements is
+// speak it closes the connection. A non-empty title is the agent's
+// display name in agentInfo. Only what the server implements is
 // advertised: text, resource links and embedded text in prompts, and
 // loading, resuming, listing and closing sessions.
-func InitializeResponse(version string) acp.InitializeResponse {
+func InitializeResponse(version, title string) acp.InitializeResponse {
+	info := &acp.Implementation{Name: "agentloop", Version: version}
+	if title != "" {
+		info.Title = &title
+	}
 	return acp.InitializeResponse{
 		ProtocolVersion: acp.ProtocolVersion(acp.WireProtocolVersion),
-		AgentInfo:       &acp.Implementation{Name: "agentloop", Version: version},
+		AgentInfo:       info,
 		AuthMethods:     []acp.AuthMethod{},
 		AgentCapabilities: acp.AgentCapabilities{
 			LoadSession:        true,
