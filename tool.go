@@ -7,6 +7,8 @@ import (
 	"strings"
 
 	"github.com/santhosh-tekuri/jsonschema/v6"
+
+	"github.com/kirahowe/agentloop/internal/strictjson"
 )
 
 // A Tool is something the model may call. An Agent has no tools but the
@@ -140,6 +142,11 @@ func (tb *toolbox) check(name string, input json.RawMessage) string {
 	v, err := jsonschema.UnmarshalJSON(strings.NewReader(string(input)))
 	if err != nil {
 		return fmt.Sprintf("The input to %s is not valid JSON: %v", name, err)
+	}
+	// A key given twice means different things to different readers (the
+	// schema, the digest a person approves, the tool), so it is refused.
+	if err := strictjson.DuplicateKeys(input); err != nil {
+		return fmt.Sprintf("The input to %s is not valid: %v", name, err)
 	}
 	if err := schema.Validate(v); err != nil {
 		return fmt.Sprintf("The input to %s does not match its schema: %v", name, err)

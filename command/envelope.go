@@ -8,9 +8,11 @@ import (
 	"fmt"
 	"io"
 	"os/exec"
+	"reflect"
 	"strings"
 
 	"github.com/kirahowe/agentloop"
+	"github.com/kirahowe/agentloop/internal/strictjson"
 )
 
 // stdinEnvelope is what an envelope tool reads.
@@ -82,10 +84,14 @@ func StdinEnvelope(call agentloop.Call) []byte {
 }
 
 // ParseEnvelope reads an envelope tool's stdout. It returns the result,
-// or why stdout is not exactly one valid envelope: unknown or missing
-// fields, any label known does not accept, or anything after the object
-// but whitespace.
+// or why stdout is not exactly one valid envelope: unknown, missing,
+// repeated or differently spelled fields (so "Labels" or a second
+// "labels" cannot replace the labels), any label known does not accept,
+// or anything after the object but whitespace.
 func ParseEnvelope(stdout []byte, known func(string) bool) (agentloop.Result, string) {
+	if err := strictjson.Check(stdout, reflect.TypeFor[stdoutEnvelope]()); err != nil {
+		return agentloop.Result{}, "stdout is not an envelope: " + err.Error()
+	}
 	dec := json.NewDecoder(bytes.NewReader(stdout))
 	dec.DisallowUnknownFields()
 	var env stdoutEnvelope

@@ -117,6 +117,25 @@ func TestEnvelopeTimeoutIsTheAgentsToReport(t *testing.T) {
 	}
 }
 
+// Regression: encoding/json reads keys without regard to case and lets a
+// repeated key win, so a second "labels" or a "Labels" could replace the
+// labels the envelope declared.
+func TestParseEnvelopeRefusesRepeatedAndMisspelledKeys(t *testing.T) {
+	for _, out := range []string{
+		`{"content":"page text","labels":["contaminated"],"labels":[]}`,
+		`{"content":"page text","labels":["contaminated"],"Labels":[]}`,
+		`{"content":"page text","LABELS":["contaminated"],"labels":[]}`,
+		`{"content":"page text","labels":["private","contaminated"],"lAbElS":["private"]}`,
+		`{"CONTENT":"x","Is_Error":true,"LABELS":["private"]}`,
+		`{"content":"x","content":"y","labels":[]}`,
+		`{"content":"x","is_error":true,"is_error":false,"labels":[]}`,
+	} {
+		if res, why := ParseEnvelope([]byte(out), knownLabel); why == "" {
+			t.Errorf("accepted %s as %+v", out, res)
+		}
+	}
+}
+
 // ParseEnvelope accepts exactly one envelope object with known labels and
 // nothing else after it.
 func TestParseEnvelopeProperties(t *testing.T) {
