@@ -126,6 +126,11 @@ func runCmd(ctx context.Context, req *request.Request, stdout, stderr io.Writer)
 		return usage.Errorf("run has no prompt and the session has no conversation to resume")
 	}
 
+	if !req.Restricted() && sess.Policed() {
+		// Carrying a labelled or held session on with no policy would
+		// drop everything the policy stood for.
+		return usage.Errorf("the session was run under a policy, and this request has none")
+	}
 	agent := req.Agent(key)
 	resolved, err := resolve(ctx, agent, sess, req.Resolve)
 	if err != nil {
@@ -165,14 +170,8 @@ func runCmd(ctx context.Context, req *request.Request, stdout, stderr io.Writer)
 // A call already resolved the same way is passed over (see Agent.Resolve).
 func resolve(ctx context.Context, agent *agentloop.Agent, sess *agentloop.Session, list []agentloop.Resolution) ([]agentloop.Entry, error) {
 	for _, r := range list {
-		info, ok := sess.Call(r.CallID)
-		switch {
-		case !ok:
-			return nil, usage.Errorf("resolve names the call %q, which the session does not have", r.CallID)
-		case r.InputSHA256 != agentloop.InputDigest(info.Call.Input):
-			return nil, usage.Errorf("resolve gives the call %q an input_sha256 that does not match its input", r.CallID)
-		case !info.Held() && !(info.Resolved && info.Decision.Verdict == r.Verdict):
-			return nil, usage.Errorf("resolve names the call %q, which is not held", r.CallID)
+		if err := agent.CheckResolve(ctx, sess, r); err != nil {
+			return nil, usage.Errorf("resolve: %v", err)
 		}
 	}
 	before := len(sess.Entries())

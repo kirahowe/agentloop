@@ -147,7 +147,31 @@ func (t Translator) delta(d agentloop.Delta) (Translator, []Update) {
 	return t, nil
 }
 
+// entry translates one entry. When the entry changes the session's labels
+// and none of its updates carries them, a session_info_update with
+// _meta["agentloop/labels"] is added, so a client always knows the labels
+// as they are.
 func (t Translator) entry(e agentloop.Entry) (Translator, []Update) {
+	before := t.labels
+	t, ups := t.entryUpdates(e)
+	if slices.Equal(before, t.labels) {
+		return t, ups
+	}
+	for _, u := range ups {
+		if u.ToolCall != nil || u.ToolCallUpdate != nil || u.UsageUpdate != nil {
+			return t, ups
+		}
+	}
+	return t, append(ups, LabelsUpdate(t.labels))
+}
+
+// LabelsUpdate is a session_info_update that only shows the session's
+// labels, under _meta["agentloop/labels"].
+func LabelsUpdate(labels []string) Update {
+	return acp.SessionUpdate{SessionInfoUpdate: &acp.SessionSessionInfoUpdate{Meta: labelsMeta(labels)}}
+}
+
+func (t Translator) entryUpdates(e agentloop.Entry) (Translator, []Update) {
 	streamedText, streamedThought := t.text, t.thought
 	t.seq, t.text, t.thought = e.Seq, "", ""
 	if add := entryLabels(e); len(add) > 0 {
@@ -269,6 +293,9 @@ func Replay(opts Options, entries []agentloop.Entry) []Update {
 		if u, ok := (Translator{opts: opts, total: total}).usage(last.Usage, labels); ok {
 			ups = append(ups, u)
 		}
+	}
+	if len(labels) > 0 {
+		ups = append(ups, LabelsUpdate(labels))
 	}
 	return ups
 }

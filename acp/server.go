@@ -70,6 +70,9 @@ type Config struct {
 	// Log takes the server's diagnostics. Nothing is ever written to the
 	// connection but JSON-RPC.
 	Log io.Writer
+	// Unrestricted says the request has no policy. A session a policy has
+	// marked (see Session.Policed) is then refused on load and resume.
+	Unrestricted bool
 }
 
 // session is one open session: the log, its lock, where its turn is, and
@@ -231,8 +234,27 @@ func (s *Server) NewSession(ctx context.Context, req acp.NewSessionRequest) (acp
 		unlock()
 		return acp.NewSessionResponse{}, internal(err.Error(), nil)
 	}
-	s.register(s.newSession(id, conn, sess, unlock, info))
+	ss := s.newSession(id, conn, sess, unlock, info)
+	s.register(ss)
+	showLabels(ctx, ss)
 	return acp.NewSessionResponse{SessionId: id, ConfigOptions: ConfigOptions(info)}, nil
+}
+
+// showLabels sends a session's labels, if it holds any, once the response
+// that opens it has been written: the client does not know the session
+// before. A load needs none; its replay ends with them.
+func showLabels(ctx context.Context, ss *session) {
+	if ss.conn == nil {
+		return
+	}
+	id := ss.id
+	labels := ss.sess.Labels()
+	if len(labels) == 0 {
+		return
+	}
+	acp.AfterResponse(ctx, func(context.Context) error {
+		return ss.conn.SessionUpdate(context.Background(), acp.SessionNotification{SessionId: id, Update: LabelsUpdate(labels)})
+	})
 }
 
 // seed gives a session the request's starting labels, written to its log
@@ -284,6 +306,12 @@ func (s *Server) ResumeSession(ctx context.Context, req acp.ResumeSessionRequest
 	if err := s.reopen(ctx, req.SessionId, false, info); err != nil {
 		return acp.ResumeSessionResponse{}, err
 	}
+	s.mu.Lock()
+	ss, ok := s.sessions[req.SessionId]
+	s.mu.Unlock()
+	if ok {
+		showLabels(ctx, ss)
+	}
 	return acp.ResumeSessionResponse{ConfigOptions: ConfigOptions(info)}, nil
 }
 
@@ -334,6 +362,10 @@ func (s *Server) reopen(ctx context.Context, id acp.SessionId, replay bool, info
 		}
 		if err != nil {
 			return internal(err.Error(), nil)
+		}
+		if s.cfg.Unrestricted && sess.Policed() {
+			unlock()
+			return internal("the session was run under a policy, and this agent has none", map[string]any{"sessionId": string(id)})
 		}
 		if err := s.seed(sess); err != nil {
 			unlock()
@@ -637,10 +669,14 @@ func (s *Server) ask(ctx context.Context, ss *session, agent *agentloop.Agent, h
 		if ss.conn != nil && ctx.Err() == nil {
 			req := PermissionRequest(ss.id, h, s.cfg.Options.Kinds, ss.sess.Labels())
 			resp, err := ss.conn.RequestPermission(ctx, req)
-			verdict = PermissionVerdict(resp, err)
+			verdict = PermissionVerdict(resp, err, ctx.Err() != nil)
 		}
 		r := agentloop.Resolution{CallID: h.ID, Verdict: verdict, InputSHA256: h.InputSHA256}
-		if verdict == agentloop.Deny {
+		if verdict == agentloop.Allow && agent.CheckResolve(ctx, ss.sess, r) != nil {
+			// The policy no longer lets anyone allow it.
+			r.Verdict = agentloop.Deny
+		}
+		if r.Verdict == agentloop.Deny {
 			r.Reason = NotApproved
 		}
 		if err := agent.Resolve(ctx, ss.sess, r); err != nil {

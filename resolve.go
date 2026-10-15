@@ -57,27 +57,14 @@ type Resolution struct {
 // The call must exist and its input must have the digest the resolution
 // names. A call a person already resolved with the same verdict is left
 // as it is, so resolving can be repeated after a crash. Any other call
-// that is not held is an error.
+// that is not held is an error. So is an allow by an agent with no policy,
+// which could not give the call its labels, or one the policy now denies
+// outright: a person can approve what the policy held, not what it
+// refuses.
 func (a *Agent) Resolve(ctx context.Context, s *Session, r Resolution) error {
-	info, ok := s.Call(r.CallID)
-	if !ok {
-		return fmt.Errorf("there is no call %q", r.CallID)
-	}
-	if r.InputSHA256 != InputDigest(info.Call.Input) {
-		return fmt.Errorf("the input of call %q does not have the digest %q", r.CallID, r.InputSHA256)
-	}
-	if r.Verdict != Allow && r.Verdict != Deny {
-		return fmt.Errorf("a held call is resolved with allow or deny, not %q", r.Verdict)
-	}
-	if !info.Held() {
-		if info.Resolved && info.Decision.Verdict == r.Verdict {
-			return nil
-		}
-		return fmt.Errorf("call %q is not held", r.CallID)
-	}
-	d := Decision{Verdict: r.Verdict, Reason: r.Reason}
-	if r.Verdict == Allow && a.Policy != nil {
-		d.Labels = a.Policy.Decide(ctx, info.Call, s.View()).Labels
+	d, noop, err := a.resolution(ctx, s, r)
+	if err != nil || noop {
+		return err
 	}
 	if err := s.Resolve(r.CallID, d); err != nil {
 		return err
@@ -87,4 +74,44 @@ func (a *Agent) Resolve(ctx context.Context, s *Session, r Resolution) error {
 		a.Observe(Event{Entry: &es[len(es)-1]})
 	}
 	return nil
+}
+
+// CheckResolve says whether Resolve would accept r, without writing
+// anything, so a list of resolutions can be checked whole first.
+func (a *Agent) CheckResolve(ctx context.Context, s *Session, r Resolution) error {
+	_, _, err := a.resolution(ctx, s, r)
+	return err
+}
+
+// resolution is the decision Resolve would record for r, or that it would
+// record nothing (noop), or why r is refused.
+func (a *Agent) resolution(ctx context.Context, s *Session, r Resolution) (d Decision, noop bool, err error) {
+	info, ok := s.Call(r.CallID)
+	if !ok {
+		return d, false, fmt.Errorf("there is no call %q", r.CallID)
+	}
+	if r.InputSHA256 != InputDigest(info.Call.Input) {
+		return d, false, fmt.Errorf("the input of call %q does not have the digest %q", r.CallID, r.InputSHA256)
+	}
+	if r.Verdict != Allow && r.Verdict != Deny {
+		return d, false, fmt.Errorf("a held call is resolved with allow or deny, not %q", r.Verdict)
+	}
+	if !info.Held() {
+		if info.Resolved && info.Decision.Verdict == r.Verdict {
+			return d, true, nil
+		}
+		return d, false, fmt.Errorf("call %q is not held", r.CallID)
+	}
+	d = Decision{Verdict: r.Verdict, Reason: r.Reason}
+	if r.Verdict == Allow {
+		if a.Policy == nil {
+			return d, false, fmt.Errorf("call %q cannot be allowed by an agent with no policy", r.CallID)
+		}
+		pd := a.Policy.Decide(ctx, info.Call, s.View())
+		if pd.Verdict == Deny {
+			return d, false, fmt.Errorf("the policy denies call %q: %s", r.CallID, pd.Reason)
+		}
+		d.Labels = pd.Labels
+	}
+	return d, false, nil
 }

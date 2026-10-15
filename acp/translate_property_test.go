@@ -145,6 +145,7 @@ type stream struct {
 	order         []string
 	notices       int
 	usage         int
+	info          int
 }
 
 type callView struct {
@@ -210,6 +211,8 @@ func read(t *rapid.T, ups []Update) stream {
 			s.notices++
 		case u.UsageUpdate != nil:
 			s.usage++
+		case u.SessionInfoUpdate != nil:
+			s.info++
 		default:
 			t.Fatalf("an unexpected update: %+v", u)
 		}
@@ -365,9 +368,11 @@ func checkTextConserved(t *rapid.T, s stream, entries []agentloop.Entry) {
 	}
 }
 
-// Labels: every tool_call, tool_call_update and usage_update carries the
-// session's labels under _meta["agentloop/labels"]; they only grow, and
-// they are never more than the session holds by the end of the run.
+// Labels: every tool_call, tool_call_update, usage_update and
+// session_info_update carries the session's labels under
+// _meta["agentloop/labels"]; they only grow, they are never more than the
+// session holds by the end of the run, and the last ones shown are the
+// session's final labels, so a change is never left unshown.
 func checkLabels(t *rapid.T, ups []Update, entries []agentloop.Entry) {
 	var final []string
 	for _, e := range entries {
@@ -383,6 +388,8 @@ func checkLabels(t *rapid.T, ups []Update, entries []agentloop.Entry) {
 			meta = u.ToolCallUpdate.Meta
 		case u.UsageUpdate != nil:
 			meta = u.UsageUpdate.Meta
+		case u.SessionInfoUpdate != nil:
+			meta = u.SessionInfoUpdate.Meta
 		default:
 			continue
 		}
@@ -401,5 +408,8 @@ func checkLabels(t *rapid.T, ups []Update, entries []agentloop.Entry) {
 			}
 		}
 		prev = got
+	}
+	if len(final) > 0 && !slices.Equal(prev, final) {
+		t.Fatalf("the client last saw labels %v, the session holds %v", prev, final)
 	}
 }

@@ -641,3 +641,10 @@ type describedModel struct {
 func (d describedModel) Describe(context.Context, string) (agentloop.ModelInfo, error) {
 	return d.info, d.err
 }
+
+// notes is every update the client has received so far.
+func (c *testClient) notes() []acp.SessionNotification {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return append([]acp.SessionNotification(nil), c.updates...)
+}

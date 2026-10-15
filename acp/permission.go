@@ -43,11 +43,12 @@ func PermissionRequest(id acp.SessionId, held agentloop.HeldCall, kinds map[stri
 }
 
 // PermissionVerdict is the person's answer: allow only when the client
-// selected the allow option this agent offered. A rejection, a
-// cancellation, an option that was not offered, or no answer at all (an
-// error, a closed connection) is a deny.
-func PermissionVerdict(resp acp.RequestPermissionResponse, err error) agentloop.Verdict {
-	if err != nil || resp.Outcome.Selected == nil || resp.Outcome.Selected.OptionId != OptionAllowOnce {
+// selected the allow option this agent offered, and the turn was not
+// cancelled meanwhile (an answer can still arrive after a cancel). A
+// rejection, a cancellation, an option that was not offered, or no answer
+// at all (an error, a closed connection) is a deny.
+func PermissionVerdict(resp acp.RequestPermissionResponse, err error, cancelled bool) agentloop.Verdict {
+	if cancelled || err != nil || resp.Outcome.Selected == nil || resp.Outcome.Selected.OptionId != OptionAllowOnce {
 		return agentloop.Deny
 	}
 	return agentloop.Allow

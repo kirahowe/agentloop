@@ -202,3 +202,20 @@ func TestTrifectaBrokenEnvelope(t *testing.T) {
 		t.Fatal("the operator's log lacks stderr")
 	}
 }
+
+// Regression: an unrestricted request could carry on a session held under
+// a policy, and drop everything the policy stood for.
+func TestUnrestrictedRequestRefusesAPolicedSession(t *testing.T) {
+	api := newFakeAPI(t, toolReply("toolu_1", "read_mail", `{}`), toolReply("toolu_2", "web_post", `{}`), textReply("done"))
+	f, _ := trifectaFixture(t, api)
+	if out := f.run().outcome(t); out["reason"] != "held" {
+		t.Fatalf("outcome %v", out)
+	}
+	f.req["prompt"] = ""
+	f.req["policy"] = map[string]any{"unrestricted": true}
+	delete(f.req, "tool_protocol")
+	res := f.run()
+	if res.code != 2 || res.stdout != "" || !strings.Contains(res.stderr, "policy") {
+		t.Fatalf("exit %d stdout %q stderr %q", res.code, res.stdout, res.stderr)
+	}
+}

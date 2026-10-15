@@ -14,6 +14,7 @@ import (
 	"net/url"
 	"os"
 	"os/exec"
+	"reflect"
 	"regexp"
 	"slices"
 	"sort"
@@ -24,6 +25,7 @@ import (
 	"github.com/kirahowe/agentloop"
 	"github.com/kirahowe/agentloop/anthropic"
 	"github.com/kirahowe/agentloop/command"
+	"github.com/kirahowe/agentloop/internal/strictjson"
 	"github.com/kirahowe/agentloop/internal/usage"
 	"github.com/kirahowe/agentloop/openai"
 	"github.com/kirahowe/agentloop/trifecta"
@@ -103,6 +105,11 @@ func Load(path string, mode Mode) (*Request, error) {
 	raw, err := os.ReadFile(path)
 	if err != nil {
 		return nil, usage.Errorf("cannot read request: %v", err)
+	}
+	// encoding/json takes "POLICY" for "policy" and lets a repeated key
+	// replace the first; a request names each field once, exactly.
+	if err := strictjson.Check(raw, reflect.TypeFor[Request]()); err != nil {
+		return nil, usage.Errorf("bad request %s: %v", path, err)
 	}
 	dec := json.NewDecoder(bytes.NewReader(raw))
 	dec.DisallowUnknownFields()
@@ -259,6 +266,9 @@ func (r *Request) validateMode(mode Mode) error {
 			if f.set {
 				return usage.Errorf("%s is only for agentloop acp", f.name)
 			}
+		}
+		if r.Resolve != nil && !r.Restricted() {
+			return usage.Errorf("resolve needs a policy: a person's allow takes the call's labels from it")
 		}
 		seen := map[string]bool{}
 		for _, res := range r.Resolve {

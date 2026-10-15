@@ -156,6 +156,23 @@ func (s *Session) Held() []ToolCall {
 	return held
 }
 
+// Policed reports whether a policy has left its mark on the session: it
+// holds a label, or a call in it was ever held. Such a session should be
+// carried on only under a policy.
+func (s *Session) Policed() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if len(s.labels) > 0 {
+		return true
+	}
+	for _, e := range s.entries {
+		if e.Type == EntryDecision && e.Decision.Verdict == Hold {
+			return true
+		}
+	}
+	return false
+}
+
 // Pending lists the calls of the last assistant turn that have no result
 // yet, in order. A resumed run settles exactly these.
 func (s *Session) Pending() []ToolCall {

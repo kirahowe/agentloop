@@ -145,6 +145,16 @@ func TestUnusableRequestMatrix(t *testing.T) {
 			restrict(m)
 			policyTools(m)["t"] = map[string]any{"class": "read", "hold": true}
 		}},
+		{"policy in capitals", func(m map[string]any) { m["POLICY"] = m["policy"]; delete(m, "policy") }},
+		{"a field given twice", func(map[string]any) {}},
+		{"a policy tool field in capitals", func(m map[string]any) {
+			restrict(m)
+			policyTools(m)["t"] = map[string]any{"Class": "read"}
+		}},
+		{"resolve field in capitals", func(m map[string]any) {
+			restrict(m)
+			m["resolve"] = []map[string]any{{"call_id": "a", "Verdict": "allow", "input_sha256": "x"}}
+		}},
 		{"resolve without call_id", func(m map[string]any) { m["resolve"] = []map[string]any{{"verdict": "allow"}} }},
 		{"resolve with hold", func(m map[string]any) {
 			m["resolve"] = []map[string]any{{"call_id": "a", "verdict": "hold", "input_sha256": "x"}}
@@ -217,6 +227,11 @@ func TestUnusableRequestMatrix(t *testing.T) {
 			var raw []byte
 			if c.name == "session with NUL" || c.name == "tool_env NUL value" {
 				raw, _ = json.Marshal(f.req) // json escapes the NUL as \u0000
+			}
+			if c.name == "a field given twice" {
+				// A later "policy" would replace the first.
+				raw, _ = json.Marshal(f.req)
+				raw = append([]byte(`{"policy":{"unrestricted":true},`), raw[1:]...)
 			}
 			r := f.exec(raw)
 			// The session-is-a-directory case has the "session file" there already.

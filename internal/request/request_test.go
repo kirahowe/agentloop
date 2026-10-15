@@ -219,7 +219,12 @@ func TestModes(t *testing.T) {
 		{"acp refuses context_window", ACP, acp(func(m map[string]any) { m["context_window"] = 200000 }), `unknown field "context_window"`},
 		{"acp refuses NUL in session_dir", ACP, acp(func(m map[string]any) { m["session_dir"] = "/tmp/a\x00b" }), "NUL"},
 		{"run minimal", Run, run(same), ""},
+		{"run refuses resolve without a policy", Run, run(func(m map[string]any) {
+			m["resolve"] = []map[string]any{{"call_id": "a", "verdict": "deny", "input_sha256": "x"}}
+		}), "resolve needs a policy"},
 		{"run with resolve", Run, run(func(m map[string]any) {
+			m["policy"] = map[string]any{"tools": map[string]any{"look": map[string]any{"class": "read"}}}
+			m["tool_protocol"] = "envelope"
 			m["resolve"] = []map[string]any{{"call_id": "a", "verdict": "allow", "input_sha256": "x"}, {"call_id": "b", "verdict": "deny", "reason": "no", "input_sha256": "y"}}
 		}), ""},
 		{"acp refuses resolve", ACP, acp(func(m map[string]any) {

@@ -157,7 +157,12 @@ which must match the call's input. An allow takes its labels from the
 agent's policy now, as an allow from the policy would have; the person
 never supplies labels. Resolving a call again with the verdict it was
 resolved with does nothing, and any other call that is not held is an
-error. The next `Run` carries on: it runs the call or reports the denial,
+error. An allow is refused when the agent has no policy (nothing could
+give the call its labels) or when its policy now denies the call: a
+person can approve what the policy held, not what it refuses.
+`CheckResolve` says whether `Resolve` would accept a resolution, without
+writing anything. `Session.Policed` reports whether a session holds a
+label or ever held a call. The next `Run` carries on: it runs the call or reports the denial,
 then goes back to the model. `Session.Resolve(callID, Decision)` is the
 lower-level form, which records the decision as given.
 
@@ -312,8 +317,8 @@ in order:
 - A call that was started and never finished gets an error result saying
   the run stopped while it was running, so it may or may not have taken
   effect. It is never run again.
-- A call with no decision is checked (tool exists, input matches the
-  schema, policy) and the decision is recorded. A failed check is a deny
+- A call with no decision is checked (tool exists, input is JSON that
+  names no key twice in any object and matches the schema, policy) and the decision is recorded. A failed check is a deny
   with the reason. So is a call the policy allowed in an earlier run that
   never started: that allow is stale, since the session may hold more
   labels now, and the call is decided again. A person's allow stands.
@@ -383,7 +388,11 @@ true}` turns the trifecta off, for examples and tests, and nothing else
 may sit beside it; `"unrestricted": false` is refused. A real policy
 needs `"tool_protocol": "envelope"`, an entry with a known class for
 every tool and none for anything else, and only known labels. Unknown
-fields anywhere are refused. With a real policy the agent's starting
+fields anywhere are refused, and so are fields spelled other than exactly
+(`"POLICY"`) or given twice in one object, which encoding/json would
+otherwise accept, the last one winning. `resolve` needs a real policy, and
+a request without one refuses a session that `Session.Policed` reports:
+an unrestricted request never carries on a policed session. With a real policy the agent's starting
 labels are `policy.labels` and its policy is `trifecta.Policy`.
 
 **Tool protocols.** A call runs `tool_command` with the tool's name
@@ -409,6 +418,7 @@ whitespace:
 `content` and `labels` are required and `is_error` defaults to false. The
 result's labels are added to the session. If the program exits non-zero,
 writes more than the output cap (1 MiB) to stdout, or writes anything
+(a field spelled otherwise or given twice included)
 but one such envelope with known labels, the model gets only "The tool
 <name> failed." and the call is an error. The reason, with the program's
 stderr, goes to the result entry's `log`, for the operator. A timeout or
@@ -469,7 +479,8 @@ agentloop writing. A second signal exits at once.
 `session/new` creates the log file straight away, so a session can be
 listed and loaded before anything has been said in it. `session/new`,
 `session/load` and `session/resume` write the request's `policy.labels`
-into the session's log as they open it. A prompt with an embedded
+into the session's log as they open it. Without a policy, load and
+resume refuse a session `Session.Policed` reports (`-32603`). A prompt with an embedded
 `resource` or a `resource_link` adds `contaminated` to the session, since
 its content could have come from anyone. Nothing a client sends removes a
 label or changes the policy.
@@ -482,8 +493,9 @@ in `_meta["agentloop/labels"]`, with two options, `allow_once` and
 option allows; a reject, an option that was not offered, a `cancelled`
 outcome, an error or a lost connection is a deny, recorded through
 `Agent.Resolve` with the reason "A person did not approve this call.".
-Then the run carries on. A `session/cancel` while a request is open
-denies it and the turn is answered `cancelled`. A held call found in a
+An allow the policy now denies is recorded as a deny. Then the run
+carries on. A `session/cancel` while a request is open denies it, even if
+an allow arrives after the cancel, and the turn is answered `cancelled`. A held call found in a
 loaded session is asked about at the next prompt, never run on its own. `session/load`
 sends the session's history and then answers; `session/resume` answers
 without it. Both take the session's lock, so a session open in another
@@ -533,7 +545,11 @@ The outcome of the turn answers `session/prompt`:
 Two `_meta` keys carry what ACP has no field for:
 `_meta["agentloop/labels"]` on every `tool_call`, `tool_call_update` and
 `usage_update` holds the session's labels as of that update (a replayed
-call shows them as of its last entry), and `_meta["agentloop/retry"]` on a notice for a
+call shows them as of its last entry). When the labels change and nothing
+else sent for the change carries them (a seed, a resource in a prompt, a
+resolution), a `session_info_update` with only that `_meta` follows; one
+also follows `session/new` and `session/resume` of a labelled session,
+and ends the replay of a labelled one. And `_meta["agentloop/retry"]` on a notice for a
 model call that will be retried holds `kind`, `wait_ms`, `retry_at`,
 `attempt` and, when there was one, the HTTP `status`, so a client can
 count down to the retry.
@@ -571,7 +587,10 @@ to the session and not passed on: tools get only `tool_env`.
   envelope returns; a tool that under-labels its output, or an egress
   tool classed `read`, gets through. It also treats the model provider as
   an accepted destination: everything a session sees is sent to it.
-- A tool is killed with its process group. A tool that leaves the group
+- A tool is killed with its process group. The group's leader is a
+  sentinel (`/bin/cat` reading a pipe) that agentloop reaps only after it
+  has swept the group, so the sweep can never reach a group that reused
+  the id. A tool that leaves the group
   (with `setsid`, say) can outlive its call. On Linux a cgroup could close
   that gap; macOS has no equivalent.
 - When agentloop itself is killed with SIGKILL, a tool that is running

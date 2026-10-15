@@ -9,6 +9,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	acp "github.com/caelis-labs/acp-go-sdk"
 	"pgregory.net/rapid"
@@ -34,9 +35,10 @@ func TestPropertyPermissionVerdict(t *testing.T) {
 			err = errors.New("connection closed")
 			resp.Outcome = acp.NewRequestPermissionOutcomeSelected(OptionAllowOnce)
 		}
-		got := PermissionVerdict(resp, err)
+		cancelled := rapid.Bool().Draw(t, "cancelled")
+		got := PermissionVerdict(resp, err, cancelled)
 		want := agentloop.Deny
-		if err == nil && resp.Outcome.Selected != nil && resp.Outcome.Selected.OptionId == OptionAllowOnce {
+		if !cancelled && err == nil && resp.Outcome.Selected != nil && resp.Outcome.Selected.OptionId == OptionAllowOnce {
 			want = agentloop.Allow
 		}
 		if got != want {
@@ -278,5 +280,92 @@ func TestLoadSeedsLabels(t *testing.T) {
 	}
 	if got := s.Labels(); !slices.Equal(got, []string{"contaminated"}) {
 		t.Fatalf("labels %v", got)
+	}
+}
+
+// Regression: an allow that arrives after the turn was cancelled must not
+// count; the SDK can hand back the client's answer after the cancel.
+func TestAllowAfterCancelIsADeny(t *testing.T) {
+	var ran []string
+	h := serve(t, holdAgent(&ran), Options{}, false)
+	var id acp.SessionId
+	h.cl.permit = func(ctx context.Context, _ acp.RequestPermissionRequest) (acp.RequestPermissionResponse, error) {
+		h.client.Cancel(context.Background(), acp.CancelNotification{SessionId: id})
+		deadline := time.Now().Add(5 * time.Second)
+		for st, _ := h.srv.State(id); st != Cancelling && time.Now().Before(deadline); st, _ = h.srv.State(id) {
+			time.Sleep(100 * time.Microsecond)
+		}
+		return acp.RequestPermissionResponse{Outcome: acp.NewRequestPermissionOutcomeSelected(OptionAllowOnce)}, nil
+	}
+	id = h.newSession()
+	resp, err := h.prompt(id, "post it")
+	if err != nil || resp.StopReason != acp.StopReasonCancelled {
+		t.Fatalf("%+v %v", resp, err)
+	}
+	h.srv.mu.Lock()
+	ss := h.srv.sessions[id]
+	h.srv.mu.Unlock()
+	info, _ := ss.sess.Call("c1")
+	if len(ran) != 0 || !info.Resolved || info.Decision.Verdict != agentloop.Deny {
+		t.Fatalf("ran %v, call %+v", ran, info)
+	}
+}
+
+// Regression: a server for an unrestricted request refuses to load or
+// resume a session a policy has marked.
+func TestUnrestrictedServerRefusesAPolicedSession(t *testing.T) {
+	dir := t.TempDir()
+	var ran []string
+	h := serveIn(t, dir, holdAgent(&ran), Options{}, false)
+	id := h.newSession()
+	if _, err := h.client.CloseSession(h.ctx(), acp.CloseSessionRequest{SessionId: id}); err != nil {
+		t.Fatal(err)
+	}
+	h2 := serveIn(t, dir, &agentloop.Agent{Model: fake.Script(), ModelID: fake.ModelID}, Options{}, false)
+	h2.srv.cfg.Unrestricted = true
+	if err := h2.load(id); err == nil {
+		t.Fatal("loaded a policed session without a policy")
+	}
+	if _, err := h2.client.ResumeSession(h2.ctx(), acp.ResumeSessionRequest{SessionId: id, Cwd: "/"}); err == nil {
+		t.Fatal("resumed a policed session without a policy")
+	}
+}
+
+// Regression: the SDK can return the client's answer after the turn was
+// cancelled; an allow then is a deny.
+func TestAllowAnswerAfterCancelDenies(t *testing.T) {
+	resp := acp.RequestPermissionResponse{Outcome: acp.NewRequestPermissionOutcomeSelected(OptionAllowOnce)}
+	if PermissionVerdict(resp, nil, true) != agentloop.Deny {
+		t.Fatal("an allow after a cancel counted")
+	}
+	if PermissionVerdict(resp, nil, false) != agentloop.Allow {
+		t.Fatal("an allow did not count")
+	}
+}
+
+// Regression: a label change with no tool call or usage update (a seed, a
+// resource in the prompt) was invisible to a client. It now comes as a
+// session_info_update with the labels in _meta.
+func TestLabelChangesAreShown(t *testing.T) {
+	a := &agentloop.Agent{Model: fake.New(func(*agentloop.Request) (*agentloop.Response, error) { return fake.Text("ok"), nil }),
+		ModelID: fake.ModelID, Labels: []string{trifecta.Private}}
+	h := serve(t, a, Options{}, false)
+	id := h.newSession()
+	if _, err := h.client.Prompt(h.ctx(), acp.PromptRequest{SessionId: id, Prompt: []acp.ContentBlock{
+		acp.TextBlock("read this"), acp.ResourceLinkBlock("page", "https://example.com/x"),
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	var shown [][]string
+	for _, n := range h.cl.notes() {
+		if u := n.Update.SessionInfoUpdate; u != nil {
+			var l []string
+			json.Unmarshal(u.Meta["agentloop/labels"], &l)
+			shown = append(shown, l)
+		}
+	}
+	want := [][]string{{"private"}, {"contaminated", "private"}}
+	if !reflect.DeepEqual(shown, want) {
+		t.Fatalf("labels shown %v, want %v", shown, want)
 	}
 }
