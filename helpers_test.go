@@ -9,8 +9,8 @@ import (
 	"testing"
 	"time"
 
-	"agentloop"
-	"agentloop/fake"
+	"github.com/kirahowe/agentloop"
+	"github.com/kirahowe/agentloop/fake"
 )
 
 // counter counts tool executions by what the tool was given.

@@ -11,8 +11,8 @@ import (
 
 	"pgregory.net/rapid"
 
-	"agentloop"
-	"agentloop/fake"
+	"github.com/kirahowe/agentloop"
+	"github.com/kirahowe/agentloop/fake"
 )
 
 // randomLog runs a random scenario and returns the log it left, line by

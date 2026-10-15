@@ -8,8 +8,8 @@ import (
 	"strings"
 	"testing"
 
-	"agentloop"
-	"agentloop/fake"
+	"github.com/kirahowe/agentloop"
+	"github.com/kirahowe/agentloop/fake"
 )
 
 func sampleEntries(t *testing.T) []agentloop.Entry {

@@ -8,7 +8,7 @@ import (
 	"strings"
 	"testing"
 
-	"agentloop"
+	"github.com/kirahowe/agentloop"
 )
 
 // valFixture is a request on disk with a fake API that always answers "done".

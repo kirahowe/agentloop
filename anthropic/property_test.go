@@ -18,7 +18,7 @@ import (
 
 	sdk "github.com/anthropics/anthropic-sdk-go"
 
-	"agentloop"
+	"github.com/kirahowe/agentloop"
 )
 
 // ---------------------------------------------------------------- generators

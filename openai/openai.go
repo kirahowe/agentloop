@@ -25,7 +25,7 @@ import (
 	"github.com/openai/openai-go/v3/responses"
 	"github.com/openai/openai-go/v3/shared"
 
-	"agentloop"
+	"github.com/kirahowe/agentloop"
 )
 
 // Provider is the name recorded in Native.Provider.

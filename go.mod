@@ -1,4 +1,4 @@
-module agentloop
+module github.com/kirahowe/agentloop
 
 go 1.27.1
 

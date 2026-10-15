@@ -13,7 +13,7 @@ import (
 	"testing"
 	"time"
 
-	"agentloop"
+	"github.com/kirahowe/agentloop"
 )
 
 type server struct {

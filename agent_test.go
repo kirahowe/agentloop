@@ -11,8 +11,8 @@ import (
 	"testing"
 	"time"
 
-	"agentloop"
-	"agentloop/fake"
+	"github.com/kirahowe/agentloop"
+	"github.com/kirahowe/agentloop/fake"
 )
 
 func TestToolLoop(t *testing.T) {

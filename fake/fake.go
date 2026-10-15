@@ -9,7 +9,7 @@ import (
 	"slices"
 	"sync"
 
-	"agentloop"
+	"github.com/kirahowe/agentloop"
 )
 
 // Model answers each request with a function, or from a script.

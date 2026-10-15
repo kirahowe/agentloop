@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"agentloop"
+	"github.com/kirahowe/agentloop"
 )
 
 // TestLiveToolUseWithReasoning is a smoke test against the real API. It

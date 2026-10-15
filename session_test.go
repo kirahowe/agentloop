@@ -5,7 +5,7 @@ import (
 	"reflect"
 	"testing"
 
-	"agentloop"
+	"github.com/kirahowe/agentloop"
 )
 
 func msgEntry(m agentloop.Message, stop agentloop.Stop, u agentloop.Usage) agentloop.Entry {

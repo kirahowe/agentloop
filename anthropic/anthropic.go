@@ -20,7 +20,7 @@ import (
 	"github.com/anthropics/anthropic-sdk-go/packages/param"
 	"github.com/anthropics/anthropic-sdk-go/shared/constant"
 
-	"agentloop"
+	"github.com/kirahowe/agentloop"
 )
 
 // Provider is the name recorded in Native.Provider.

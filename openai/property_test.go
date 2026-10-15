@@ -17,7 +17,7 @@ import (
 
 	"github.com/openai/openai-go/v3/responses"
 
-	"agentloop"
+	"github.com/kirahowe/agentloop"
 )
 
 // ---------------------------------------------------------------- generators

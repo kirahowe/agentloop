@@ -26,10 +26,10 @@ import (
 	"syscall"
 	"time"
 
-	"agentloop"
-	"agentloop/anthropic"
-	"agentloop/command"
-	"agentloop/openai"
+	"github.com/kirahowe/agentloop"
+	"github.com/kirahowe/agentloop/anthropic"
+	"github.com/kirahowe/agentloop/command"
+	"github.com/kirahowe/agentloop/openai"
 )
 
 // version is set at build time with -ldflags "-X main.version=...".

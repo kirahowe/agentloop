@@ -6,8 +6,8 @@ import (
 	"fmt"
 	"testing"
 
-	"agentloop"
-	"agentloop/fake"
+	"github.com/kirahowe/agentloop"
+	"github.com/kirahowe/agentloop/fake"
 )
 
 // crashScenario builds an agent over a fixed turn of calls and returns it

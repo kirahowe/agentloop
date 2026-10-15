@@ -20,8 +20,8 @@ import (
 
 	"pgregory.net/rapid"
 
-	"agentloop"
-	"agentloop/fake"
+	"github.com/kirahowe/agentloop"
+	"github.com/kirahowe/agentloop/fake"
 )
 
 var errCrash = errors.New("simulated crash")

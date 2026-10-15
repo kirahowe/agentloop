@@ -5,8 +5,8 @@ import (
 	"errors"
 	"testing"
 
-	"agentloop"
-	"agentloop/fake"
+	"github.com/kirahowe/agentloop"
+	"github.com/kirahowe/agentloop/fake"
 )
 
 func TestScript(t *testing.T) {

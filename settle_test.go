@@ -6,8 +6,8 @@ import (
 	"strings"
 	"testing"
 
-	"agentloop"
-	"agentloop/fake"
+	"github.com/kirahowe/agentloop"
+	"github.com/kirahowe/agentloop/fake"
 )
 
 // A turn that ends without tool_use and holds calls has them answered

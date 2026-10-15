@@ -16,7 +16,7 @@ import (
 	"syscall"
 	"time"
 
-	"agentloop"
+	"github.com/kirahowe/agentloop"
 )
 
 // DefaultMaxOutputBytes caps each of stdout and stderr when

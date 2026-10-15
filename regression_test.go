@@ -13,8 +13,8 @@ import (
 
 	"pgregory.net/rapid"
 
-	"agentloop"
-	"agentloop/fake"
+	"github.com/kirahowe/agentloop"
+	"github.com/kirahowe/agentloop/fake"
 )
 
 // A turn the provider paused may still carry calls that were cut off. The

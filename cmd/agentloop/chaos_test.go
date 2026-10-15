@@ -27,7 +27,7 @@ import (
 	"testing"
 	"time"
 
-	"agentloop"
+	"github.com/kirahowe/agentloop"
 )
 
 var (
