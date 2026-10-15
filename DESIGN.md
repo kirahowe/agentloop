@@ -45,7 +45,8 @@ leaves a record that can be resumed without repeating an action.
 | `agentloop` | The core: messages, the `Model` and `Tool` interfaces, policies, sessions, stores, the agent loop |
 | `agentloop/anthropic` | The `Model` for Anthropic's Messages API |
 | `agentloop/openai` | The `Model` for OpenAI's Responses API |
-| `agentloop/command` | A `Tool` that runs a program: the input on stdin, the output as the result |
+| `agentloop/trifecta` | The trifecta rule, pure, and a `Policy` built on it |
+| `agentloop/command` | A `Tool` that runs a program, with the plain or the envelope protocol |
 | `agentloop/fake` | A scripted `Model` for tests |
 | `cmd/agentloop` | The command: runs one agent from a JSON request |
 
@@ -101,7 +102,12 @@ is an error then, not at the first call. Schemas cannot load remote
 references.
 
 A `Result` can carry labels, which are added to the session when the
-result is recorded.
+result is recorded. Its `Log` is for the operator: it is kept in the
+`tool_result` entry and never shown to the model.
+
+A tool that also implements `CallTool` is called through `CallWith`,
+which gives it the call's id and the session's labels as the call runs
+(those include the labels the call's own decision added).
 
 ### Policies
 
@@ -135,10 +141,53 @@ allows a call, before the result exists (cleanroom's rule). A tool can add
 labels with its result. Labels are never removed, so a policy can refuse
 an `egress` call once the session holds `private`, for example.
 
-**Holds.** A held call waits for a person. The run ends with reason `held`
-and lists the held calls. `Session.Resolve(callID, Decision)` records the
-person's decision, and the next `Run` carries on: it runs the call or
-reports the denial, then goes back to the model.
+`Agent.Labels` are added to the session whenever a run starts, in a
+`labels` entry written only when one of them is new. `Session.AddLabels`
+does the same from outside a run.
+
+**Holds.** A held call waits for a person. A hold adds no labels; its
+decision entry records `input_sha256`, the SHA-256 in hex of the call's
+input as canonical JSON (keys sorted, no whitespace, no HTML escaping,
+numbers as written; `InputDigest`). The run ends with reason `held` and
+lists the held calls, each with its `input_sha256`.
+
+`Agent.Resolve(ctx, session, Resolution)` records the person's decision:
+a call id, `allow` or `deny`, an optional reason, and the input digest,
+which must match the call's input. An allow takes its labels from the
+agent's policy now, as an allow from the policy would have; the person
+never supplies labels. Resolving a call again with the verdict it was
+resolved with does nothing, and any other call that is not held is an
+error. The next `Run` carries on: it runs the call or reports the denial,
+then goes back to the model. `Session.Resolve(callID, Decision)` is the
+lower-level form, which records the decision as given.
+
+### The trifecta
+
+The trifecta is private data, untrusted content and egress held by one
+session at once. `agentloop/trifecta` keeps a session from using all
+three without a person's approval.
+
+There are two labels and no others: `private` (the session has seen the
+operator's private data) and `contaminated` (it has seen something an
+outsider could have written). Any other name is an error wherever a
+label is read, so a typo cannot drop one. A tool has a class: `read`
+(returns content, changes nothing, sends nothing out), `write` (changes
+the operator's own state), `egress` (can put data the model chose where
+an outsider sees it) or `act` (does something in the operator's name).
+
+`trifecta.Decide(labels, tool)` is the rule, a pure function of the
+session's labels when the call is decided and the tool's entry:
+
+- `always_hold`: hold
+- `egress`, and the session holds both labels: hold
+- `act`, and the session holds `contaminated`: hold
+- an unknown class: hold
+- otherwise: allow
+
+It never denies; a person does. `trifecta.Policy` applies it to a map of
+tool entries. Each decision carries the tool's static labels, which the
+session takes on when the call is allowed, before it runs, and keeps
+whatever becomes of the call. A tool with no entry is denied.
 
 ### Sessions and stores
 
@@ -159,10 +208,11 @@ An `Entry` has a sequence number, a time, a type and one payload:
 | Type | Payload | Written |
 |---|---|---|
 | `run_started` | the prompt, if any | when `Run` starts |
+| `labels` | labels added from outside any call | when a run's starting labels, or `AddLabels`, add one the session lacks |
 | `message` | a `Message`, and for an assistant turn its `Stop`, `Usage` and serving model | when a user prompt is added or a response arrives |
-| `decision` | call id, tool name, verdict, reason, labels | when a call is checked, or when a held call is resolved |
+| `decision` | call id, tool name, verdict, reason, labels; `resolved` for a person's; `input_sha256` for a hold | when a call is checked, or when a held call is resolved |
 | `call_started` | call id | immediately before the tool runs |
-| `tool_result` | the `ToolResult` and its labels | when a call finishes, or is refused |
+| `tool_result` | the `ToolResult`, its labels, and the operator's `log` | when a call finishes, or is refused |
 | `model_error` | the `ModelError`, and whether the loop will retry | on each failed model call |
 | `run_ended` | the `Outcome` | when `Run` returns |
 
@@ -231,7 +281,7 @@ type Outcome struct {
 
 A run:
 
-1. Writes `run_started`.
+1. Writes `run_started`, and a `labels` entry if `Agent.Labels` adds any.
 2. Settles the calls left open by the last assistant turn (below). If any
    is still held, ends with `held`.
 3. Adds the prompt as a user message, if there is one. With no prompt and
@@ -264,7 +314,9 @@ in order:
   effect. It is never run again.
 - A call with no decision is checked (tool exists, input matches the
   schema, policy) and the decision is recorded. A failed check is a deny
-  with the reason.
+  with the reason. So is a call the policy allowed in an earlier run that
+  never started: that allow is stale, since the session may hold more
+  labels now, and the call is decided again. A person's allow stands.
 - An allowed call is recorded as started, run under the tool timeout, and
   its result recorded. A Go error from the tool becomes an error result.
 - A denied call gets an error result with the reason.
@@ -303,7 +355,20 @@ The request:
   "prompt": "…",
   "session": "/path/to/session.jsonl",
   "tools": [{"name": "…", "description": "…", "parameters": {}}],
-  "tool_command": ["relay", "tool"],  // a call runs tool_command + [name], input on stdin
+  "tool_command": ["relay", "tool"],  // a call runs tool_command + [name]
+  "tool_protocol": "envelope",        // or leave out for the plain protocol
+  "policy": {                         // required when there are tools
+    "labels": ["private"],            // added to the session at every run start
+    "tools": {                        // an entry for every tool, and no others
+      "memo_send": {"class": "write"},
+      "web_fetch": {"class": "egress", "labels": ["contaminated"]},
+      "rem":       {"class": "act", "labels": ["private"], "always_hold": false}
+    }
+  },
+  "resolve": [                        // run only: decisions on held calls
+    {"call_id": "toolu_1", "verdict": "allow", "input_sha256": "9f2c…"},
+    {"call_id": "toolu_2", "verdict": "deny", "reason": "not now", "input_sha256": "41ab…"}
+  ],
   "tool_env": {"RELAY_ROLE": "clerk"},// the whole environment a tool gets
   "tool_dir": "/path/to/work",
   "tool_timeout_seconds": 300,
@@ -313,14 +378,60 @@ The request:
 }
 ```
 
+`policy` is required whenever `tools` is not empty. `{"unrestricted":
+true}` turns the trifecta off, for examples and tests, and nothing else
+may sit beside it; `"unrestricted": false` is refused. A real policy
+needs `"tool_protocol": "envelope"`, an entry with a known class for
+every tool and none for anything else, and only known labels. Unknown
+fields anywhere are refused. With a real policy the agent's starting
+labels are `policy.labels` and its policy is `trifecta.Policy`.
+
+**Tool protocols.** A call runs `tool_command` with the tool's name
+appended, in `tool_dir`, with exactly `tool_env`. With the plain
+protocol, stdin is the call's input and stdout is the result (stderr when
+stdout is empty; both, as an error, when the program fails). The plain
+protocol shows stderr to the model, which is why a real policy cannot use
+it. With the envelope protocol, stdin is one object:
+
+```json
+{"input": {"url": "…"}, "labels": ["contaminated", "private"], "call_id": "toolu_1"}
+```
+
+`labels` are the session's labels as the call runs, which include the
+labels its decision added and everything the session held when it was
+decided. Stdout must be exactly one object, with nothing after it but
+whitespace:
+
+```json
+{"content": "text for the model", "is_error": false, "labels": ["contaminated"]}
+```
+
+`content` and `labels` are required and `is_error` defaults to false. The
+result's labels are added to the session. If the program exits non-zero,
+writes more than the output cap (1 MiB) to stdout, or writes anything
+but one such envelope with known labels, the model gets only "The tool
+<name> failed." and the call is an error. The reason, with the program's
+stderr, goes to the result entry's `log`, for the operator. A timeout or
+a cancel is reported by the loop as for any tool.
+
 `run` writes every session entry of the run to stdout as one JSON line,
-and then a last line `{"type": "outcome", ...}` with the outcome and the
-session path. Nothing else goes to stdout.
+and then a last line `{"type": "outcome", ...}` with the outcome, the
+session path and the session's `labels` when the run ended. Nothing else
+goes to stdout. For a held run the outcome's `held` lists each call as
+`{"id", "name", "input", "input_sha256"}`.
+
+`resolve` is applied before the run starts, through `Agent.Resolve`, and
+the decision entries it writes come first on stdout. The whole list is
+checked against the session first: a call the session does not have, a
+digest that does not match, or a call that is not held (other than one
+already resolved the same way) makes the request unusable, and nothing is
+written. `acp` refuses `resolve`.
 
 It exits 0 whenever it reaches an outcome, whatever the reason. It exits 2
 when the request is unusable, before writing anything: bad JSON, an unknown
 field, a schema that does not compile, a tool name the providers would
-reject, a session path it cannot use. It exits 1 when the session log is
+reject, a missing or invalid policy, a session path it cannot use, a
+`resolve` entry the session cannot take. It exits 1 when the session log is
 corrupt or another process holds it. On SIGTERM or SIGINT it cancels the
 run, so the outcome line is still written.
 
@@ -356,7 +467,24 @@ still answered `cancelled` when stdout works: closing stdin does not stop
 agentloop writing. A second signal exits at once.
 
 `session/new` creates the log file straight away, so a session can be
-listed and loaded before anything has been said in it. `session/load`
+listed and loaded before anything has been said in it. `session/new`,
+`session/load` and `session/resume` write the request's `policy.labels`
+into the session's log as they open it. A prompt with an embedded
+`resource` or a `resource_link` adds `contaminated` to the session, since
+its content could have come from anyone. Nothing a client sends removes a
+label or changes the policy.
+
+**Held calls.** When a run ends `held`, the server asks the client about
+each held call with `session/request_permission`: the tool call's id,
+title, name, kind, its whole input as `rawInput`, and the session's labels
+in `_meta["agentloop/labels"]`, with two options, `allow_once` and
+`reject_once`. The turn waits for the answers. Only the `allow_once`
+option allows; a reject, an option that was not offered, a `cancelled`
+outcome, an error or a lost connection is a deny, recorded through
+`Agent.Resolve` with the reason "A person did not approve this call.".
+Then the run carries on. A `session/cancel` while a request is open
+denies it and the turn is answered `cancelled`. A held call found in a
+loaded session is asked about at the next prompt, never run on its own. `session/load`
 sends the session's history and then answers; `session/resume` answers
 without it. Both take the session's lock, so a session open in another
 process, or on another connection in the same process, is refused with
@@ -383,6 +511,7 @@ pure functions in `acp/` (`Translator.Step` for a live turn, `Replay` for
 | reasoning delta | `agent_thought_chunk`, id `a<seq>` |
 | a refusal the provider explained outside the text | one more `agent_message_chunk` with the explanation |
 | a tool call in an assistant message | `tool_call`, `pending`, with the request's kind for the tool (`other` if none) |
+| a held call | `session/request_permission` (above) |
 | `call_started` | `tool_call_update`, `in_progress` |
 | `tool_result` | `tool_call_update`, `completed` or `failed`, the content as text, `rawOutput` `{content, is_error}` |
 | an assistant message, when the provider gave the window | `usage_update`, used = the turn's input, cache and output tokens, size = the window |
@@ -399,11 +528,12 @@ The outcome of the turn answers `session/prompt`:
 | `refused` | `refusal` |
 | `canceled` | `cancelled` |
 | `model_error` | error `-32603`, data: the error's kind, status, message and times |
-| `held` | error `-32603`, data: the held calls |
+| `held` | error `-32603`, data: the held calls (only when the client could not be asked) |
 
 Two `_meta` keys carry what ACP has no field for:
-`_meta["agentloop/labels"]` on a tool call's result holds the policy
-labels of the call, and `_meta["agentloop/retry"]` on a notice for a
+`_meta["agentloop/labels"]` on every `tool_call`, `tool_call_update` and
+`usage_update` holds the session's labels as of that update (a replayed
+call shows them as of its last entry), and `_meta["agentloop/retry"]` on a notice for a
 model call that will be retried holds `kind`, `wait_ms`, `retry_at`,
 `attempt` and, when there was one, the HTTP `status`, so a client can
 count down to the retry.
@@ -436,6 +566,11 @@ to the session and not passed on: tools get only `tool_env`.
 
 ## What it does not guarantee
 
+- The trifecta rule is only as good as what it is told. agentloop trusts
+  the request's classes and static labels, and the labels a tool's
+  envelope returns; a tool that under-labels its output, or an egress
+  tool classed `read`, gets through. It also treats the model provider as
+  an accepted destination: everything a session sees is sent to it.
 - A tool is killed with its process group. A tool that leaves the group
   (with `setsid`, say) can outlive its call. On Linux a cgroup could close
   that gap; macOS has no equivalent.

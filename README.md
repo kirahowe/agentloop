@@ -11,6 +11,14 @@ allow it. A policy can also hold a call until a person decides, and attach
 labels to the session that are never removed, so a rule like "no network
 calls once this session has read private data" is a few lines.
 
+One such rule comes built in, in `agentloop/trifecta`. It keeps an agent
+from holding the three legs of the lethal trifecta at once: private data,
+content an outsider could have written, and a way to send data out. A
+session is labelled `private` or `contaminated` by what it has seen, and
+each tool has a class (`read`, `write`, `egress` or `act`). Once a session
+holds both labels, an egress call waits for a person; once it is
+contaminated, so does an act call.
+
 A session is an append-only log, written to disk entry by entry. If the
 process crashes or is killed at any point, the next run carries on from the
 log and never runs a tool call twice. A call that was running when the
@@ -58,6 +66,7 @@ The packages:
 | `agentloop` | Messages, the `Model` and `Tool` interfaces, policies, sessions, the loop |
 | `agentloop/anthropic` | Anthropic's Messages API |
 | `agentloop/openai` | OpenAI's Responses API |
+| `agentloop/trifecta` | The trifecta rule and a policy built on it |
 | `agentloop/command` | A tool that runs a program, with exactly the environment you give it |
 | `agentloop/fake` | A scripted model for tests |
 
@@ -74,6 +83,15 @@ provider for the model's display name and context window, and shows the
 model to the client as a session config option, so nothing in the request
 can drift from the model. The request format is in
 [DESIGN.md](DESIGN.md#the-command).
+
+A request with tools must give a policy: the session's starting labels
+and each tool's class and labels, or `{"unrestricted": true}`. With a real
+policy the tools speak the envelope protocol: JSON in with the session's
+labels, JSON out with the labels of what the tool returned. A held call
+ends `agentloop run` with reason `held`, and a later run resolves it with
+the request's `resolve` list. `agentloop acp` asks the client instead,
+with `session/request_permission`, and shows the session's labels on
+every tool call.
 
 The API key is fetched by a command named in the request, such as a
 keychain lookup, and reaches only the model.
