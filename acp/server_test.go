@@ -94,14 +94,23 @@ func parseLines(t tb, lines [][]byte) []message {
 }
 
 // testClient is the client side: it keeps every update and answers any
-// permission request with cancelled.
+// permission request with permit, or with cancelled when permit is nil.
 type testClient struct {
 	mu       sync.Mutex
 	updates  []acp.SessionNotification
 	onUpdate func(acp.SessionNotification)
+	permit   func(context.Context, acp.RequestPermissionRequest) (acp.RequestPermissionResponse, error)
+	asked    []acp.RequestPermissionRequest
 }
 
-func (c *testClient) RequestPermission(context.Context, acp.RequestPermissionRequest) (acp.RequestPermissionResponse, error) {
+func (c *testClient) RequestPermission(ctx context.Context, req acp.RequestPermissionRequest) (acp.RequestPermissionResponse, error) {
+	c.mu.Lock()
+	c.asked = append(c.asked, req)
+	permit := c.permit
+	c.mu.Unlock()
+	if permit != nil {
+		return permit(ctx, req)
+	}
 	return acp.RequestPermissionResponse{Outcome: acp.NewRequestPermissionOutcomeCancelled()}, nil
 }
 

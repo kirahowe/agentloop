@@ -1227,6 +1227,10 @@ func (sc *Scenario) resolveHeld(s *agentloop.Session, held []agentloop.ToolCall,
 		if err := s.Resolve(c.ID, d); err != nil {
 			t.Fatalf("Resolve: %v", err)
 		}
+		if sc.Observe != nil {
+			es := s.Entries()
+			sc.Observe(agentloop.Event{Entry: &es[len(es)-1]})
+		}
 		sc.checkSession(s)
 		if err := s.Resolve(c.ID, d); err == nil {
 			t.Fatalf("resolving %s twice succeeded", c.ID)

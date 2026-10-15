@@ -17,6 +17,7 @@ import (
 
 	"github.com/kirahowe/agentloop"
 	"github.com/kirahowe/agentloop/internal/sessionfile"
+	"github.com/kirahowe/agentloop/trifecta"
 )
 
 // Server is the imperative shell: it serves one ACP connection, keeps the
@@ -226,8 +227,22 @@ func (s *Server) NewSession(ctx context.Context, req acp.NewSessionRequest) (acp
 		unlock()
 		return acp.NewSessionResponse{}, internal(err.Error(), nil)
 	}
+	if err := s.seed(sess); err != nil {
+		unlock()
+		return acp.NewSessionResponse{}, internal(err.Error(), nil)
+	}
 	s.register(s.newSession(id, conn, sess, unlock, info))
 	return acp.NewSessionResponse{SessionId: id, ConfigOptions: ConfigOptions(info)}, nil
+}
+
+// seed gives a session the request's starting labels, written to its log
+// as soon as it is opened, so they hold before anything is said in it.
+func (s *Server) seed(sess *agentloop.Session) error {
+	if s.cfg.Agent == nil {
+		return nil
+	}
+	_, err := sess.AddLabels(s.cfg.Agent.Labels)
+	return err
 }
 
 func (s *Server) note(mcpServers int) {
@@ -244,7 +259,7 @@ func (s *Server) newSession(id acp.SessionId, conn *acp.AgentSideConnection, ses
 	opts.Prices = info.Prices
 	return &session{
 		id: id, conn: conn, sess: sess, unlock: unlock,
-		tr: NewTranslator(opts).WithUsage(sess.Usage()), waiting: map[PromptID]chan answer{},
+		tr: NewTranslator(opts).WithUsage(sess.Usage()).WithLabels(sess.Labels()), waiting: map[PromptID]chan answer{},
 		released: make(chan struct{}),
 	}
 }
@@ -318,6 +333,10 @@ func (s *Server) reopen(ctx context.Context, id acp.SessionId, replay bool, info
 			return SessionInUse(id)
 		}
 		if err != nil {
+			return internal(err.Error(), nil)
+		}
+		if err := s.seed(sess); err != nil {
+			unlock()
 			return internal(err.Error(), nil)
 		}
 		s.mu.Lock()
@@ -529,7 +548,7 @@ func (s *Server) step(ss *session, in Input) {
 	for _, e := range effects {
 		switch e := e.(type) {
 		case StartRun:
-			s.start(ss, e.Prompt)
+			s.start(ss, e.Prompt, e.Labels)
 		case CancelRun:
 			ss.cancel()
 		case RespondStop:
@@ -553,13 +572,19 @@ func (ss *session) answer(id PromptID, a answer) {
 
 // start runs the agent on its own goroutine. Each event goes through the
 // translator and its updates are sent before the run goes on. When the
-// run returns, its end goes back into the machine.
-func (s *Server) start(ss *session, prompt string) {
+// run returns, its end goes back into the machine. labels are what the
+// prompt's content brought, added to the session as the run starts.
+func (s *Server) start(ss *session, prompt string, labels []string) {
 	ctx, cancel := context.WithCancel(context.Background())
 	ss.cancel = cancel
 	agent := *s.cfg.Agent
+	agent.Labels = trifecta.Union(agent.Labels, labels)
 	observe := agent.Observe
+	added := false // the prompt is in the conversation
 	agent.Observe = func(ev agentloop.Event) {
+		if e := ev.Entry; e != nil && e.Type == agentloop.EntryMessage && e.Message.Message.Role == agentloop.User {
+			added = true
+		}
 		var ups []Update
 		ss.tr, ups = ss.tr.Step(ev)
 		for _, u := range ups {
@@ -577,7 +602,21 @@ func (s *Server) start(ss *session, prompt string) {
 	s.runs.Add(1)
 	go func() {
 		defer s.runs.Done()
-		out, err := agent.Run(ctx, ss.sess, prompt)
+		var out *agentloop.Outcome
+		var err error
+		for {
+			p := prompt
+			if added {
+				p = ""
+			}
+			out, err = agent.Run(ctx, ss.sess, p)
+			if err != nil || out.Reason != agentloop.ReasonHeld || ctx.Err() != nil {
+				break
+			}
+			if err = s.ask(ctx, ss, &agent, out.Held); err != nil {
+				break
+			}
+		}
 		cancel()
 		if err != nil {
 			s.logf("agentloop: session %s: %v", ss.id, err)
@@ -586,4 +625,27 @@ func (s *Server) start(ss *session, prompt string) {
 		s.step(ss, RunEnded{Outcome: out, Err: err})
 		s.mu.Unlock()
 	}()
+}
+
+// ask puts each held call to the client as session/request_permission
+// and records the answer as the person's resolution. Only the allow
+// option allows; anything else, a cancelled turn and a lost connection
+// included, denies. The turn waits meanwhile.
+func (s *Server) ask(ctx context.Context, ss *session, agent *agentloop.Agent, held []agentloop.HeldCall) error {
+	for _, h := range held {
+		verdict := agentloop.Deny
+		if ss.conn != nil && ctx.Err() == nil {
+			req := PermissionRequest(ss.id, h, s.cfg.Options.Kinds, ss.sess.Labels())
+			resp, err := ss.conn.RequestPermission(ctx, req)
+			verdict = PermissionVerdict(resp, err)
+		}
+		r := agentloop.Resolution{CallID: h.ID, Verdict: verdict, InputSHA256: h.InputSHA256}
+		if verdict == agentloop.Deny {
+			r.Reason = NotApproved
+		}
+		if err := agent.Resolve(ctx, ss.sess, r); err != nil {
+			return err
+		}
+	}
+	return nil
 }

@@ -1,4 +1,4 @@
 {"content":{"text":"Say hi.","type":"text"},"messageId":"u2","sessionUpdate":"user_message_chunk"}
 {"content":{"text":"I need to check.","type":"text"},"messageId":"a3","sessionUpdate":"agent_message_chunk"}
-{"kind":"read","name":"echo","rawInput":{"text":"hi"},"sessionUpdate":"tool_call","status":"pending","title":"echo {\"text\":\"hi\"}","toolCallId":"call_1"}
-{"sessionUpdate":"usage_update","size":200000,"used":15}
+{"_meta":{"agentloop/labels":[]},"kind":"read","name":"echo","rawInput":{"text":"hi"},"sessionUpdate":"tool_call","status":"pending","title":"echo {\"text\":\"hi\"}","toolCallId":"call_1"}
+{"_meta":{"agentloop/labels":[]},"sessionUpdate":"usage_update","size":200000,"used":15}

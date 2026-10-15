@@ -1,4 +1,4 @@
 {"content":{"text":"Say hi.","type":"text"},"messageId":"u2","sessionUpdate":"user_message_chunk"}
 {"content":{"text":"The user said hi.","type":"text"},"messageId":"a3","sessionUpdate":"agent_thought_chunk"}
 {"content":{"text":"Hello there.","type":"text"},"messageId":"a3","sessionUpdate":"agent_message_chunk"}
-{"sessionUpdate":"usage_update","size":200000,"used":15}
+{"_meta":{"agentloop/labels":[]},"sessionUpdate":"usage_update","size":200000,"used":15}

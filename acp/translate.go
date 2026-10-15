@@ -7,6 +7,7 @@ package acpagent
 import (
 	"encoding/json"
 	"fmt"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -14,6 +15,7 @@ import (
 	acp "github.com/caelis-labs/acp-go-sdk"
 
 	"github.com/kirahowe/agentloop"
+	"github.com/kirahowe/agentloop/trifecta"
 )
 
 // Update is one session/update the agent sends.
@@ -58,6 +60,9 @@ type Translator struct {
 	// total is the usage of every assistant message so far, in this run
 	// and in the session before it.
 	total agentloop.Usage
+	// labels are the session's labels as of the last entry, sorted. Every
+	// tool call, tool call update and usage update carries them.
+	labels []string
 }
 
 // NewTranslator makes the translator for a session's live events.
@@ -68,6 +73,38 @@ func NewTranslator(opts Options) Translator { return Translator{opts: opts} }
 func (t Translator) WithUsage(u agentloop.Usage) Translator {
 	t.total = sumUsage(t.total, u)
 	return t
+}
+
+// WithLabels is the translator for a session that already holds labels.
+func (t Translator) WithLabels(labels []string) Translator {
+	t.labels = trifecta.Union(t.labels, labels)
+	return t
+}
+
+// Labels are the session's labels as the translator has seen them.
+func (t Translator) Labels() []string { return slices.Clone(t.labels) }
+
+// entryLabels are the labels an entry adds to the session, as the session
+// itself counts them.
+func entryLabels(e agentloop.Entry) []string {
+	switch {
+	case e.Type == agentloop.EntryLabels && e.Labels != nil:
+		return e.Labels.Labels
+	case e.Type == agentloop.EntryDecision && e.Decision != nil && e.Decision.Verdict == agentloop.Allow:
+		return e.Decision.Labels
+	case e.Type == agentloop.EntryToolResult && e.ToolResult != nil:
+		return e.ToolResult.Labels
+	}
+	return nil
+}
+
+// labelsMeta is the _meta that shows the session's labels to a client.
+func labelsMeta(labels []string) map[string]json.RawMessage {
+	if labels == nil {
+		labels = []string{}
+	}
+	b, _ := json.Marshal(labels)
+	return map[string]json.RawMessage{"agentloop/labels": b}
 }
 
 func sumUsage(a, b agentloop.Usage) agentloop.Usage {
@@ -113,6 +150,9 @@ func (t Translator) delta(d agentloop.Delta) (Translator, []Update) {
 func (t Translator) entry(e agentloop.Entry) (Translator, []Update) {
 	streamedText, streamedThought := t.text, t.thought
 	t.seq, t.text, t.thought = e.Seq, "", ""
+	if add := entryLabels(e); len(add) > 0 {
+		t.labels = trifecta.Union(t.labels, add)
+	}
 	switch e.Type {
 	case agentloop.EntryRunStarted:
 		t.attempt = 0
@@ -125,10 +165,10 @@ func (t Translator) entry(e agentloop.Entry) (Translator, []Update) {
 		}
 		ups := assistantChunks(e.Seq, *m, streamedText, streamedThought)
 		for _, c := range m.Message.ToolCalls() {
-			ups = append(ups, toolCall(c, t.opts.Kinds, acp.ToolCallStatusPending, nil))
+			ups = append(ups, toolCall(c, t.opts.Kinds, acp.ToolCallStatusPending, nil, t.labels))
 		}
 		t.total = sumUsage(t.total, m.Usage)
-		if u, ok := t.usage(m.Usage); ok {
+		if u, ok := t.usage(m.Usage, t.labels); ok {
 			ups = append(ups, u)
 		}
 		return t, ups
@@ -136,13 +176,14 @@ func (t Translator) entry(e agentloop.Entry) (Translator, []Update) {
 		if e.CallStarted == nil {
 			return t, nil
 		}
-		return t, []Update{acp.UpdateToolCall(acp.ToolCallId(e.CallStarted.CallID),
-			acp.WithUpdateStatus(acp.ToolCallStatusInProgress))}
+		u := acp.UpdateToolCall(acp.ToolCallId(e.CallStarted.CallID), acp.WithUpdateStatus(acp.ToolCallStatusInProgress))
+		u.ToolCallUpdate.Meta = labelsMeta(t.labels)
+		return t, []Update{u}
 	case agentloop.EntryToolResult:
 		if e.ToolResult == nil {
 			return t, nil
 		}
-		return t, []Update{toolResult(*e.ToolResult)}
+		return t, []Update{toolResult(*e.ToolResult, t.labels)}
 	case agentloop.EntryModelError:
 		if e.ModelError == nil {
 			return t, nil
@@ -165,7 +206,21 @@ func (t Translator) entry(e agentloop.Entry) (Translator, []Update) {
 func Replay(opts Options, entries []agentloop.Entry) []Update {
 	results := map[string]agentloop.ToolResultEntry{}
 	started := map[string]bool{}
+	// A call shows the session's labels as of its last entry (its result,
+	// its start, or the message that made it), as it did live; the usage
+	// shows them as they are now.
+	var labels []string
+	labelsAt := map[int][]string{}
+	callAt := map[string]int{}
 	for _, e := range entries {
+		labels = trifecta.Union(labels, entryLabels(e))
+		labelsAt[e.Seq] = labels
+		switch {
+		case e.Type == agentloop.EntryToolResult && e.ToolResult != nil:
+			callAt[e.ToolResult.Result.CallID] = e.Seq
+		case e.Type == agentloop.EntryCallStarted && e.CallStarted != nil:
+			callAt[e.CallStarted.CallID] = e.Seq
+		}
 		switch {
 		case e.Type == agentloop.EntryToolResult && e.ToolResult != nil:
 			results[e.ToolResult.Result.CallID] = *e.ToolResult
@@ -203,11 +258,15 @@ func Replay(opts Options, entries []agentloop.Entry) []Update {
 			if r, ok := results[c.ID]; ok {
 				res = &r
 			}
-			ups = append(ups, toolCall(c, opts.Kinds, status, res))
+			at, ok := callAt[c.ID]
+			if !ok {
+				at = e.Seq
+			}
+			ups = append(ups, toolCall(c, opts.Kinds, status, res, labelsAt[at]))
 		}
 	}
 	if last != nil {
-		if u, ok := (Translator{opts: opts, total: total}).usage(last.Usage); ok {
+		if u, ok := (Translator{opts: opts, total: total}).usage(last.Usage, labels); ok {
 			ups = append(ups, u)
 		}
 	}
@@ -297,7 +356,9 @@ func refusalText(m agentloop.MessageEntry) string {
 	return m.Refusal
 }
 
-func toolCall(c agentloop.ToolCall, kinds map[string]acp.ToolKind, status acp.ToolCallStatus, res *agentloop.ToolResultEntry) Update {
+// toolCall is a call as a client first sees it, with the session's labels
+// under _meta["agentloop/labels"].
+func toolCall(c agentloop.ToolCall, kinds map[string]acp.ToolKind, status acp.ToolCallStatus, res *agentloop.ToolResultEntry, labels []string) Update {
 	tc := &acp.SessionUpdateToolCall{
 		ToolCallId: acp.ToolCallId(c.ID),
 		Title:      Title(c),
@@ -305,37 +366,33 @@ func toolCall(c agentloop.ToolCall, kinds map[string]acp.ToolKind, status acp.To
 		Kind:       Kind(c.Name, kinds),
 		Status:     status,
 		RawInput:   rawJSON(c.Input),
+		Meta:       labelsMeta(labels),
 	}
 	if res != nil {
-		tc.Status, tc.Content, tc.RawOutput, tc.Meta = resultFields(*res)
+		tc.Status, tc.Content, tc.RawOutput = resultFields(*res)
 	}
 	return acp.SessionUpdate{ToolCall: tc}
 }
 
-func toolResult(r agentloop.ToolResultEntry) Update {
-	u := &acp.SessionToolCallUpdate{ToolCallId: acp.ToolCallId(r.Result.CallID)}
+func toolResult(r agentloop.ToolResultEntry, labels []string) Update {
+	u := &acp.SessionToolCallUpdate{ToolCallId: acp.ToolCallId(r.Result.CallID), Meta: labelsMeta(labels)}
 	var status acp.ToolCallStatus
-	status, u.Content, u.RawOutput, u.Meta = resultFields(r)
+	status, u.Content, u.RawOutput = resultFields(r)
 	u.Status = &status
 	return acp.SessionUpdate{ToolCallUpdate: u}
 }
 
 // resultFields is how a result shows on a call: failed when it is an
-// error, the content as text, the raw result, and its labels under
-// _meta["agentloop/labels"].
-func resultFields(r agentloop.ToolResultEntry) (acp.ToolCallStatus, []acp.ToolCallContent, any, map[string]json.RawMessage) {
+// error, the content as text, and the raw result. The operator's log
+// (a tool's stderr) is not shown.
+func resultFields(r agentloop.ToolResultEntry) (acp.ToolCallStatus, []acp.ToolCallContent, any) {
 	status := acp.ToolCallStatusCompleted
 	if r.Result.IsError {
 		status = acp.ToolCallStatusFailed
 	}
 	content := []acp.ToolCallContent{acp.ToolContent(acp.TextBlock(r.Result.Content))}
 	raw := map[string]any{"content": r.Result.Content, "is_error": r.Result.IsError}
-	var meta map[string]json.RawMessage
-	if len(r.Labels) > 0 {
-		b, _ := json.Marshal(r.Labels)
-		meta = map[string]json.RawMessage{"agentloop/labels": b}
-	}
-	return status, content, raw, meta
+	return status, content, raw
 }
 
 // usage is the usage_update for a call that used u, with the session's
@@ -343,12 +400,12 @@ func resultFields(r agentloop.ToolResultEntry) (acp.ToolCallStatus, []acp.ToolCa
 // which is what is in context. A priced model with no known window still
 // reports its cost, with a size of 0: the protocol requires the size, and
 // zero is the one value that claims nothing about the window.
-func (t Translator) usage(u agentloop.Usage) (Update, bool) {
+func (t Translator) usage(u agentloop.Usage, labels []string) (Update, bool) {
 	if t.opts.ContextWindow <= 0 && t.opts.Prices == nil {
 		return Update{}, false
 	}
 	used := u.InputTokens + u.CacheReadTokens + u.CacheWriteTokens + u.OutputTokens
-	up := &acp.SessionUsageUpdate{Used: uint64(max(used, 0)), Size: uint64(max(t.opts.ContextWindow, 0))}
+	up := &acp.SessionUsageUpdate{Used: uint64(max(used, 0)), Size: uint64(max(t.opts.ContextWindow, 0)), Meta: labelsMeta(labels)}
 	if p := t.opts.Prices; p != nil {
 		up.Cost = &acp.Cost{Amount: p.Cost(t.total), Currency: "USD"}
 	}

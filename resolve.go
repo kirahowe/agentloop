@@ -52,6 +52,8 @@ type Resolution struct {
 // carries out. An allow takes its labels from the agent's policy now, as
 // an allow from the policy would have; a person never supplies labels.
 //
+// The entry it writes goes to Observe, as a run's entries do.
+//
 // The call must exist and its input must have the digest the resolution
 // names. A call a person already resolved with the same verdict is left
 // as it is, so resolving can be repeated after a crash. Any other call
@@ -77,5 +79,12 @@ func (a *Agent) Resolve(ctx context.Context, s *Session, r Resolution) error {
 	if r.Verdict == Allow && a.Policy != nil {
 		d.Labels = a.Policy.Decide(ctx, info.Call, s.View()).Labels
 	}
-	return s.Resolve(r.CallID, d)
+	if err := s.Resolve(r.CallID, d); err != nil {
+		return err
+	}
+	if a.Observe != nil {
+		es := s.Entries()
+		a.Observe(Event{Entry: &es[len(es)-1]})
+	}
+	return nil
 }

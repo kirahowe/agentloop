@@ -3,6 +3,7 @@ package acpagent
 import (
 	"encoding/json"
 	"fmt"
+	"slices"
 	"strings"
 	"testing"
 	"unicode/utf8"
@@ -12,6 +13,7 @@ import (
 
 	"github.com/kirahowe/agentloop"
 	"github.com/kirahowe/agentloop/internal/scenario"
+	"github.com/kirahowe/agentloop/trifecta"
 )
 
 // run is one generated scenario: the events every run reported, in order,
@@ -234,6 +236,7 @@ func TestPropertyTranslate(t *testing.T) {
 		}
 		ls, rs := read(t, live), read(t, replay)
 		checkLifecycle(t, ls, r.entries)
+		checkLabels(t, live, r.entries)
 		checkLiveIsReplay(t, ls, rs, r.entries)
 		checkTextConserved(t, ls, r.entries)
 		if !r.opts.Notices && ls.notices > 0 {
@@ -359,5 +362,44 @@ func checkTextConserved(t *rapid.T, s stream, entries []agentloop.Entry) {
 		if s.text[id] != want || s.thought[id] != thought.String() {
 			t.Fatalf("message %s: sent %q/%q, the message holds %q/%q", id, s.text[id], s.thought[id], want, thought.String())
 		}
+	}
+}
+
+// Labels: every tool_call, tool_call_update and usage_update carries the
+// session's labels under _meta["agentloop/labels"]; they only grow, and
+// they are never more than the session holds by the end of the run.
+func checkLabels(t *rapid.T, ups []Update, entries []agentloop.Entry) {
+	var final []string
+	for _, e := range entries {
+		final = trifecta.Union(final, entryLabels(e))
+	}
+	var prev []string
+	for _, u := range ups {
+		var meta map[string]json.RawMessage
+		switch {
+		case u.ToolCall != nil:
+			meta = u.ToolCall.Meta
+		case u.ToolCallUpdate != nil:
+			meta = u.ToolCallUpdate.Meta
+		case u.UsageUpdate != nil:
+			meta = u.UsageUpdate.Meta
+		default:
+			continue
+		}
+		var got []string
+		if err := json.Unmarshal(meta["agentloop/labels"], &got); err != nil || got == nil {
+			t.Fatalf("an update has no labels: %v", meta)
+		}
+		for _, l := range prev {
+			if !slices.Contains(got, l) {
+				t.Fatalf("label %s disappeared: %v after %v", l, got, prev)
+			}
+		}
+		for _, l := range got {
+			if !slices.Contains(final, l) {
+				t.Fatalf("label %s shown that the session never held", l)
+			}
+		}
+		prev = got
 	}
 }
