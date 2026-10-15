@@ -166,10 +166,14 @@ func TestChatInputShapes(t *testing.T) {
 
 func TestChatNoKey(t *testing.T) {
 	w := chatWorld(t, ledgerScript)
+	w.req["api_key_command"] = []string{"/usr/bin/true"}
 	p := startChat(t, w, []string{"PATH=/usr/bin:/bin"})
 	p.stdin.Close()
 	if code, _ := p.wait(10 * time.Second); code != 2 {
 		t.Errorf("exit %d, want 2; stderr %q", code, p.errb.String())
+	}
+	if !strings.Contains(p.errb.String(), "The api_key_command printed no key.") {
+		t.Errorf("stderr %q", p.errb.String())
 	}
 }
 

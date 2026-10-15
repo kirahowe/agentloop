@@ -23,11 +23,12 @@ func newValFixture(t *testing.T) *valFixture {
 	dir := t.TempDir()
 	api := newChaosAPI(t, newTestRand(), nil)
 	return &valFixture{t: t, dir: dir, api: api, req: map[string]any{
-		"provider": "anthropic",
-		"model":    "claude-test",
-		"base_url": api.URL,
-		"session":  filepath.Join(dir, "sess", "session.jsonl"),
-		"prompt":   "hello",
+		"provider":        "anthropic",
+		"model":           "claude-test",
+		"base_url":        api.URL,
+		"session":         filepath.Join(dir, "sess", "session.jsonl"),
+		"api_key_command": []string{"printf", "%s", chaosKey},
+		"prompt":          "hello",
 		"tools": []map[string]any{{
 			"name": "t", "description": "d", "parameters": map[string]any{"type": "object"},
 		}},
@@ -91,6 +92,13 @@ func TestUnusableRequestMatrix(t *testing.T) {
 		{"provider with capitals", func(m map[string]any) { m["provider"] = "Anthropic" }},
 		{"no model", func(m map[string]any) { delete(m, "model") }},
 		{"empty session", func(m map[string]any) { m["session"] = "" }},
+		{"no api_key_command", func(m map[string]any) { delete(m, "api_key_command") }},
+		{"empty api_key_command", func(m map[string]any) { m["api_key_command"] = []string{} }},
+		{"api_key_command is a string", func(m map[string]any) { m["api_key_command"] = "printf x" }},
+		{"api_key_command empty program", func(m map[string]any) { m["api_key_command"] = []string{"", "x"} }},
+		{"api_key_command NUL in program", func(m map[string]any) { m["api_key_command"] = []string{"pri\u0000ntf"} }},
+		{"api_key_command NUL in argument", func(m map[string]any) { m["api_key_command"] = []string{"printf", "a\u0000b"} }},
+		{"api_key_env is gone", func(m map[string]any) { m["api_key_env"] = "AGENTLOOP_API_KEY" }},
 		{"tools without tool_command", func(m map[string]any) { delete(m, "tool_command") }},
 		{"empty tool_command with tools", func(m map[string]any) { m["tool_command"] = []string{} }},
 		{"empty program name", func(m map[string]any) { m["tool_command"] = []string{""} }},
@@ -241,7 +249,9 @@ func TestUnusualButValidRequests(t *testing.T) {
 		{"tiny timeout is still a timeout", nil, ""},
 		{"unicode session path", func(f *valFixture) { f.req["session"] = filepath.Join(f.dir, "é世界 \U0001F600", "s .jsonl") }, ""},
 		{"tool_env empty value", func(f *valFixture) { f.req["tool_env"] = map[string]string{"A": ""} }, ""},
-		{"api_key_env custom", func(f *valFixture) { f.req["api_key_env"] = "CUSTOM_KEY" }, ""},
+		{"api_key_command through sh", func(f *valFixture) {
+			f.req["api_key_command"] = []string{"/bin/sh", "-c", `printf '%s\n' "$0"`, chaosKey}
+		}, ""},
 		{"openai-looking effort", func(f *valFixture) { f.req["effort"] = "xhigh" }, ""},
 		{"limits all zero", func(f *valFixture) { f.req["limits"] = map[string]any{"max_turns": 0} }, ""},
 		{"unusual-looking but legal tool names", func(f *valFixture) {
@@ -259,11 +269,7 @@ func TestUnusualButValidRequests(t *testing.T) {
 			raw, _ := json.Marshal(f.req)
 			p := filepath.Join(f.dir, "request.json")
 			os.WriteFile(p, raw, 0o644)
-			env := chaosEnv()
-			if f.req["api_key_env"] == "CUSTOM_KEY" {
-				env = append(env, "CUSTOM_KEY="+chaosKey)
-			}
-			r := chaosExecIn(t, cwd, []string{"run", p}, env)
+			r := chaosExecIn(t, cwd, []string{"run", p}, chaosEnv())
 			if r.code != 0 {
 				t.Fatalf("exit %d: %s", r.code, r.stderr)
 			}
@@ -319,8 +325,9 @@ func TestMissingToolDirIsAToolFailure(t *testing.T) {
 func FuzzLoadRequest(f *testing.F) {
 	good, _ := json.Marshal(map[string]any{
 		"provider": "anthropic", "model": "m", "session": "/tmp/x/s.jsonl", "prompt": "p",
-		"tools":        []map[string]any{{"name": "t", "description": "d", "parameters": map[string]any{"type": "object", "properties": map[string]any{"a": map[string]any{"type": "string"}}}}},
-		"tool_command": []string{"x"}, "tool_env": map[string]string{"A": "b"},
+		"api_key_command": []string{"printf", "k"},
+		"tools":           []map[string]any{{"name": "t", "description": "d", "parameters": map[string]any{"type": "object", "properties": map[string]any{"a": map[string]any{"type": "string"}}}}},
+		"tool_command":    []string{"x"}, "tool_env": map[string]string{"A": "b"},
 		"limits": map[string]any{"max_turns": 3}, "retry": map[string]any{"retries": 1},
 		"timeout_seconds": 5, "base_url": "http://127.0.0.1:9", "effort": "high",
 	})

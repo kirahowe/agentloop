@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net"
@@ -13,6 +14,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 )
 
 var (
@@ -129,7 +131,7 @@ func TestToolIsolation(t *testing.T) {
 	w, r, dumps := toolWorld(t, map[string]string{"X": "1"}, "")
 	d := dumps[0]
 	blob, _ := json.Marshal(d)
-	for _, leak := range []string{chaosKey, "AGENTLOOP_API_KEY", "LEAK_CANARY", "parent-env"} {
+	for _, leak := range []string{chaosKey, "LEAK_CANARY", "parent-env"} {
 		if strings.Contains(string(blob), leak) {
 			t.Errorf("tool saw %q: %s", leak, blob)
 		}
@@ -222,23 +224,41 @@ func TestKeyNeverLeaksOnErrors(t *testing.T) {
 	}
 }
 
-// TestNoKey: with no usable key there is an unauthorized outcome, no HTTP
-// request, and the session is left exactly as it was.
+// keyCmdFailures are the ways the key command can give no key, with the
+// message the operator should see.
+func keyCmdFailures(t *testing.T) map[string]struct {
+	cmd  []string
+	want string
+} {
+	dir := t.TempDir()
+	loud := filepath.Join(dir, "loud.sh")
+	os.WriteFile(loud, []byte("#!/bin/sh\necho "+chaosKey+"\necho 'keychain locked' >&2\nexit 1\n"), 0o755)
+	return map[string]struct {
+		cmd  []string
+		want string
+	}{
+		"nonzero exit":              {[]string{"/bin/sh", "-c", "echo 'item not found' >&2; exit 1"}, "The api_key_command exited 1: item not found."},
+		"exit, no text":             {[]string{"/bin/sh", "-c", "exit 3"}, "The api_key_command exited 3."},
+		"stdout ignored on failure": {[]string{loud}, "The api_key_command exited 1: keychain locked."},
+		"prints nothing":            {[]string{"/usr/bin/true"}, "The api_key_command printed no key."},
+		"prints only whitespace":    {[]string{"/bin/sh", "-c", "printf ' \\n\\t\\n'"}, "The api_key_command printed no key."},
+		"cannot start":              {[]string{filepath.Join(dir, "does-not-exist")}, "The api_key_command could not run:"},
+		"not on PATH":               {[]string{"no-such-key-helper-xyz"}, "The api_key_command could not run:"},
+	}
+}
+
+// TestNoKey: when the key command gives no key there is an unauthorized
+// outcome, no HTTP request, and the session is left exactly as it was.
 func TestNoKey(t *testing.T) {
-	for name, env := range map[string][]string{
-		"unset": {"PATH=/usr/bin:/bin"},
-		"empty": {"PATH=/usr/bin:/bin", "AGENTLOOP_API_KEY="},
-	} {
+	for name, c := range keyCmdFailures(t) {
 		t.Run(name, func(t *testing.T) {
 			f := newValFixture(t)
+			f.req["api_key_command"] = c.cmd
 			// An existing session with work pending must not be touched either.
 			os.MkdirAll(filepath.Dir(f.session()), 0o755)
 			before := `{"seq":1,"time":"2026-01-01T00:00:00Z","type":"run_started","run_started":{"prompt":"x"}}` + "\n"
 			os.WriteFile(f.session(), []byte(before), 0o600)
-			raw, _ := json.Marshal(f.req)
-			p := filepath.Join(f.dir, "request.json")
-			os.WriteFile(p, raw, 0o644)
-			r := chaosExecIn(t, "", []string{"run", p}, env)
+			r := f.exec(nil)
 			out := r.outputLines()
 			if r.code != 0 || len(out) != 1 {
 				t.Fatalf("exit %d, stdout %q, stderr %q", r.code, r.stdout, r.stderr)
@@ -252,6 +272,12 @@ func TestNoKey(t *testing.T) {
 			if o.Type != "outcome" || o.Reason != "model_error" || o.Error.Kind != "unauthorized" {
 				t.Errorf("outcome %s", out[0])
 			}
+			if !strings.HasPrefix(o.Error.Message, c.want) {
+				t.Errorf("message %q, want prefix %q", o.Error.Message, c.want)
+			}
+			if strings.Contains(r.stdout+r.stderr, chaosKey) {
+				t.Errorf("the command's stdout leaked: %s %s", r.stdout, r.stderr)
+			}
 			if n := f.api.count(); n != 0 {
 				t.Errorf("%d HTTP requests", n)
 			}
@@ -259,5 +285,123 @@ func TestNoKey(t *testing.T) {
 				t.Errorf("session changed: %q", got)
 			}
 		})
+	}
+}
+
+// TestNoKeyChat: chat exits 2 with the same message and calls nothing.
+func TestNoKeyChat(t *testing.T) {
+	for name, c := range keyCmdFailures(t) {
+		t.Run(name, func(t *testing.T) {
+			w := newChaosWorld(t, newTestRand())
+			w.req["api_key_command"] = c.cmd
+			p := startChat(t, w, chaosEnv())
+			code, signaled := p.wait(20 * time.Second)
+			if signaled || code != 2 {
+				t.Fatalf("exit %d (signaled %v), stderr %q", code, signaled, p.errb.String())
+			}
+			if !strings.Contains(p.errb.String(), c.want) {
+				t.Errorf("stderr %q, want %q", p.errb.String(), c.want)
+			}
+			if strings.Contains(p.out.String()+p.errb.String(), chaosKey) {
+				t.Error("the command's stdout leaked")
+			}
+			if n := w.api.count(); n != 0 {
+				t.Errorf("%d HTTP requests", n)
+			}
+		})
+	}
+}
+
+// buildKeycmd compiles testdata/keycmd.
+func buildKeycmd(t *testing.T) string {
+	t.Helper()
+	p := filepath.Join(t.TempDir(), "keycmd")
+	if out, err := exec.Command("go", "build", "-o", p, "./testdata/keycmd").CombinedOutput(); err != nil {
+		t.Fatalf("%v\n%s", err, out)
+	}
+	return p
+}
+
+// TestKeyCommandEnvironment: the key command gets PATH and HOME from
+// agentloop's environment and nothing else, no stdin, and its own argv.
+func TestKeyCommandEnvironment(t *testing.T) {
+	keycmd := buildKeycmd(t)
+	w := newChaosWorld(t, newTestRand())
+	dumpPath := filepath.Join(t.TempDir(), "keyenv.json")
+	w.req["api_key_command"] = []string{keycmd, chaosKey, dumpPath}
+	w.turns = nil
+	r := chaosExec(t, []string{"run", w.write("go", nil)}, append(chaosEnv(), "SECRET_PARENT_VAR=nope", "AGENTLOOP_API_KEY=nope"), nil)
+	if r.code != 0 {
+		t.Fatalf("exit %d: %s", r.code, r.stderr)
+	}
+	var d dump
+	json.Unmarshal([]byte(readFileT(t, dumpPath)), &d)
+	want := []string{"HOME=/nonexistent-home", "PATH=/usr/bin:/bin"}
+	if got := sortedCopy(d.Env); strings.Join(got, "\x00") != strings.Join(want, "\x00") {
+		t.Errorf("key command environment\n got  %q\n want %q", got, want)
+	}
+	if d.Stdin != "" {
+		t.Errorf("key command stdin = %q", d.Stdin)
+	}
+	// Without HOME in agentloop's own environment, there is none to pass on.
+	os.Remove(dumpPath)
+	chaosExec(t, []string{"run", w.write("again", nil)}, []string{"PATH=/usr/bin:/bin"}, nil)
+	d = dump{}
+	json.Unmarshal([]byte(readFileT(t, dumpPath)), &d)
+	if len(d.Env) != 1 || d.Env[0] != "PATH=/usr/bin:/bin" {
+		t.Errorf("key command environment without HOME: %q", d.Env)
+	}
+}
+
+// TestKeyCommandStdoutIsOnlyTheKey: the key is the trimmed stdout, and
+// reaches the API and nothing else.
+func TestKeyCommandKeyReachesOnlyTheAPI(t *testing.T) {
+	f := newValFixture(t)
+	f.req["api_key_command"] = []string{"/bin/sh", "-c", "printf '  \\n%s\\n\\n' " + chaosKey}
+	f.req["tools"] = []any{}
+	delete(f.req, "tool_command")
+	var got string
+	f.api.Config.Handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		got = r.Header.Get("x-api-key")
+		w.WriteHeader(401)
+		fmt.Fprint(w, `{"type":"error","error":{"type":"authentication_error","message":"no"}}`)
+	})
+	r := f.exec(nil)
+	if got != chaosKey {
+		t.Errorf("the API was sent %q, want the trimmed key", got)
+	}
+	for what, s := range map[string]string{"stdout": r.stdout, "stderr": r.stderr, "session": readFileT(t, f.session())} {
+		if strings.Contains(s, chaosKey) {
+			t.Errorf("key in %s", what)
+		}
+	}
+}
+
+// TestFetchKeyTimeout runs the command in process with a short timeout, so
+// the 30 second limit need not be waited for. A child that keeps the pipes
+// open must not hold the wait past the deadline.
+func TestFetchKeyTimeout(t *testing.T) {
+	start := time.Now()
+	_, err := fetchKey(context.Background(), []string{"/bin/sh", "-c", "sleep 30 & sleep 30"}, 300*time.Millisecond)
+	if err == nil || !strings.Contains(err.Error(), "did not finish within") {
+		t.Fatalf("err = %v", err)
+	}
+	if d := time.Since(start); d > 5*time.Second {
+		t.Errorf("took %v", d)
+	}
+	if keyTimeout != 30*time.Second {
+		t.Errorf("keyTimeout = %v", keyTimeout)
+	}
+}
+
+func TestFetchKeyTrimsAndFails(t *testing.T) {
+	key, err := fetchKey(context.Background(), []string{"printf", "  k-1 \n"}, time.Minute)
+	if err != nil || key != "k-1" {
+		t.Errorf("key %q, err %v", key, err)
+	}
+	long := strings.Repeat("e", 1000)
+	_, err = fetchKey(context.Background(), []string{"/bin/sh", "-c", "echo " + long + " >&2; exit 4"}, time.Minute)
+	if err == nil || !strings.HasPrefix(err.Error(), "The api_key_command exited 4: ...") || len(err.Error()) > 300 {
+		t.Errorf("err = %v", err)
 	}
 }

@@ -286,7 +286,8 @@ The request:
   "model": "claude-opus-5-5",
   "effort": "high",
   "base_url": "",                     // the provider's API by default
-  "api_key_env": "AGENTLOOP_API_KEY", // the variable agentloop reads the key from
+  "api_key_command": ["security", "find-generic-password", "-s", "anthropic", "-w"],
+                                      // run to get the key; required
   "system": "…",
   "prompt": "…",                      // not used by chat
   "session": "/path/to/session.jsonl",
@@ -316,11 +317,22 @@ A session is held under an exclusive lock on `<session>.lock` while a
 process uses it. The OS releases the lock when the process dies, however it
 dies.
 
-With no API key in `api_key_env`, `run` calls nothing and reports
-`model_error` with kind `unauthorized`.
+The key comes from `api_key_command`, which agentloop runs itself: no
+shell, an empty stdin, and an environment of only `PATH` and `HOME`, taken
+from agentloop's own. The command has 30 seconds. Its stdout, trimmed, is
+the key. Nothing is read from the environment, so there is no variable to
+set; a keychain helper like the one above works as it is.
 
-The key is read from `api_key_env` and is not passed on: tools get only
-`tool_env`.
+If the command cannot start, exits non-zero, times out or prints nothing,
+`run` calls nothing and reports `model_error` with kind `unauthorized`
+and a message such as `The api_key_command exited 1: item not found.`
+The message may carry the end of the command's stderr, never its stdout.
+`chat` prints the same message and exits 2. A request with no
+`api_key_command`, an empty one, or one with an empty program name or a NUL
+character is unusable and exits 2.
+
+The key reaches the model and nothing else. It is not logged, not written
+to the session and not passed on: tools get only `tool_env`.
 
 ## What it does not guarantee
 

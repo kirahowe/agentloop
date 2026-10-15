@@ -16,6 +16,7 @@ import (
 	"io/fs"
 	"net/url"
 	"os"
+	"os/exec"
 	"os/signal"
 	"path/filepath"
 	"regexp"
@@ -34,7 +35,8 @@ import (
 // version is set at build time with -ldflags "-X main.version=...".
 var version = "dev"
 
-const defaultKeyEnv = "AGENTLOOP_API_KEY"
+// keyTimeout is how long api_key_command may run.
+const keyTimeout = 30 * time.Second
 
 // errInterrupted ends a chat that SIGTERM stopped: exit 130.
 var errInterrupted = errors.New("interrupted")
@@ -109,7 +111,7 @@ type request struct {
 	Model              string               `json:"model"`
 	Effort             string               `json:"effort"`
 	BaseURL            string               `json:"base_url"`
-	APIKeyEnv          string               `json:"api_key_env"`
+	APIKeyCommand      []string             `json:"api_key_command"`
 	RefusalFallback    *bool                `json:"refusal_fallback"`
 	System             string               `json:"system"`
 	Prompt             string               `json:"prompt"`
@@ -167,6 +169,9 @@ func (r *request) validate() error {
 	if r.Session == "" {
 		return usagef("request has no session path")
 	}
+	if len(r.APIKeyCommand) == 0 {
+		return usagef("request has no api_key_command")
+	}
 	if len(r.Tools) > 0 && len(r.ToolCommand) == 0 {
 		return usagef("request has tools but no tool_command")
 	}
@@ -223,8 +228,16 @@ var toolName = regexp.MustCompile(`^[A-Za-z0-9_-]{1,64}$`)
 // entry can hold.
 func (r *request) checkNUL() error {
 	bad := func(s string) bool { return strings.ContainsRune(s, 0) }
-	if bad(r.Session) || bad(r.ToolDir) || bad(r.APIKeyEnv) {
-		return usagef("session, tool_dir and api_key_env cannot contain a NUL character")
+	if bad(r.Session) || bad(r.ToolDir) {
+		return usagef("session and tool_dir cannot contain a NUL character")
+	}
+	for _, a := range r.APIKeyCommand {
+		if bad(a) {
+			return usagef("api_key_command cannot contain a NUL character")
+		}
+	}
+	if len(r.APIKeyCommand) > 0 && r.APIKeyCommand[0] == "" {
+		return usagef("api_key_command starts with an empty program name")
 	}
 	for _, a := range r.ToolCommand {
 		if bad(a) {
@@ -242,11 +255,75 @@ func (r *request) checkNUL() error {
 	return nil
 }
 
-func (r *request) keyEnv() string {
-	if r.APIKeyEnv != "" {
-		return r.APIKeyEnv
+// keyError is why the key command gave no key. Its message is plain text for
+// the operator and never holds the command's stdout.
+type keyError struct {
+	msg      string
+	canceled bool // agentloop was told to stop while the command ran
+}
+
+func (e *keyError) Error() string { return e.msg }
+
+// fetchKey runs the key command: no shell, an empty stdin, and an
+// environment of only PATH and HOME from this process. Its trimmed stdout is
+// the key. The key is returned to the caller and goes nowhere else.
+func fetchKey(ctx context.Context, argv []string, timeout time.Duration) (string, error) {
+	ctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, argv[0], argv[1:]...)
+	cmd.Env = nil
+	for _, k := range []string{"PATH", "HOME"} {
+		if v, ok := os.LookupEnv(k); ok {
+			cmd.Env = append(cmd.Env, k+"="+v)
+		}
 	}
-	return defaultKeyEnv
+	if cmd.Env == nil {
+		cmd.Env = []string{}
+	}
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout, cmd.Stderr = &stdout, &stderr
+	// Stop the command's children too, or one that holds the pipes open
+	// would keep the wait going past the deadline.
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	cmd.Cancel = func() error { return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL) }
+	cmd.WaitDelay = time.Second
+	err := cmd.Run()
+	if ctx.Err() != nil {
+		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+			return "", &keyError{msg: fmt.Sprintf("The api_key_command did not finish within %d seconds.", int(timeout.Seconds()))}
+		}
+		return "", &keyError{msg: "The api_key_command was interrupted.", canceled: true}
+	}
+	if err != nil {
+		var ee *exec.ExitError
+		if errors.As(err, &ee) {
+			what := fmt.Sprintf("exited %d", ee.ExitCode())
+			if ee.ExitCode() < 0 {
+				what = "was killed (" + ee.String() + ")"
+			}
+			msg := "The api_key_command " + what
+			if tail := stderrTail(stderr.Bytes()); tail != "" {
+				msg += ": " + tail
+			}
+			return "", &keyError{msg: msg + "."}
+		}
+		return "", &keyError{msg: fmt.Sprintf("The api_key_command could not run: %v.", err)}
+	}
+	key := strings.TrimSpace(stdout.String())
+	if key == "" {
+		return "", &keyError{msg: "The api_key_command printed no key."}
+	}
+	return key, nil
+}
+
+// stderrTail is the end of what the key command wrote to stderr, on one line.
+func stderrTail(b []byte) string {
+	s := strings.Join(strings.Fields(strings.ToValidUTF8(string(b), "")), " ")
+	const max = 200
+	if r := []rune(s); len(r) > max {
+		return "..." + string(r[len(r)-max:])
+	}
+	return strings.TrimSuffix(s, ".")
 }
 
 // seconds converts a request value to a duration. A huge value saturates
@@ -352,20 +429,24 @@ type outcomeLine struct {
 	Session string `json:"session"`
 }
 
-func missingKeyOutcome(name string) agentloop.Outcome {
+func noKeyOutcome(err error) agentloop.Outcome {
 	return agentloop.Outcome{
 		Reason: agentloop.ReasonModelError,
-		Error: &agentloop.ModelError{
-			Kind:    agentloop.Unauthorized,
-			Message: fmt.Sprintf("No API key in $%s.", name),
-		},
+		Error:  &agentloop.ModelError{Kind: agentloop.Unauthorized, Message: err.Error()},
 	}
 }
 
 func runCmd(ctx context.Context, req *request, stdout, stderr io.Writer) error {
-	key := os.Getenv(req.keyEnv())
-	if key == "" {
-		return writeJSON(stdout, outcomeLine{Type: "outcome", Outcome: missingKeyOutcome(req.keyEnv()), Session: req.Session})
+	key, err := fetchKey(ctx, req.APIKeyCommand, keyTimeout)
+	var ke *keyError
+	if errors.As(err, &ke) && ke.canceled {
+		// A signal arrived while the key command ran. The run below sees the
+		// canceled context and ends as canceled without calling the model,
+		// the same as a signal at any other point before the first call.
+		err = nil
+	}
+	if err != nil {
+		return writeJSON(stdout, outcomeLine{Type: "outcome", Outcome: noKeyOutcome(err), Session: req.Session})
 	}
 	if req.Prompt == "" {
 		// Nothing to resume if there is no session yet; say so without
@@ -420,9 +501,9 @@ func writeJSON(w io.Writer, v any) error {
 }
 
 func chatCmd(req *request, stdin io.Reader, stdout, stderr io.Writer) error {
-	key := os.Getenv(req.keyEnv())
-	if key == "" {
-		return usagef("No API key in $%s.", req.keyEnv())
+	key, err := fetchKey(context.Background(), req.APIKeyCommand, keyTimeout)
+	if err != nil {
+		return usagef("%v", err)
 	}
 	sess, unlock, err := req.openSession()
 	if err != nil {

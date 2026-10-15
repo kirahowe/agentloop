@@ -236,10 +236,11 @@ func newChaosWorld(t *testing.T, rng *rand.Rand) *chaosWorld {
 		t.Fatal(err)
 	}
 	w.req = map[string]any{
-		"provider": "anthropic",
-		"model":    "claude-test",
-		"base_url": w.api.URL,
-		"session":  w.session,
+		"provider":        "anthropic",
+		"model":           "claude-test",
+		"base_url":        w.api.URL,
+		"session":         w.session,
+		"api_key_command": []string{"printf", "%s", chaosKey},
 		"tools": []map[string]any{{
 			"name": "ledger", "description": "append to the ledger",
 			"parameters": map[string]any{"type": "object", "properties": map[string]any{"n": map[string]any{"type": "string"}}},
@@ -365,7 +366,7 @@ func chaosExecIn(t *testing.T, dir string, args []string, env []string, after ..
 }
 
 func chaosEnv() []string {
-	return []string{"AGENTLOOP_API_KEY=" + chaosKey, "PATH=/usr/bin:/bin", "LEAK_CANARY=parent-env"}
+	return []string{"PATH=/usr/bin:/bin", "HOME=/nonexistent-home", "LEAK_CANARY=parent-env"}
 }
 
 // run starts the binary and optionally kills it after delay with sig.

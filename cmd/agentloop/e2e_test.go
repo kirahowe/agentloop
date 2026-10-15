@@ -135,12 +135,13 @@ func newFixture(t *testing.T, api *fakeAPI, script string) *fixture {
 		t.Fatal(err)
 	}
 	f.req = map[string]any{
-		"provider": "anthropic",
-		"model":    "claude-test",
-		"base_url": api.URL,
-		"system":   "be brief",
-		"prompt":   "go",
-		"session":  f.session,
+		"provider":        "anthropic",
+		"model":           "claude-test",
+		"base_url":        api.URL,
+		"system":          "be brief",
+		"prompt":          "go",
+		"session":         f.session,
+		"api_key_command": []string{"printf", "%s", secretKey},
 		"tools": []map[string]any{{
 			"name": "probe", "description": "probe",
 			"parameters": map[string]any{"type": "object"},
@@ -164,7 +165,7 @@ func (f *fixture) writeReq() string {
 
 func (f *fixture) command(args ...string) *exec.Cmd {
 	cmd := exec.Command(binary, args...)
-	cmd.Env = []string{"AGENTLOOP_API_KEY=" + secretKey, "PARENT_VAR=leaky", "PATH=/usr/bin:/bin"}
+	cmd.Env = []string{"PARENT_VAR=leaky", "PATH=/usr/bin:/bin"}
 	return cmd
 }
 
@@ -265,7 +266,7 @@ func TestToolLoop(t *testing.T) {
 	if !strings.Contains(result, "TOOL_X=1") {
 		t.Errorf("tool_env missing: %s", result)
 	}
-	for _, leak := range []string{secretKey, "PARENT_VAR", "AGENTLOOP_API_KEY"} {
+	for _, leak := range []string{secretKey, "PARENT_VAR"} {
 		if strings.Contains(result, leak) {
 			t.Errorf("tool saw %q: %s", leak, result)
 		}
@@ -288,24 +289,6 @@ func readFile(t *testing.T, p string) string {
 		t.Fatal(err)
 	}
 	return string(b)
-}
-
-func TestMissingKey(t *testing.T) {
-	api := newFakeAPI(t)
-	f := newFixture(t, api, probeScript)
-	f.req["api_key_env"] = "NOT_SET_ANYWHERE"
-	res := f.run()
-	if res.code != 0 {
-		t.Fatalf("exit %d: %s", res.code, res.stderr)
-	}
-	out := res.outcome(t)
-	e, _ := out["error"].(map[string]any)
-	if out["reason"] != "model_error" || e["kind"] != "unauthorized" || e["message"] != "No API key in $NOT_SET_ANYWHERE." {
-		t.Errorf("outcome = %v", out)
-	}
-	if n := len(api.requests()); n != 0 {
-		t.Errorf("%d requests made", n)
-	}
 }
 
 func TestUnusableRequests(t *testing.T) {
