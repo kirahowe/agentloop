@@ -13,14 +13,15 @@ import (
 
 	"github.com/kirahowe/agentloop"
 	"github.com/kirahowe/agentloop/fake"
+	"github.com/kirahowe/agentloop/internal/scenario"
 )
 
 // randomLog runs a random scenario and returns the log it left, line by
 // line.
 func randomLog(t *rapid.T) [][]byte {
-	sc := newScenario(t, genConfig(t), faults{})
-	sc.execute()
-	return sc.store.snapshot()
+	sc := scenario.New(t, scenario.GenConfig(t), scenario.Faults{})
+	sc.Execute()
+	return sc.Store.Snapshot()
 }
 
 func writeLines(t fataler, path string, lines [][]byte) []byte {
@@ -151,15 +152,15 @@ func TestFileStoreEveryOffset(t *testing.T) {
 		if lines != nil {
 			return
 		}
-		cfg := config{Steps: []step{
-			{Kind: stToolUse, Stop: agentloop.StopToolUse, Text: "café <x>", In: 3, Out: 4, Calls: []callSpec{{"echo", 0}, {"any", 0}, {"echo", 4}}},
-			{Kind: stErr, ErrKind: agentloop.Overloaded},
-		}, Behaviors: map[string]behavior{"echo": {}, "any": {Kind: bOK, Labels: []string{"private"}}, "lab": {}},
-			Rules: map[string]rule{"echo": {Base: agentloop.Hold}, "any": {Base: agentloop.Allow}, "lab": {Base: agentloop.Allow}},
+		cfg := scenario.Config{Steps: []scenario.Step{
+			{Kind: scenario.StToolUse, Stop: agentloop.StopToolUse, Text: "café <x>", In: 3, Out: 4, Calls: []scenario.CallSpec{{Name: "echo"}, {Name: "any"}, {Name: "echo", Input: 4}}},
+			{Kind: scenario.StErr, ErrKind: agentloop.Overloaded},
+		}, Behaviors: map[string]scenario.Behavior{"echo": {}, "any": {Kind: scenario.BOK, Labels: []string{"private"}}, "lab": {}},
+			Rules: map[string]scenario.Rule{"echo": {Base: agentloop.Hold}, "any": {Base: agentloop.Allow}, "lab": {Base: agentloop.Allow}},
 			Retry: &agentloop.RetryPolicy{Retries: 2}, Iterations: 1}
-		sc := newScenario(rt, cfg, faults{})
-		sc.execute()
-		lines = sc.store.snapshot()
+		sc := scenario.New(rt, cfg, scenario.Faults{})
+		sc.Execute()
+		lines = sc.Store.Snapshot()
 	})
 	raw := bytes.Join(lines, []byte("\n"))
 	raw = append(raw, '\n')

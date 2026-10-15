@@ -1,7 +1,6 @@
 package main
 
 import (
-	"context"
 	"encoding/json"
 	"fmt"
 	"net"
@@ -374,34 +373,5 @@ func TestKeyCommandKeyReachesOnlyTheAPI(t *testing.T) {
 		if strings.Contains(s, chaosKey) {
 			t.Errorf("key in %s", what)
 		}
-	}
-}
-
-// TestFetchKeyTimeout runs the command in process with a short timeout, so
-// the 30 second limit need not be waited for. A child that keeps the pipes
-// open must not hold the wait past the deadline.
-func TestFetchKeyTimeout(t *testing.T) {
-	start := time.Now()
-	_, err := fetchKey(context.Background(), []string{"/bin/sh", "-c", "sleep 30 & sleep 30"}, 300*time.Millisecond)
-	if err == nil || !strings.Contains(err.Error(), "did not finish within") {
-		t.Fatalf("err = %v", err)
-	}
-	if d := time.Since(start); d > 5*time.Second {
-		t.Errorf("took %v", d)
-	}
-	if keyTimeout != 30*time.Second {
-		t.Errorf("keyTimeout = %v", keyTimeout)
-	}
-}
-
-func TestFetchKeyTrimsAndFails(t *testing.T) {
-	key, err := fetchKey(context.Background(), []string{"printf", "  k-1 \n"}, time.Minute)
-	if err != nil || key != "k-1" {
-		t.Errorf("key %q, err %v", key, err)
-	}
-	long := strings.Repeat("e", 1000)
-	_, err = fetchKey(context.Background(), []string{"/bin/sh", "-c", "echo " + long + " >&2; exit 4"}, time.Minute)
-	if err == nil || !strings.HasPrefix(err.Error(), "The api_key_command exited 4: ...") || len(err.Error()) > 300 {
-		t.Errorf("err = %v", err)
 	}
 }

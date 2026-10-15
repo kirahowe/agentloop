@@ -1,10 +1,10 @@
-package agentloop_test
-
-// The harness behind the property tests. A scenario is a random model
-// script, random tools, a random policy, random limits and retry policy,
+// Package scenario is the harness behind the property tests, for reuse by
+// any package that wants to drive the same generated runs. A scenario is a
+// random model script, random tools, a random policy, random limits and retry policy,
 // run against a store that can "crash". Every check that must hold at
 // every point lives here, so each property test only chooses which faults
 // to inject.
+package scenario
 
 import (
 	"bytes"
@@ -24,11 +24,11 @@ import (
 	"github.com/kirahowe/agentloop/fake"
 )
 
-var errCrash = errors.New("simulated crash")
+var ErrCrash = errors.New("simulated crash")
 
-// crashStore keeps JSON lines in memory and can die on the Nth append,
+// CrashStore keeps JSON lines in memory and can die on the Nth append,
 // either before or after the line becomes durable.
-type crashStore struct {
+type CrashStore struct {
 	mu      sync.Mutex
 	lines   [][]byte
 	appends int
@@ -37,7 +37,7 @@ type crashStore struct {
 	dead    bool
 }
 
-func (c *crashStore) Load() ([]agentloop.Entry, error) {
+func (c *CrashStore) Load() ([]agentloop.Entry, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	out := make([]agentloop.Entry, 0, len(c.lines))
@@ -51,7 +51,7 @@ func (c *crashStore) Load() ([]agentloop.Entry, error) {
 	return out, nil
 }
 
-func (c *crashStore) Append(e agentloop.Entry) error {
+func (c *CrashStore) Append(e agentloop.Entry) error {
 	b, err := json.Marshal(e)
 	if err != nil {
 		return err
@@ -59,7 +59,7 @@ func (c *crashStore) Append(e agentloop.Entry) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if c.dead {
-		return errCrash
+		return ErrCrash
 	}
 	c.appends++
 	if c.crashAt > 0 && c.appends == c.crashAt {
@@ -67,7 +67,7 @@ func (c *crashStore) Append(e agentloop.Entry) error {
 		if c.after {
 			c.lines = append(c.lines, b)
 		}
-		return errCrash
+		return ErrCrash
 	}
 	c.lines = append(c.lines, b)
 	return nil
@@ -75,13 +75,13 @@ func (c *crashStore) Append(e agentloop.Entry) error {
 
 // arm revives the store, as a restarted process would find it, and makes
 // the nth append from now on fail. Zero means never.
-func (c *crashStore) arm(n int, after bool) {
+func (c *CrashStore) arm(n int, after bool) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.dead, c.appends, c.crashAt, c.after = false, 0, n, after
 }
 
-func (c *crashStore) snapshot() [][]byte {
+func (c *CrashStore) Snapshot() [][]byte {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	out := make([][]byte, len(c.lines))
@@ -93,23 +93,23 @@ func (c *crashStore) snapshot() [][]byte {
 
 // ---- generated pieces ----
 
-type callSpec struct {
+type CallSpec struct {
 	Name  string
 	Input int
 }
 
 const (
-	stText = iota
-	stToolUse
-	stErr
-	stHang
-	stNil
+	StText = iota
+	StToolUse
+	StErr
+	StHang
+	StNil
 )
 
-type step struct {
+type Step struct {
 	Kind       int
 	Stop       agentloop.Stop
-	Calls      []callSpec
+	Calls      []CallSpec
 	ErrKind    agentloop.ErrorKind
 	Plain      bool
 	RetryAfter int
@@ -123,21 +123,21 @@ type step struct {
 
 var callNames = []string{"echo", "echo", "any", "lab", "ghost"}
 
-func genStep() *rapid.Generator[step] {
-	return rapid.Custom(func(t *rapid.T) step {
-		var s step
-		s.Kind = rapid.SampledFrom([]int{stText, stToolUse, stToolUse, stToolUse, stToolUse, stToolUse, stErr, stErr, stHang, stNil}).Draw(t, "kind")
+func genStep() *rapid.Generator[Step] {
+	return rapid.Custom(func(t *rapid.T) Step {
+		var s Step
+		s.Kind = rapid.SampledFrom([]int{StText, StToolUse, StToolUse, StToolUse, StToolUse, StToolUse, StErr, StErr, StHang, StNil}).Draw(t, "kind")
 		s.Text = rapid.SampledFrom([]string{"", "hello", "a <b> & c", "x\ny", "caf\u00e9"}).Draw(t, "text")
 		s.In = rapid.Int64Range(0, 40).Draw(t, "in")
 		s.Out = rapid.Int64Range(0, 40).Draw(t, "out")
 		s.Reasoning = rapid.Bool().Draw(t, "reasoning")
 		switch s.Kind {
-		case stText:
+		case StText:
 			s.Stop = rapid.SampledFrom([]agentloop.Stop{agentloop.StopEndTurn, agentloop.StopEndTurn, agentloop.StopEndTurn,
 				agentloop.StopMaxTokens, agentloop.StopRefusal, agentloop.StopPause, agentloop.StopToolUse}).Draw(t, "stop")
-		case stToolUse:
-			s.Calls = rapid.SliceOfN(rapid.Custom(func(t *rapid.T) callSpec {
-				return callSpec{
+		case StToolUse:
+			s.Calls = rapid.SliceOfN(rapid.Custom(func(t *rapid.T) CallSpec {
+				return CallSpec{
 					Name:  rapid.SampledFrom(callNames).Draw(t, "name"),
 					Input: rapid.SampledFrom([]int{0, 0, 0, 0, 1, 2, 3, 4, 5, 6}).Draw(t, "input"),
 				}
@@ -146,7 +146,7 @@ func genStep() *rapid.Generator[step] {
 			s.Stop = rapid.SampledFrom([]agentloop.Stop{agentloop.StopToolUse, agentloop.StopToolUse, agentloop.StopToolUse,
 				agentloop.StopToolUse, agentloop.StopToolUse, agentloop.StopEndTurn, agentloop.StopMaxTokens,
 				agentloop.StopPause, agentloop.StopRefusal}).Draw(t, "stop")
-		case stErr:
+		case StErr:
 			s.ErrKind = rapid.SampledFrom([]agentloop.ErrorKind{agentloop.RateLimited, agentloop.Overloaded, agentloop.Unreachable,
 				agentloop.Unauthorized, agentloop.Billing, agentloop.NotFound, agentloop.InvalidRequest}).Draw(t, "errkind")
 			s.Plain = rapid.IntRange(0, 5).Draw(t, "plain") == 0
@@ -156,21 +156,21 @@ func genStep() *rapid.Generator[step] {
 	})
 }
 
-type behavior struct {
+type Behavior struct {
 	Kind   int
 	Labels []string
 }
 
 const (
-	bOK = iota
-	bIsError
-	bGoError
-	bCancelThenOK
-	bBlockUntilCancel
-	bBlockUntilTimeout
+	BOK = iota
+	BIsError
+	BGoError
+	BCancelThenOK
+	BBlockUntilCancel
+	BBlockUntilTimeout
 )
 
-type rule struct {
+type Rule struct {
 	Base       agentloop.Verdict
 	Labels     []string
 	IfLabel    string
@@ -184,10 +184,10 @@ func genLabels() *rapid.Generator[[]string] {
 	return rapid.SliceOfN(rapid.SampledFrom(labelNames), 0, 3)
 }
 
-func genRule() *rapid.Generator[rule] {
-	return rapid.Custom(func(t *rapid.T) rule {
+func genRule() *rapid.Generator[Rule] {
+	return rapid.Custom(func(t *rapid.T) Rule {
 		vs := []agentloop.Verdict{agentloop.Allow, agentloop.Allow, agentloop.Deny, agentloop.Hold, agentloop.Hold, "maybe"}
-		return rule{
+		return Rule{
 			Base:       rapid.SampledFrom(vs).Draw(t, "base"),
 			Labels:     genLabels().Draw(t, "labels"),
 			IfLabel:    rapid.SampledFrom(append([]string{""}, labelNames...)).Draw(t, "iflabel"),
@@ -198,11 +198,11 @@ func genRule() *rapid.Generator[rule] {
 }
 
 // config is everything random about one scenario.
-type config struct {
-	Steps       []step
-	Behaviors   map[string]behavior
+type Config struct {
+	Steps       []Step
+	Behaviors   map[string]Behavior
 	NilPolicy   bool
-	Rules       map[string]rule
+	Rules       map[string]Rule
 	Limits      agentloop.Limits
 	Retry       *agentloop.RetryPolicy
 	ToolTimeout time.Duration
@@ -210,14 +210,14 @@ type config struct {
 	Wild        bool
 }
 
-func genConfig(t *rapid.T) config {
-	var c config
+func GenConfig(t *rapid.T) Config {
+	var c Config
 	c.Steps = rapid.SliceOfN(genStep(), 0, 9).Draw(t, "steps")
-	c.Behaviors = map[string]behavior{}
-	c.Rules = map[string]rule{}
+	c.Behaviors = map[string]Behavior{}
+	c.Rules = map[string]Rule{}
 	for _, n := range []string{"echo", "any", "lab"} {
-		c.Behaviors[n] = behavior{
-			Kind:   rapid.SampledFrom([]int{bOK, bOK, bOK, bIsError, bGoError, bCancelThenOK, bBlockUntilCancel, bBlockUntilTimeout}).Draw(t, "behavior"),
+		c.Behaviors[n] = Behavior{
+			Kind:   rapid.SampledFrom([]int{BOK, BOK, BOK, BIsError, BGoError, BCancelThenOK, BBlockUntilCancel, BBlockUntilTimeout}).Draw(t, "behavior"),
 			Labels: genLabels().Draw(t, "toollabels"),
 		}
 		c.Rules[n] = genRule().Draw(t, "rule")
@@ -244,17 +244,17 @@ func genConfig(t *rapid.T) config {
 
 // ---- the scenario ----
 
-type faults struct {
+type Faults struct {
 	Crash  bool
 	Cancel bool
 	Wild   bool
 }
 
-type scenario struct {
+type Scenario struct {
 	t      *rapid.T
-	cfg    config
-	faults faults
-	store  *crashStore
+	cfg    Config
+	faults Faults
+	Store  *CrashStore
 	model  *fake.Model
 	clock  time.Time
 
@@ -274,15 +274,15 @@ type scenario struct {
 	draining    bool
 }
 
-func newScenario(t *rapid.T, cfg config, f faults) *scenario {
-	sc := &scenario{t: t, cfg: cfg, faults: f, store: &crashStore{}, clock: time.Date(2026, 3, 1, 9, 0, 0, 0, time.UTC),
+func New(t *rapid.T, cfg Config, f Faults) *Scenario {
+	sc := &Scenario{t: t, cfg: cfg, faults: f, Store: &CrashStore{}, clock: time.Date(2026, 3, 1, 9, 0, 0, 0, time.UTC),
 		toolRuns: map[string]int{}, asked: map[string]agentloop.Verdict{}}
 	sc.model = fake.New(sc.respond)
 	return sc
 }
 
-func (sc *scenario) entries() []agentloop.Entry {
-	es, err := sc.store.Load()
+func (sc *Scenario) entries() []agentloop.Entry {
+	es, err := sc.Store.Load()
 	if err != nil {
 		sc.t.Fatalf("the persisted log does not load: %v", err)
 	}
@@ -310,7 +310,7 @@ func inputFor(kind int, id string) json.RawMessage {
 }
 
 // respond is the model. It checks the request, then answers from the script.
-func (sc *scenario) respond(req *agentloop.Request) (*agentloop.Response, error) {
+func (sc *Scenario) respond(req *agentloop.Request) (*agentloop.Response, error) {
 	t := sc.t
 	sc.checkRequest(req)
 
@@ -324,15 +324,15 @@ func (sc *scenario) respond(req *agentloop.Request) (*agentloop.Response, error)
 	}
 	st := sc.cfg.Steps[idx]
 	switch st.Kind {
-	case stHang:
+	case StHang:
 		if sc.cancel != nil {
 			sc.fire()
 			return nil, context.Canceled
 		}
 		return sc.remember(sc.native(fake.Text("done"), idx)), nil
-	case stNil:
+	case StNil:
 		return nil, nil
-	case stErr:
+	case StErr:
 		if st.Plain {
 			return nil, fmt.Errorf("plain failure %d", idx)
 		}
@@ -343,7 +343,7 @@ func (sc *scenario) respond(req *agentloop.Request) (*agentloop.Response, error)
 		return nil, me
 	}
 	var resp *agentloop.Response
-	if st.Kind == stText {
+	if st.Kind == StText {
 		resp = fake.Text(st.Text)
 		resp.Stop = st.Stop
 	} else {
@@ -378,7 +378,7 @@ func (sc *scenario) respond(req *agentloop.Request) (*agentloop.Response, error)
 
 // native sets the provider record of a turn: compact JSON, or, for the
 // wild runs, JSON with whitespace, HTML characters and escapes.
-func (sc *scenario) native(r *agentloop.Response, idx int) *agentloop.Response {
+func (sc *Scenario) native(r *agentloop.Response, idx int) *agentloop.Response {
 	if sc.faults.Wild {
 		data := fmt.Sprintf("{ \"i\" : %d ,\n \"s\" : \"a<b>&c \\u00e9 \\u2028\",  \"sig\":\"AB==\" }", idx)
 		r.Message.Native = &agentloop.Native{Provider: "fake", Model: "fake-model", Data: json.RawMessage(data)}
@@ -388,14 +388,14 @@ func (sc *scenario) native(r *agentloop.Response, idx int) *agentloop.Response {
 	return r
 }
 
-func (sc *scenario) remember(r *agentloop.Response) *agentloop.Response {
+func (sc *Scenario) remember(r *agentloop.Response) *agentloop.Response {
 	sc.mu.Lock()
 	sc.returned = append(sc.returned, deepCopyMessage(sc.t, r.Message))
 	sc.mu.Unlock()
 	return r
 }
 
-func (sc *scenario) fire() {
+func (sc *Scenario) fire() {
 	sc.cancelFired = true
 	sc.cancel()
 }
@@ -460,7 +460,7 @@ func assistants(msgs []agentloop.Message) []agentloop.Message {
 // checkRequest holds properties 3 and 4: what the model is sent is a
 // valid conversation, and the assistant turns in it are the ones the model
 // made, unchanged.
-func (sc *scenario) checkRequest(req *agentloop.Request) {
+func (sc *Scenario) checkRequest(req *agentloop.Request) {
 	t := sc.t
 	msgs := req.Messages
 	if len(msgs) == 0 || msgs[0].Role != agentloop.User {
@@ -544,7 +544,7 @@ func (sc *scenario) checkRequest(req *agentloop.Request) {
 
 // ---- tools ----
 
-func (sc *scenario) validFor(name string, raw json.RawMessage) bool {
+func (sc *Scenario) validFor(name string, raw json.RawMessage) bool {
 	var v any
 	if err := json.Unmarshal(raw, &v); err != nil {
 		return false
@@ -569,7 +569,7 @@ func (sc *scenario) validFor(name string, raw json.RawMessage) bool {
 	return false
 }
 
-func (sc *scenario) tools() []agentloop.Tool {
+func (sc *Scenario) tools() []agentloop.Tool {
 	var out []agentloop.Tool
 	for _, name := range []string{"echo", "any", "lab"} {
 		name := name
@@ -589,7 +589,7 @@ func (sc *scenario) tools() []agentloop.Tool {
 
 // callTool is where properties 1 and 2 are checked, from the persisted log
 // alone: the call must have been allowed, and started, durably, just now.
-func (sc *scenario) callTool(ctx context.Context, name string, in json.RawMessage) (agentloop.Result, error) {
+func (sc *Scenario) callTool(ctx context.Context, name string, in json.RawMessage) (agentloop.Result, error) {
 	t := sc.t
 	es := sc.entries()
 	last := es[len(es)-1]
@@ -640,21 +640,21 @@ func (sc *scenario) callTool(ctx context.Context, name string, in json.RawMessag
 	labels := append([]string(nil), b.Labels...)
 	sc.handed = append(sc.handed, labels)
 	switch b.Kind {
-	case bIsError:
+	case BIsError:
 		return agentloop.Result{Content: "bad:" + id, IsError: true, Labels: labels}, nil
-	case bGoError:
+	case BGoError:
 		return agentloop.Result{Content: "ignored", Labels: labels}, errors.New("boom:" + id)
-	case bCancelThenOK:
+	case BCancelThenOK:
 		if sc.cancel != nil {
 			sc.fire()
 		}
-	case bBlockUntilCancel:
+	case BBlockUntilCancel:
 		if sc.cancel != nil {
 			sc.fire()
 			<-ctx.Done()
 			return agentloop.Result{}, ctx.Err()
 		}
-	case bBlockUntilTimeout:
+	case BBlockUntilTimeout:
 		if sc.cfg.ToolTimeout > 0 && !sc.draining {
 			<-ctx.Done()
 			return agentloop.Result{}, ctx.Err()
@@ -665,7 +665,7 @@ func (sc *scenario) callTool(ctx context.Context, name string, in json.RawMessag
 
 // ---- policy ----
 
-func (sc *scenario) policy() agentloop.Policy {
+func (sc *Scenario) policy() agentloop.Policy {
 	if sc.cfg.NilPolicy {
 		return nil
 	}
@@ -735,9 +735,9 @@ func oracleDecided(es []agentloop.Entry) int {
 
 // ---- derived state = replayed state, append-only ----
 
-func (sc *scenario) checkSession(s *agentloop.Session) {
+func (sc *Scenario) checkSession(s *agentloop.Session) {
 	t := sc.t
-	lines := sc.store.snapshot()
+	lines := sc.Store.Snapshot()
 	for i, l := range sc.prevLines {
 		if i >= len(lines) || !bytes.Equal(l, lines[i]) {
 			t.Fatalf("persisted entry %d changed", i+1)
@@ -759,7 +759,7 @@ func (sc *scenario) checkSession(s *agentloop.Session) {
 		}
 	}
 
-	r, err := agentloop.OpenSession(sc.store)
+	r, err := agentloop.OpenSession(sc.Store)
 	if err != nil {
 		t.Fatalf("the persisted log does not replay: %v", err)
 	}
@@ -800,7 +800,7 @@ func (sc *scenario) checkSession(s *agentloop.Session) {
 
 // ---- driving ----
 
-func (sc *scenario) agent() *agentloop.Agent {
+func (sc *Scenario) agent() *agentloop.Agent {
 	a := &agentloop.Agent{
 		Model:       sc.model,
 		ModelID:     "fake-model",
@@ -822,8 +822,8 @@ func (sc *scenario) agent() *agentloop.Agent {
 	return a
 }
 
-func (sc *scenario) open() *agentloop.Session {
-	s, err := agentloop.OpenSession(sc.store)
+func (sc *Scenario) open() *agentloop.Session {
+	s, err := agentloop.OpenSession(sc.Store)
 	if err != nil {
 		sc.t.Fatalf("a persisted log does not reopen: %v", err)
 	}
@@ -833,7 +833,7 @@ func (sc *scenario) open() *agentloop.Session {
 
 // iterate runs once: fresh session from what was persisted, fresh agent.
 // It returns the outcome, or nil if the run crashed.
-func (sc *scenario) iterate(prompt string, crashAt int, after bool, cancelMode int) *agentloop.Outcome {
+func (sc *Scenario) iterate(prompt string, crashAt int, after bool, cancelMode int) *agentloop.Outcome {
 	t := sc.t
 	s := sc.open()
 	a := sc.agent()
@@ -852,11 +852,11 @@ func (sc *scenario) iterate(prompt string, crashAt int, after bool, cancelMode i
 	case 2:
 		sc.cancel = cancel
 	}
-	sc.store.arm(crashAt, after)
+	sc.Store.arm(crashAt, after)
 	out, err := a.Run(ctx, s, prompt)
-	sc.store.arm(0, false)
+	sc.Store.arm(0, false)
 	if err != nil {
-		if !errors.Is(err, errCrash) {
+		if !errors.Is(err, ErrCrash) {
 			t.Fatalf("Run failed for a reason other than the crash: %v", err)
 		}
 		return nil
@@ -875,7 +875,7 @@ func (sc *scenario) iterate(prompt string, crashAt int, after bool, cancelMode i
 	return out
 }
 
-func (sc *scenario) retryPolicy() agentloop.RetryPolicy {
+func (sc *Scenario) retryPolicy() agentloop.RetryPolicy {
 	if sc.cfg.Retry != nil {
 		return *sc.cfg.Retry
 	}
@@ -883,7 +883,7 @@ func (sc *scenario) retryPolicy() agentloop.RetryPolicy {
 }
 
 // checkRun holds the limit, outcome and retry properties for one finished run.
-func (sc *scenario) checkRun(s *agentloop.Session, a *agentloop.Agent, out *agentloop.Outcome, prompt string) {
+func (sc *Scenario) checkRun(s *agentloop.Session, a *agentloop.Agent, out *agentloop.Outcome, prompt string) {
 	t := sc.t
 	es := sc.entries()
 	start := -1
@@ -1049,7 +1049,7 @@ func (sc *scenario) checkRun(s *agentloop.Session, a *agentloop.Agent, out *agen
 // a request a provider accepts, with every call answered by its result. A
 // canceled run may stop part way through a tool_use turn, but never leaves
 // a cut-off turn's calls open.
-func (sc *scenario) checkAtRest(s *agentloop.Session, out *agentloop.Outcome) {
+func (sc *Scenario) checkAtRest(s *agentloop.Session, out *agentloop.Outcome) {
 	t := sc.t
 	if out.Reason == agentloop.ReasonHeld {
 		return
@@ -1081,7 +1081,7 @@ func (sc *scenario) checkAtRest(s *agentloop.Session, out *agentloop.Outcome) {
 }
 
 // checkRetries holds the retry rules of DESIGN.md against the log.
-func (sc *scenario) checkRetries(run []agentloop.Entry, a *agentloop.Agent) {
+func (sc *Scenario) checkRetries(run []agentloop.Entry, a *agentloop.Agent) {
 	t := sc.t
 	p := sc.retryPolicy()
 	attempt := 0
@@ -1132,7 +1132,7 @@ func (sc *scenario) checkRetries(run []agentloop.Entry, a *agentloop.Agent) {
 }
 
 // resolveHeld settles the session's held calls as a person might.
-func (sc *scenario) resolveHeld(s *agentloop.Session, held []agentloop.ToolCall, crashAt int) {
+func (sc *Scenario) resolveHeld(s *agentloop.Session, held []agentloop.ToolCall, crashAt int) {
 	t := sc.t
 	for _, c := range held {
 		choice := 0
@@ -1159,7 +1159,7 @@ func (sc *scenario) resolveHeld(s *agentloop.Session, held []agentloop.ToolCall,
 }
 
 // finalChecks holds for a log at rest, whatever happened to produce it.
-func (sc *scenario) finalChecks(s *agentloop.Session, complete bool) {
+func (sc *Scenario) finalChecks(s *agentloop.Session, complete bool) {
 	t := sc.t
 	es := sc.entries()
 	decisions := map[string][]agentloop.DecisionEntry{}
@@ -1259,9 +1259,9 @@ func (sc *scenario) finalChecks(s *agentloop.Session, complete bool) {
 	}
 }
 
-// execute drives the scenario: the faulty iterations, then a clean drain
+// Execute drives the scenario: the faulty iterations, then a clean drain
 // that must reach `completed`.
-func (sc *scenario) execute() {
+func (sc *Scenario) Execute() {
 	t := sc.t
 	prompt := "go"
 	for i := 0; i < sc.cfg.Iterations; i++ {
