@@ -25,9 +25,13 @@ type Options struct {
 	// tool_kinds). A tool not listed is "other".
 	Kinds map[string]acp.ToolKind
 	// ContextWindow is the model's context window in tokens, as its
-	// provider describes it. Zero means unknown, and then no usage_update
-	// is sent: its size is required.
+	// provider describes it. Zero means unknown, and then a usage_update
+	// is sent only for a priced model, with a size of 0.
 	ContextWindow int64
+	// Prices is what the model costs, when its provider's adapter knows.
+	// With it, each usage_update carries the session's cumulative cost in
+	// US dollars; without it, none does.
+	Prices *agentloop.Prices
 	// Notices says the client advertised session notices, which carry
 	// retry status. Without them nothing is sent for a model error.
 	Notices bool
@@ -51,10 +55,29 @@ type Translator struct {
 	text, thought string
 	// attempt counts failed model calls since the last message.
 	attempt int
+	// total is the usage of every assistant message so far, in this run
+	// and in the session before it.
+	total agentloop.Usage
 }
 
 // NewTranslator makes the translator for a session's live events.
 func NewTranslator(opts Options) Translator { return Translator{opts: opts} }
+
+// WithUsage is the translator for a session that has already spent u, as
+// a reopened one has, so the cost it reports includes earlier turns.
+func (t Translator) WithUsage(u agentloop.Usage) Translator {
+	t.total = sumUsage(t.total, u)
+	return t
+}
+
+func sumUsage(a, b agentloop.Usage) agentloop.Usage {
+	return agentloop.Usage{
+		InputTokens:      a.InputTokens + b.InputTokens,
+		OutputTokens:     a.OutputTokens + b.OutputTokens,
+		CacheReadTokens:  a.CacheReadTokens + b.CacheReadTokens,
+		CacheWriteTokens: a.CacheWriteTokens + b.CacheWriteTokens,
+	}
+}
 
 // Step takes one event and returns the next translator and the updates to
 // send for it.
@@ -104,6 +127,7 @@ func (t Translator) entry(e agentloop.Entry) (Translator, []Update) {
 		for _, c := range m.Message.ToolCalls() {
 			ups = append(ups, toolCall(c, t.opts.Kinds, acp.ToolCallStatusPending, nil))
 		}
+		t.total = sumUsage(t.total, m.Usage)
 		if u, ok := t.usage(m.Usage); ok {
 			ups = append(ups, u)
 		}
@@ -136,7 +160,8 @@ func (t Translator) entry(e agentloop.Entry) (Translator, []Update) {
 // as chunks, and each call as one tool_call with its final status. A held
 // call is pending, and a call that started and never finished is
 // in_progress. Notices are never replayed. If the options give a context
-// window, the last assistant turn's usage follows.
+// window, or prices, the last assistant turn's usage follows, with the
+// cost of every turn.
 func Replay(opts Options, entries []agentloop.Entry) []Update {
 	results := map[string]agentloop.ToolResultEntry{}
 	started := map[string]bool{}
@@ -150,6 +175,7 @@ func Replay(opts Options, entries []agentloop.Entry) []Update {
 	}
 	var ups []Update
 	var last *agentloop.MessageEntry
+	var total agentloop.Usage
 	for _, e := range entries {
 		if e.Type != agentloop.EntryMessage || e.Message == nil {
 			continue
@@ -166,6 +192,7 @@ func Replay(opts Options, entries []agentloop.Entry) []Update {
 			continue
 		}
 		last = m
+		total = sumUsage(total, m.Usage)
 		ups = append(ups, assistantChunks(e.Seq, *m, "", "")...)
 		for _, c := range m.Message.ToolCalls() {
 			status := acp.ToolCallStatusPending
@@ -180,7 +207,7 @@ func Replay(opts Options, entries []agentloop.Entry) []Update {
 		}
 	}
 	if last != nil {
-		if u, ok := (Translator{opts: opts}).usage(last.Usage); ok {
+		if u, ok := (Translator{opts: opts, total: total}).usage(last.Usage); ok {
 			ups = append(ups, u)
 		}
 	}
@@ -311,14 +338,21 @@ func resultFields(r agentloop.ToolResultEntry) (acp.ToolCallStatus, []acp.ToolCa
 	return status, content, raw, meta
 }
 
+// usage is the usage_update for a call that used u, with the session's
+// cost so far when the model is priced. Used is the call's own count,
+// which is what is in context. A priced model with no known window still
+// reports its cost, with a size of 0: the protocol requires the size, and
+// zero is the one value that claims nothing about the window.
 func (t Translator) usage(u agentloop.Usage) (Update, bool) {
-	if t.opts.ContextWindow <= 0 {
+	if t.opts.ContextWindow <= 0 && t.opts.Prices == nil {
 		return Update{}, false
 	}
 	used := u.InputTokens + u.CacheReadTokens + u.CacheWriteTokens + u.OutputTokens
-	return acp.SessionUpdate{UsageUpdate: &acp.SessionUsageUpdate{
-		Used: uint64(max(used, 0)), Size: uint64(t.opts.ContextWindow),
-	}}, true
+	up := &acp.SessionUsageUpdate{Used: uint64(max(used, 0)), Size: uint64(max(t.opts.ContextWindow, 0))}
+	if p := t.opts.Prices; p != nil {
+		up.Cost = &acp.Cost{Amount: p.Cost(t.total), Currency: "USD"}
+	}
+	return acp.SessionUpdate{UsageUpdate: up}, true
 }
 
 // notice reports a failed model call: a warning with the wait when the

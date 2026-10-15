@@ -122,7 +122,8 @@ func (m *Model) Generate(ctx context.Context, req *agentloop.Request, observe fu
 }
 
 // Describe asks the Models API about a model: its display name and its
-// context window, which the API calls max_input_tokens.
+// context window, which the API calls max_input_tokens, and the prices
+// this package knows for it.
 func (m *Model) Describe(ctx context.Context, model string) (agentloop.ModelInfo, error) {
 	info, err := m.client.Models.Get(ctx, model, sdk.ModelGetParams{})
 	if err != nil {
@@ -132,7 +133,7 @@ func (m *Model) Describe(ctx context.Context, model string) (agentloop.ModelInfo
 }
 
 func describe(info *sdk.ModelInfo) agentloop.ModelInfo {
-	return agentloop.ModelInfo{ID: info.ID, DisplayName: info.DisplayName, ContextWindow: max(info.MaxInputTokens, 0)}
+	return agentloop.ModelInfo{ID: info.ID, DisplayName: info.DisplayName, ContextWindow: max(info.MaxInputTokens, 0), Prices: PricesFor(info.ID)}
 }
 
 func (m *Model) params(req *agentloop.Request) (sdk.BetaMessageNewParams, error) {

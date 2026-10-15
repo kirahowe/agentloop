@@ -30,6 +30,23 @@ type ModelInfo struct {
 	// ContextWindow is how many input tokens the model takes. Zero means
 	// the provider did not say.
 	ContextWindow int64
+	// Prices is what the model costs. Nil means the provider's adapter
+	// does not know, and then no cost is reported for it, not zero.
+	Prices *Prices
+}
+
+// Prices is what a model charges, in US dollars per million tokens, for
+// each kind of token a call counts.
+type Prices struct {
+	Input, Output, CacheWrite, CacheRead float64
+}
+
+// Cost is what the usage costs at these prices, in US dollars.
+func (p Prices) Cost(u Usage) float64 {
+	return (float64(u.InputTokens)*p.Input +
+		float64(u.OutputTokens)*p.Output +
+		float64(u.CacheWriteTokens)*p.CacheWrite +
+		float64(u.CacheReadTokens)*p.CacheRead) / 1e6
 }
 
 // A Describer is a Model whose provider can describe a model. It is

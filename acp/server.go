@@ -241,9 +241,10 @@ func (s *Server) newSession(id acp.SessionId, conn *acp.AgentSideConnection, ses
 	opts := s.cfg.Options
 	opts.Notices = s.notices
 	opts.ContextWindow = info.ContextWindow
+	opts.Prices = info.Prices
 	return &session{
 		id: id, conn: conn, sess: sess, unlock: unlock,
-		tr: NewTranslator(opts), waiting: map[PromptID]chan answer{},
+		tr: NewTranslator(opts).WithUsage(sess.Usage()), waiting: map[PromptID]chan answer{},
 		released: make(chan struct{}),
 	}
 }

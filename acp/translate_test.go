@@ -2,9 +2,11 @@ package acpagent
 
 import (
 	"encoding/json"
+	"math"
 	"reflect"
 	"testing"
 
+	acp "github.com/caelis-labs/acp-go-sdk"
 	"github.com/kirahowe/agentloop"
 )
 
@@ -187,5 +189,88 @@ func TestUnseenEntriesDoNotShiftIDs(t *testing.T) {
 	))
 	if want := []string{"a2:one", "a6:two"}; !reflect.DeepEqual(got, want) {
 		t.Fatalf("got %q, want %q", got, want)
+	}
+}
+
+func usageAssistant(seq int, u agentloop.Usage) agentloop.Event {
+	e := assistant(seq, agentloop.StopEndTurn, "", text("hi"))
+	e.Entry.Message.Usage = u
+	return e
+}
+
+func usageUpdates(ups []Update) []*acp.SessionUsageUpdate {
+	var out []*acp.SessionUsageUpdate
+	for _, u := range ups {
+		if u.UsageUpdate != nil {
+			out = append(out, u.UsageUpdate)
+		}
+	}
+	return out
+}
+
+var testPrices = &agentloop.Prices{Input: 4, Output: 20, CacheWrite: 5, CacheRead: 0.2}
+
+// A priced model's usage_update carries the session's cumulative cost in
+// dollars, while used stays the latest call's count.
+func TestUsageUpdateCarriesCumulativeCost(t *testing.T) {
+	got := usageUpdates(translate(Options{ContextWindow: 1000, Prices: testPrices},
+		entry(1, runStarted),
+		usageAssistant(2, agentloop.Usage{InputTokens: 1_000_000}),
+		usageAssistant(3, agentloop.Usage{OutputTokens: 500_000, InputTokens: 10}),
+	))
+	if len(got) != 2 {
+		t.Fatalf("%d updates", len(got))
+	}
+	if c := got[0].Cost; c == nil || c.Currency != "USD" || c.Amount != 4 {
+		t.Fatalf("first cost %+v", c)
+	}
+	if c := got[1].Cost; c == nil || math.Abs(c.Amount-(4+10+0.00004)) > 1e-9 {
+		t.Fatalf("second cost %+v", got[1].Cost)
+	}
+	if got[1].Used != 500_010 || got[1].Size != 1000 {
+		t.Fatalf("used %d size %d", got[1].Used, got[1].Size)
+	}
+}
+
+// An unpriced model sends no cost at all, not zero.
+func TestUsageUpdateWithoutPricesHasNoCost(t *testing.T) {
+	got := usageUpdates(translate(Options{ContextWindow: 1000},
+		entry(1, runStarted), usageAssistant(2, agentloop.Usage{InputTokens: 5})))
+	if len(got) != 1 || got[0].Cost != nil {
+		t.Fatalf("%+v", got)
+	}
+}
+
+// With a price and no window the cost is still sent, with a size of 0;
+// with neither, nothing is.
+func TestUsageUpdateWithoutWindow(t *testing.T) {
+	evs := []agentloop.Event{entry(1, runStarted), usageAssistant(2, agentloop.Usage{InputTokens: 1_000_000})}
+	got := usageUpdates(translate(Options{Prices: testPrices}, evs...))
+	if len(got) != 1 || got[0].Size != 0 || got[0].Cost == nil || got[0].Cost.Amount != 4 {
+		t.Fatalf("%+v", got)
+	}
+	if got := usageUpdates(translate(Options{}, evs...)); len(got) != 0 {
+		t.Fatalf("%+v", got)
+	}
+}
+
+// A reopened session keeps counting from what it spent before, live and in
+// the replay of its log.
+func TestCostIncludesEarlierTurns(t *testing.T) {
+	opts := Options{ContextWindow: 1000, Prices: testPrices}
+	earlier := []agentloop.Entry{
+		*entry(1, runStarted).Entry,
+		*usageAssistant(2, agentloop.Usage{InputTokens: 1_000_000}).Entry,
+		*usageAssistant(3, agentloop.Usage{InputTokens: 1_000_000}).Entry,
+	}
+	replay := usageUpdates(Replay(opts, earlier))
+	if len(replay) != 1 || replay[0].Cost.Amount != 8 {
+		t.Fatalf("replay %+v", replay)
+	}
+	tr := NewTranslator(opts).WithUsage(agentloop.Usage{InputTokens: 2_000_000})
+	_, ups := tr.Step(usageAssistant(4, agentloop.Usage{InputTokens: 1_000_000}))
+	live := usageUpdates(ups)
+	if len(live) != 1 || live[0].Cost.Amount != 12 {
+		t.Fatalf("live %+v", live)
 	}
 }

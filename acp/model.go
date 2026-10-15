@@ -16,11 +16,12 @@ import (
 const ModelConfigID acp.SessionConfigId = "model"
 
 // Described is what the server knows of its model: the request's model id
-// and whatever the provider said about it. The id stays the request's,
-// since that is what every call sends; the provider's display name and
-// window are taken when it gave them. A negative window means unknown.
+// and whatever the provider said about it, prices included. The id stays
+// the request's, since that is what every call sends; the provider's
+// display name and window are taken when it gave them. A negative window
+// means unknown.
 func Described(id string, got agentloop.ModelInfo) agentloop.ModelInfo {
-	return agentloop.ModelInfo{ID: id, DisplayName: got.DisplayName, ContextWindow: max(got.ContextWindow, 0)}
+	return agentloop.ModelInfo{ID: id, DisplayName: got.DisplayName, ContextWindow: max(got.ContextWindow, 0), Prices: got.Prices}
 }
 
 // ConfigOptions are the session config options for a model: the model as

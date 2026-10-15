@@ -64,7 +64,10 @@ func TestDescribe(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			want := agentloop.ModelInfo{ID: "claude-opus-5-5", DisplayName: "Claude Opus 5.5", ContextWindow: 1000000}
+			want := agentloop.ModelInfo{ID: "claude-opus-5-5", DisplayName: "Claude Opus 5.5", ContextWindow: 1000000, Prices: info.Prices}
+			if info.Prices == nil || *info.Prices != *PricesFor("claude-opus-5-5") {
+				t.Fatalf("prices %+v", info.Prices)
+			}
 			if info != want {
 				t.Fatalf("got %+v, want %+v", info, want)
 			}
