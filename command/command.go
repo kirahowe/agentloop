@@ -19,6 +19,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os/exec"
 	"strings"
 	"syscall"
@@ -120,13 +121,27 @@ func (t *Tool) run(ctx context.Context, stdin []byte) (stdout, stderr *capped, w
 	cmd.Stdin = bytes.NewReader(stdin)
 	stdout, stderr = &capped{max: max}, &capped{max: max}
 	cmd.Stdout, cmd.Stderr = stdout, stderr
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	// The call runs in a process group of its own, whose leader is a
+	// sentinel that waits on a pipe until the call is over and is reaped
+	// last. While it is unreaped its pid, and so the group's id, cannot be
+	// reused, so the final sweep of the group can never reach a group
+	// that took the id over after the program was reaped.
+	sentinel, release, err := startSentinel()
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	pgid := sentinel.Process.Pid
+	defer func() {
+		syscall.Kill(-pgid, syscall.SIGKILL)
+		release.Close()
+		sentinel.Wait()
+	}()
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true, Pgid: pgid}
 	// If something outside the group keeps the pipes open, do not wait on it.
 	cmd.WaitDelay = killGrace
 	if err := cmd.Start(); err != nil {
 		return nil, nil, nil, fmt.Errorf("start %s: %w", t.Argv[0], err)
 	}
-	pgid := cmd.Process.Pid
 
 	done := make(chan struct{})
 	killed := make(chan struct{})
@@ -147,9 +162,30 @@ func (t *Tool) run(ctx context.Context, stdin []byte) (stdout, stderr *capped, w
 	waitErr = cmd.Wait()
 	close(done)
 	<-killed
-	// Leave nothing of the call running behind it.
-	syscall.Kill(-pgid, syscall.SIGKILL)
+	// Leave nothing of the call running behind it: the deferred sweep
+	// kills the group while the sentinel still holds its id.
 	return stdout, stderr, waitErr, nil
+}
+
+// sentinelPath is the program that holds a call's process group: it reads
+// its stdin, a pipe, until agentloop closes it.
+const sentinelPath = "/bin/cat"
+
+// startSentinel starts the leader of a new process group and returns it
+// with the pipe that keeps it waiting.
+func startSentinel() (*exec.Cmd, io.Closer, error) {
+	s := exec.Command(sentinelPath)
+	s.Env = []string{}
+	s.Dir = "/"
+	s.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	w, err := s.StdinPipe()
+	if err != nil {
+		return nil, nil, err
+	}
+	if err := s.Start(); err != nil {
+		return nil, nil, fmt.Errorf("start the process group's sentinel: %w", err)
+	}
+	return s, w, nil
 }
 
 func text(c *capped) string {

@@ -3,6 +3,7 @@ package command
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"os"
 	"strconv"
 	"strings"
@@ -139,5 +140,27 @@ func TestCancelKillsGrandchild(t *testing.T) {
 	}
 	if alive(pid) {
 		t.Errorf("grandchild %d still running", pid)
+	}
+}
+
+// Regression: the group was swept after Wait had reaped its leader, the
+// program itself, whose pid (the group's id) could by then belong to a
+// new group. The group's leader is now a sentinel reaped only after the
+// sweep: the program is not the leader, and after the call nothing of the
+// group is left.
+func TestGroupLeaderIsASentinel(t *testing.T) {
+	out, _, err := call(t, sh(`sleep 30 & echo "$$ $(ps -o pgid= -p $$)"`), `{}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var pid, pgid int
+	if _, err := fmt.Sscan(out, &pid, &pgid); err != nil {
+		t.Fatalf("%q: %v", out, err)
+	}
+	if pid == pgid {
+		t.Fatal("the program leads its own group")
+	}
+	if err := syscall.Kill(-pgid, 0); err != syscall.ESRCH {
+		t.Fatalf("the group outlived the call: %v", err)
 	}
 }

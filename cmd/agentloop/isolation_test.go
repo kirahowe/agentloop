@@ -14,6 +14,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 )
 
@@ -148,8 +149,10 @@ func TestToolIsolation(t *testing.T) {
 	if got := strings.Join(sortedCopy(d.Fds), ","); got != "0,1,2" {
 		t.Errorf("tool descriptors = %s, want 0,1,2", got)
 	}
-	if d.Pgid != d.Pid {
-		t.Errorf("tool is not a process group leader (pgid %d, pid %d)", d.Pgid, d.Pid)
+	// The tool runs in a group of its own, led by a sentinel agentloop
+	// reaps after sweeping it, not in agentloop's group.
+	if d.Pgid == d.Pid || d.Pgid == syscall.Getpgrp() {
+		t.Errorf("tool is not in a sentinel-led group of its own (pgid %d, pid %d)", d.Pgid, d.Pid)
 	}
 	// The key did go to the API, and appears nowhere else.
 	for name, s := range map[string]string{
