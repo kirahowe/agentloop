@@ -13,6 +13,7 @@ import (
 	"io"
 	"os"
 	"os/signal"
+	"slices"
 	"syscall"
 
 	"github.com/kirahowe/agentloop"
@@ -83,8 +84,9 @@ type outcomeLine struct {
 	Type string `json:"type"`
 	agentloop.Outcome
 	Session string `json:"session"`
-	// Labels are the session's labels when the run ended.
-	Labels []string `json:"labels"`
+	// Labels are the session's labels when the run ended. Nil (left out)
+	// means they could not be read, which is not the same as none.
+	Labels *[]string `json:"labels,omitempty"`
 }
 
 func noKeyOutcome(err error) agentloop.Outcome {
@@ -161,7 +163,7 @@ func runCmd(ctx context.Context, req *request.Request, stdout, stderr io.Writer)
 	if writeErr != nil {
 		return writeErr
 	}
-	return writeJSON(stdout, outcomeLine{Type: "outcome", Outcome: *out, Session: req.Session, Labels: sess.Labels()})
+	return writeJSON(stdout, outcomeLine{Type: "outcome", Outcome: *out, Session: req.Session, Labels: ptr(sess.Labels())})
 }
 
 // resolve records a person's decisions on held calls, from the request's
@@ -169,8 +171,18 @@ func runCmd(ctx context.Context, req *request.Request, stdout, stderr io.Writer)
 // against the session before writing any, so a bad list writes nothing.
 // A call already resolved the same way is passed over (see Agent.Resolve).
 func resolve(ctx context.Context, agent *agentloop.Agent, sess *agentloop.Session, list []agentloop.Resolution) ([]agentloop.Entry, error) {
-	for _, r := range list {
-		if err := agent.CheckResolve(ctx, sess, r); err != nil {
+	list = slices.Clone(list)
+	for i, r := range list {
+		err := agent.CheckResolve(ctx, sess, r)
+		if r.Verdict == agentloop.Allow && (errors.Is(err, agentloop.ErrPolicyDenies) || err != nil && deniedAsGone(sess, r)) {
+			// The person allowed a call the policy no longer allows at all
+			// (its tool is gone, say). The run carries on with a deny, as
+			// acp does, rather than failing, and the same resolution sent
+			// again is the same deny.
+			list[i].Verdict, list[i].Reason = agentloop.Deny, noLongerAllowed
+			err = agent.CheckResolve(ctx, sess, list[i])
+		}
+		if err != nil {
 			return nil, usage.Errorf("resolve: %v", err)
 		}
 	}
@@ -185,16 +197,29 @@ func resolve(ctx context.Context, agent *agentloop.Agent, sess *agentloop.Sessio
 
 // storedLabels reads the labels of the session at path without locking
 // it, for an outcome that never opened it. A session that does not exist
-// or cannot be read has none that can be told.
-func storedLabels(path string) []string {
+// has none; one that cannot be read gives nil, so the outcome leaves its
+// labels out rather than claim it has none.
+func storedLabels(path string) *[]string {
 	if !sessionfile.Exists(path) {
-		return []string{}
+		return ptr([]string{})
 	}
 	sess, err := agentloop.OpenSession(agentloop.NewFileStore(path))
 	if err != nil {
-		return []string{}
+		return nil
 	}
-	return sess.Labels()
+	return ptr(sess.Labels())
+}
+
+func ptr[T any](v T) *T { return &v }
+
+// noLongerAllowed is the reason recorded for an allow the policy refuses.
+const noLongerAllowed = "The tool is no longer allowed."
+
+// deniedAsGone reports whether r's call was already resolved deny because
+// an allow for it was refused by the policy.
+func deniedAsGone(sess *agentloop.Session, r agentloop.Resolution) bool {
+	info, ok := sess.Call(r.CallID)
+	return ok && info.Resolved && info.Decision.Verdict == agentloop.Deny && info.Decision.Reason == noLongerAllowed
 }
 
 func writeJSON(w io.Writer, v any) error {

@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 )
 
@@ -76,6 +77,10 @@ func (a *Agent) Resolve(ctx context.Context, s *Session, r Resolution) error {
 	return nil
 }
 
+// ErrPolicyDenies is why Resolve refuses an allow the agent's policy now
+// denies outright, such as a call to a tool the agent no longer has.
+var ErrPolicyDenies = errors.New("the policy denies the call")
+
 // CheckResolve says whether Resolve would accept r, without writing
 // anything, so a list of resolutions can be checked whole first.
 func (a *Agent) CheckResolve(ctx context.Context, s *Session, r Resolution) error {
@@ -109,7 +114,7 @@ func (a *Agent) resolution(ctx context.Context, s *Session, r Resolution) (d Dec
 		}
 		pd := a.Policy.Decide(ctx, info.Call, s.View())
 		if pd.Verdict == Deny {
-			return d, false, fmt.Errorf("the policy denies call %q: %s", r.CallID, pd.Reason)
+			return d, false, fmt.Errorf("%w: call %q: %s", ErrPolicyDenies, r.CallID, pd.Reason)
 		}
 		d.Labels = pd.Labels
 	}

@@ -219,3 +219,68 @@ func TestUnrestrictedRequestRefusesAPolicedSession(t *testing.T) {
 		t.Fatalf("exit %d stdout %q stderr %q", res.code, res.stdout, res.stderr)
 	}
 }
+
+// Regression: an allow for a call the policy now denies outright (its
+// tool was removed) made run exit 2 with no outcome, every time it was
+// sent. It is now recorded as a deny and the run carries on; sending it
+// again is the same deny. A wrong digest still exits 2.
+func TestResolveAllowForAToolThatIsGone(t *testing.T) {
+	api := newFakeAPI(t,
+		toolReply("toolu_1", "read_mail", `{}`),
+		toolReply("toolu_2", "web_post", `{}`),
+		textReply("ok"), textReply("ok again"),
+	)
+	f, calls := trifectaFixture(t, api)
+	out := f.run().outcome(t)
+	if out["reason"] != "held" {
+		t.Fatalf("outcome %v", out)
+	}
+	digest := out["held"].([]any)[0].(map[string]any)["input_sha256"]
+	f.req["prompt"] = ""
+	f.req["tools"] = f.req["tools"].([]map[string]any)[:1]
+	delete(f.req["policy"].(map[string]any)["tools"].(map[string]any), "web_post")
+	delete(f.req["policy"].(map[string]any)["tools"].(map[string]any), "broken")
+	f.req["resolve"] = []map[string]any{{"call_id": "toolu_2", "verdict": "allow", "input_sha256": "0000"}}
+	if res := f.run(); res.code != 2 || res.stdout != "" {
+		t.Fatalf("a wrong digest: exit %d stdout %q", res.code, res.stdout)
+	}
+	f.req["resolve"] = []map[string]any{{"call_id": "toolu_2", "verdict": "allow", "input_sha256": digest}}
+	for i := range 2 {
+		res := f.run()
+		out := res.outcome(t)
+		if res.code != 0 || out["reason"] != "completed" {
+			t.Fatalf("run %d: exit %d outcome %v stderr %s", i, res.code, out, res.stderr)
+		}
+	}
+	if strings.Contains(readCalls(t, calls), "web_post") {
+		t.Fatal("the call ran")
+	}
+	reqs := api.requests()
+	if !strings.Contains(reqs[2], "The tool is no longer allowed.") {
+		t.Fatalf("the model was not told: %s", reqs[2])
+	}
+}
+
+// An outcome with no key still reports the session's labels; when the
+// session cannot be read it leaves labels out instead of claiming none.
+func TestNoKeyOutcomeLabels(t *testing.T) {
+	api := newFakeAPI(t, toolReply("toolu_1", "read_mail", `{}`), textReply("done"))
+	f, _ := trifectaFixture(t, api)
+	if out := f.run().outcome(t); out["reason"] != "completed" {
+		t.Fatalf("outcome %v", out)
+	}
+	f.req["api_key_command"] = []string{"/bin/sh", "-c", "exit 1"}
+	if out := f.run().outcome(t); fmt.Sprint(out["labels"]) != "[contaminated private]" {
+		t.Fatalf("outcome %v", out)
+	}
+	b, _ := os.ReadFile(f.session)
+	os.WriteFile(f.session, append([]byte("not json\n"), b...), 0o600)
+	out := f.run().outcome(t)
+	if _, ok := out["labels"]; ok || out["reason"] != "model_error" {
+		t.Fatalf("an unreadable session gave %v", out)
+	}
+	f.req["session"] = filepath.Join(f.dir, "none", "s.jsonl")
+	if out := f.run().outcome(t); fmt.Sprint(out["labels"]) != "[]" {
+		t.Fatalf("a missing session gave %v", out)
+	}
+}
