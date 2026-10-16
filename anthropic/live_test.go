@@ -25,11 +25,15 @@ func TestLiveToolUseWithThinking(t *testing.T) {
 	m := anthropic.New(anthropic.Config{APIKey: key})
 
 	req := &agentloop.Request{
-		Model:           model,
-		System:          "You are terse. Always use the tool when it applies.",
-		Effort:          agentloop.EffortMedium,
+		Model:  model,
+		System: "You are terse. Always use the tool when it applies.",
+		// Adaptive thinking skips trivial prompts, and a turn without a
+		// thinking block would pass without testing its replay. High
+		// effort and a question that needs a moment's thought make the
+		// model think.
+		Effort:          agentloop.EffortHigh,
 		MaxOutputTokens: 8000,
-		Messages:        []agentloop.Message{agentloop.Text(agentloop.User, "What is the weather in Paris right now? Use the get_weather tool.")},
+		Messages:        []agentloop.Message{agentloop.Text(agentloop.User, "Which European capital lies furthest north among Paris, Oslo, Helsinki and Reykjavik? Think it through, then get its current weather with the get_weather tool.")},
 		Tools: []agentloop.ToolSpec{{
 			Name:        "get_weather",
 			Description: "Current weather for a city.",
@@ -49,6 +53,9 @@ func TestLiveToolUseWithThinking(t *testing.T) {
 		thought = thought || p.Type == agentloop.ReasoningPart
 	}
 	t.Logf("first turn: stop=%s thinking=%v calls=%d usage=%+v", first.Stop, thought, len(calls), first.Usage)
+	if !thought {
+		t.Fatalf("the first turn has no thinking block, so its replay would test nothing; try a model that thinks (-anthropic-model)")
+	}
 
 	req.Messages = append(req.Messages, first.Message)
 	var results []agentloop.Part
