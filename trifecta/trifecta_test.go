@@ -131,3 +131,26 @@ func TestCheckLabels(t *testing.T) {
 		}
 	}
 }
+
+// With Forbid, a call to a tool whose static labels include a forbidden
+// label is denied, since allowing it would give the session that label;
+// every other call is decided exactly as without Forbid.
+func TestPolicyDeniesToolsWhoseLabelsAreForbidden(t *testing.T) {
+	rapid.Check(t, func(t *rapid.T) {
+		tool := genTool().Draw(t, "tool")
+		forbid := genLabels().Draw(t, "forbid")
+		view := agentloop.View{Labels: Union(nil, genLabels().Draw(t, "session"))}
+		call := agentloop.ToolCall{ID: "c", Name: "t"}
+		with := Policy{Tools: map[string]Tool{"t": tool}, Forbid: forbid}.Decide(context.Background(), call, view)
+		without := Policy{Tools: map[string]Tool{"t": tool}}.Decide(context.Background(), call, view)
+		if len(agentloop.Forbidden(tool.Labels, forbid)) > 0 {
+			if with.Verdict != agentloop.Deny || with.Reason != ForbiddenReason || len(with.Labels) != 0 {
+				t.Fatalf("a tool labelled %v under forbid %v got %+v", tool.Labels, forbid, with)
+			}
+			return
+		}
+		if !reflect.DeepEqual(with, without) {
+			t.Fatalf("forbid %v changed %+v into %+v", forbid, without, with)
+		}
+	})
+}

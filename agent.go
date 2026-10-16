@@ -21,6 +21,12 @@ type Agent struct {
 	// Labels are added to the session whenever a run starts, before
 	// anything else happens in it.
 	Labels []string
+	// Forbid is the labels the session may never hold. A run on a session
+	// that holds one, or would from Labels, does not start (ReasonForbidden).
+	// A tool result carrying one is refused: the model is told only that
+	// (RefusedResult) and the session does not take the label. An allow
+	// whose decision would add one is a deny.
+	Forbid []string
 	// Policy decides each call after the tool and its input check out. Nil
 	// allows every call to a tool the agent has.
 	Policy          Policy
@@ -87,7 +93,18 @@ const (
 	ReasonModelError Reason = "model_error"
 	// ReasonCanceled: the context ended.
 	ReasonCanceled Reason = "canceled"
+	// ReasonForbidden: the session holds, or would start with, a label
+	// Agent.Forbid names, so nothing ran; see Outcome.Forbidden.
+	ReasonForbidden Reason = "forbidden"
 )
+
+// RefusedResult is what the model is told in place of a tool result that
+// carried a label the session may not hold.
+const RefusedResult = "This result was refused: it carries a label this session may not hold."
+
+// ForbiddenDecision is the reason recorded for a call whose decision
+// would have given the session a label it may not hold.
+const ForbiddenDecision = "This call would give the session a label it may not hold, so it was not run."
 
 // Names of the limits, as reported in Outcome.Limit.
 const (
@@ -108,6 +125,12 @@ type Outcome struct {
 	// each of its labels, so whoever decides can see why it holds them.
 	LabelSources map[string]LabelSource `json:"label_sources,omitempty"`
 	Limit        string                 `json:"limit,omitempty"`
+	// Forbidden, for forbidden, is the labels the session held or would
+	// have started with that Agent.Forbid names.
+	Forbidden []string `json:"forbidden,omitempty"`
+	// Refused lists the tool results of this run that were refused for
+	// carrying a forbidden label, whatever the reason the run ended.
+	Refused []Refusal `json:"refused,omitempty"`
 	// Turns and Usage count this run only.
 	Turns int   `json:"turns"`
 	Usage Usage `json:"usage"`
@@ -118,6 +141,14 @@ type Outcome struct {
 type HeldCall struct {
 	ToolCall
 	InputSHA256 string `json:"input_sha256"`
+}
+
+// A Refusal is one tool result the session was not given, because it
+// carried labels the session may not hold.
+type Refusal struct {
+	CallID string   `json:"call_id"`
+	Tool   string   `json:"tool"`
+	Labels []string `json:"labels"`
 }
 
 // An Event is one thing a run reports to Observe: either an entry just
@@ -147,6 +178,12 @@ func (a *Agent) Run(ctx context.Context, s *Session, prompt string) (*Outcome, e
 		return nil, err
 	}
 	defer s.end()
+	// A session that holds a forbidden label, or would from the agent's
+	// own, is not run at all: nothing is recorded and the model is not
+	// called.
+	if bad := Forbidden(append(s.Labels(), a.Labels...), a.Forbid); len(bad) > 0 {
+		return &Outcome{Reason: ReasonForbidden, Forbidden: bad}, nil
+	}
 	r := &runner{a: a, s: s, tb: tb, retry: DefaultRetry}
 	if a.Retry != nil {
 		r.retry = *a.Retry
@@ -178,6 +215,7 @@ type runner struct {
 	turns     int
 	usage     Usage
 	toolCalls int
+	refused   []Refusal
 }
 
 func (r *runner) record(e Entry) error {
@@ -192,7 +230,7 @@ func (r *runner) record(e Entry) error {
 }
 
 func (r *runner) outcome(reason Reason) *Outcome {
-	return &Outcome{Reason: reason, Text: r.s.lastText(), Turns: r.turns, Usage: r.usage}
+	return &Outcome{Reason: reason, Text: r.s.lastText(), Turns: r.turns, Usage: r.usage, Refused: r.refused}
 }
 
 func (r *runner) drive(ctx context.Context, prompt string) (*Outcome, error) {
@@ -583,7 +621,14 @@ func (r *runner) decide(ctx context.Context, call ToolCall) Decision {
 	}
 	d := r.a.Policy.Decide(ctx, call, r.s.View())
 	switch d.Verdict {
-	case Allow, Deny, Hold:
+	case Allow:
+		// Whatever the policy says, an allow may not give the session a
+		// label it may not hold.
+		if len(Forbidden(d.Labels, r.a.Forbid)) > 0 {
+			return Decision{Verdict: Deny, Reason: ForbiddenDecision}
+		}
+		return d
+	case Deny, Hold:
 		return d
 	}
 	return Decision{Verdict: Deny, Reason: fmt.Sprintf("The policy gave no usable verdict (%q).", d.Verdict)}
@@ -646,7 +691,17 @@ func (r *runner) execute(ctx context.Context, call ToolCall) (canceled bool, err
 			res.Content = fmt.Sprintf("The tool failed: %v", callErr)
 		}
 	}
-	if err := r.finish(call.ID, res, out.Labels, out.Log); err != nil {
+	labels, log := out.Labels, out.Log
+	if bad := Forbidden(out.Labels, r.a.Forbid); len(bad) > 0 {
+		// The model never sees the result and the session never takes its
+		// labels. Nothing of what the tool said is kept, not even in the
+		// log: it is what the session may not hold.
+		res = ToolResult{Content: RefusedResult, IsError: true}
+		labels = nil
+		log = fmt.Sprintf("agentloop refused this result: it carried %v, which this session may not hold.", bad)
+		r.refused = append(r.refused, Refusal{CallID: call.ID, Tool: call.Name, Labels: bad})
+	}
+	if err := r.finish(call.ID, res, labels, log); err != nil {
 		return false, err
 	}
 	return ctx.Err() != nil, nil

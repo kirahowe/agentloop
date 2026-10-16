@@ -141,6 +141,22 @@ func TestUnusableRequestMatrix(t *testing.T) {
 			m["policy"].(map[string]any)["labels"] = []string{"Private"}
 		}},
 		{"unknown policy field", func(m map[string]any) { restrict(m); m["policy"].(map[string]any)["egress"] = true }},
+		{"unknown forbidden label", func(m map[string]any) {
+			restrict(m)
+			m["policy"].(map[string]any)["forbid_labels"] = []string{"secret"}
+		}},
+		{"starting labels it forbids", func(m map[string]any) {
+			restrict(m)
+			m["policy"].(map[string]any)["forbid_labels"] = []string{"private"}
+		}},
+		{"a tool whose labels it forbids", func(m map[string]any) {
+			restrict(m)
+			m["policy"].(map[string]any)["labels"] = []string{}
+			m["policy"].(map[string]any)["forbid_labels"] = []string{"contaminated"}
+		}},
+		{"unrestricted with forbid_labels", func(m map[string]any) {
+			m["policy"] = map[string]any{"unrestricted": true, "forbid_labels": []string{"private"}}
+		}},
 		{"unknown tool entry field", func(m map[string]any) {
 			restrict(m)
 			policyTools(m)["t"] = map[string]any{"class": "read", "hold": true}

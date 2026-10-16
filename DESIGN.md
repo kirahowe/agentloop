@@ -145,6 +145,26 @@ an `egress` call once the session holds `private`, for example.
 `labels` entry written only when one of them is new. `Session.AddLabels`
 does the same from outside a run.
 
+**Forbidden labels.** `Agent.Forbid` names labels the session may never
+hold, for an agent that must stay clear of something (relay's public
+roles never hold `private`). The loop enforces it whatever the policy
+says, with `Forbidden(labels, forbid)`, the pure intersection:
+
+- A run on a session that holds a forbidden label, or would from
+  `Agent.Labels`, does not start. It writes nothing, calls no model, and
+  ends with reason `forbidden`, the labels in `Outcome.Forbidden`.
+- A decision that would add a forbidden label is a deny, with the reason
+  `ForbiddenDecision`, and `Resolve` refuses a person's allow of such a
+  call with `ErrPolicyDenies`.
+- A tool result that carries a forbidden label is refused. The model is
+  told only `RefusedResult` ("This result was refused: it carries a
+  label this session may not hold."), the session does not take the
+  label, and nothing the tool returned is kept, not even in `log`, which
+  says only that the result was refused and why. `Outcome.Refused`
+  lists each refused result of the run as `{"call_id", "tool",
+  "labels"}`, whatever reason the run ended with, so whoever runs the
+  agent can tell the operator.
+
 **Holds.** A held call waits for a person. A hold adds no labels; its
 decision entry records `input_sha256`, the SHA-256 in hex of the call's
 input as canonical JSON (keys sorted, no whitespace, no HTML escaping,
@@ -196,7 +216,8 @@ session's labels when the call is decided and the tool's entry:
 It never denies; a person does. `trifecta.Policy` applies it to a map of
 tool entries. Each decision carries the tool's static labels, which the
 session takes on when the call is allowed, before it runs, and keeps
-whatever becomes of the call. A tool with no entry is denied.
+whatever becomes of the call. A tool with no entry is denied, and so is
+a tool whose static labels include one of `Policy.Forbid`.
 
 ### Sessions and stores
 
@@ -372,6 +393,7 @@ The request:
   "tool_protocol": "envelope",        // or leave out for the plain protocol
   "policy": {                         // required when there are tools
     "labels": ["private"],            // added to the session at every run start
+    "forbid_labels": [],              // labels the session may never hold
     "tools": {                        // an entry for every tool, and no others
       "memo_send": {"class": "write"},
       "web_fetch": {"class": "egress", "labels": ["contaminated"]},
@@ -395,7 +417,11 @@ The request:
 true}` turns the trifecta off, for examples and tests, and nothing else
 may sit beside it; `"unrestricted": false` is refused. A real policy
 needs `"tool_protocol": "envelope"`, an entry with a known class for
-every tool and none for anything else, and only known labels. Unknown
+every tool and none for anything else, and only known labels.
+`forbid_labels` becomes `Agent.Forbid` and `trifecta.Policy.Forbid`. A
+request whose `policy.labels`, or any tool's labels, include a label it
+forbids is unusable, since the session could not start or the tool
+could never be called; so is `forbid_labels` beside `unrestricted`. Unknown
 fields anywhere are refused, and so are fields spelled other than exactly
 (`"POLICY"`) or given twice in one object, which encoding/json would
 otherwise accept, the last one winning. `resolve` needs a real policy, and
@@ -437,7 +463,10 @@ and then a last line `{"type": "outcome", ...}` with the outcome, the
 session path and the session's `labels` when the run ended (left out
 when an outcome that never opened the session cannot read it). Nothing else
 goes to stdout. For a held run the outcome's `held` lists each call as
-`{"id", "name", "input", "input_sha256"}`.
+`{"id", "name", "input", "input_sha256"}`. A run with a refused result
+lists it in `refused`, and one that did not start for holding a
+forbidden label ends with reason `forbidden` and the labels in
+`forbidden`.
 
 `resolve` is applied before the run starts, through `Agent.Resolve`, and
 the decision entries it writes come first on stdout. The whole list is
@@ -494,7 +523,11 @@ into the session's log as they open it. Without a policy, load and
 resume refuse a session `Session.Policed` reports (`-32603`). A prompt with an embedded
 `resource` or a `resource_link` adds `contaminated` to the session, since
 its content could have come from anyone. Nothing a client sends removes a
-label or changes the policy.
+label or changes the policy. `forbid_labels` holds in a conversation as
+in a run: a prompt to a session that holds a forbidden label is answered
+with `-32603` and the labels, without calling the model; a refused result
+reaches the client only as the refusal, and stderr names the call; and
+`session/new` refuses to seed a forbidden label.
 
 **Held calls.** When a run ends `held`, the server asks the client about
 each held call with `session/request_permission`: the tool call's id,
@@ -553,6 +586,7 @@ The outcome of the turn answers `session/prompt`:
 | `canceled` | `cancelled` |
 | `model_error` | error `-32603`, data: the error's kind, status, message and times |
 | `held` | error `-32603`, data: the held calls (only when the client could not be asked) |
+| `forbidden` | error `-32603`, data: the labels the session may not hold |
 
 Two `_meta` keys carry what ACP has no field for:
 `_meta["agentloop/labels"]` on every `tool_call`, `tool_call_update` and

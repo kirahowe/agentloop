@@ -262,6 +262,9 @@ func (s *Server) seed(sess *agentloop.Session) error {
 	if s.cfg.Agent == nil {
 		return nil
 	}
+	if bad := agentloop.Forbidden(s.cfg.Agent.Labels, s.cfg.Agent.Forbid); len(bad) > 0 {
+		return fmt.Errorf("the session would start holding %v, which it may not hold", bad)
+	}
 	_, err := sess.AddLabels(s.cfg.Agent.Labels, agentloop.LabelSeed)
 	return err
 }
@@ -633,16 +636,31 @@ func (s *Server) start(ss *session, prompt string, labels []string) {
 	go func() {
 		defer s.runs.Done()
 		var out *agentloop.Outcome
-		e, err := ss.sess.AddLabels(labels, agentloop.LabelPrompt)
+		var e *agentloop.Entry
+		var err error
+		// A prompt whose content brings a label the session may not hold is
+		// refused before the label is written, so the session stays usable.
+		if bad := agentloop.Forbidden(labels, agent.Forbid); len(bad) > 0 {
+			out = &agentloop.Outcome{Reason: agentloop.ReasonForbidden, Forbidden: bad}
+		} else {
+			e, err = ss.sess.AddLabels(labels, agentloop.LabelPrompt)
+		}
 		if e != nil {
 			agent.Observe(agentloop.Event{Entry: e})
 		}
-		for err == nil {
+		for err == nil && (out == nil || out.Reason != agentloop.ReasonForbidden) {
 			p := prompt
 			if added {
 				p = ""
 			}
 			out, err = agent.Run(ctx, ss.sess, p)
+			if out != nil {
+				// The client sees only that a result was refused; the
+				// operator's log says which and why.
+				for _, rf := range out.Refused {
+					s.logf("agentloop: session %s: refused the result of call %s to %s: it carried %v, which this session may not hold", ss.id, rf.CallID, rf.Tool, rf.Labels)
+				}
+			}
 			if err != nil || out.Reason != agentloop.ReasonHeld || ctx.Err() != nil {
 				break
 			}

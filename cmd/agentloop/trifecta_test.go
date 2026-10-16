@@ -284,3 +284,69 @@ func TestNoKeyOutcomeLabels(t *testing.T) {
 		t.Fatalf("a missing session gave %v", out)
 	}
 }
+
+const forbidScript = `#!/bin/sh
+cat >/dev/null
+case "$1" in
+read_secret) printf '{"content":"SECRET-TEXT","labels":["private"]}' ;;
+read_web) printf '{"content":"a web page","labels":["contaminated"]}' ;;
+esac
+`
+
+// A session that may not hold private: a result carrying it never reaches
+// the model or the session, and the outcome says which call it was.
+func TestForbiddenLabelsRefuseAResult(t *testing.T) {
+	api := newFakeAPI(t,
+		toolReply("toolu_1", "read_secret", `{}`),
+		toolReply("toolu_2", "read_web", `{}`),
+		textReply("done"),
+	)
+	f := newFixture(t, api, forbidScript)
+	f.req["tools"] = []map[string]any{
+		{"name": "read_secret", "parameters": map[string]any{"type": "object"}},
+		{"name": "read_web", "parameters": map[string]any{"type": "object"}},
+	}
+	f.req["policy"] = map[string]any{
+		"labels":        []string{},
+		"forbid_labels": []string{"private"},
+		"tools": map[string]any{
+			"read_secret": map[string]any{"class": "read"},
+			"read_web":    map[string]any{"class": "read"},
+		},
+	}
+	f.req["tool_protocol"] = "envelope"
+	res := f.run()
+	out := res.outcome(t)
+	if res.code != 0 || out["reason"] != "completed" {
+		t.Fatalf("exit %d outcome %v stderr %s", res.code, out, res.stderr)
+	}
+	if labels := fmt.Sprint(out["labels"]); labels != "[contaminated]" {
+		t.Fatalf("outcome labels %s", labels)
+	}
+	if refused := fmt.Sprint(out["refused"]); refused != "[map[call_id:toolu_1 labels:[private] tool:read_secret]]" {
+		t.Fatalf("refused %s", refused)
+	}
+	if strings.Contains(res.stdout, "SECRET-TEXT") {
+		t.Fatal("the refused result is in the session")
+	}
+	for _, body := range api.requests() {
+		if strings.Contains(body, "SECRET-TEXT") {
+			t.Fatal("the refused result reached the model")
+		}
+	}
+	if !strings.Contains(api.requests()[2], "This result was refused") {
+		t.Fatal("the model was not told the result was refused")
+	}
+
+	// A later run of a session that somehow holds private does not start.
+	f.req["policy"].(map[string]any)["forbid_labels"] = []string{"contaminated"}
+	f.req["prompt"] = "more"
+	res = f.run()
+	out = res.outcome(t)
+	if res.code != 0 || out["reason"] != "forbidden" || fmt.Sprint(out["forbidden"]) != "[contaminated]" {
+		t.Fatalf("exit %d outcome %v stderr %s", res.code, out, res.stderr)
+	}
+	if n := len(api.requests()); n != 3 {
+		t.Fatalf("%d model requests", n)
+	}
+}

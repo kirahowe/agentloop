@@ -65,13 +65,15 @@ type Request struct {
 	} `json:"retry"`
 }
 
-// Policy is the request's trifecta policy: the session's starting labels
-// and each tool's class and labels. {"unrestricted": true} instead turns
-// the policy off; it is for agentloop's own examples and tests.
+// Policy is the request's trifecta policy: the session's starting labels,
+// each tool's class and labels, and the labels the session may never
+// hold. {"unrestricted": true} instead turns the policy off; it is for
+// agentloop's own examples and tests.
 type Policy struct {
 	Unrestricted *bool                    `json:"unrestricted"`
 	Labels       []string                 `json:"labels"`
 	Tools        map[string]trifecta.Tool `json:"tools"`
+	ForbidLabels []string                 `json:"forbid_labels"`
 }
 
 // Restricted reports whether the request has a real policy.
@@ -221,8 +223,8 @@ func (r *Request) validatePolicy() error {
 		if !*p.Unrestricted {
 			return usage.Errorf(`policy.unrestricted can only be true; leave it out for a real policy`)
 		}
-		if p.Labels != nil || p.Tools != nil {
-			return usage.Errorf("an unrestricted policy cannot have labels or tools")
+		if p.Labels != nil || p.Tools != nil || p.ForbidLabels != nil {
+			return usage.Errorf("an unrestricted policy cannot have labels, tools or forbid_labels")
 		}
 		return nil
 	}
@@ -231,6 +233,14 @@ func (r *Request) validatePolicy() error {
 	}
 	if err := trifecta.CheckLabels(p.Labels); err != nil {
 		return usage.Errorf("policy.labels: %v", err)
+	}
+	if err := trifecta.CheckLabels(p.ForbidLabels); err != nil {
+		return usage.Errorf("policy.forbid_labels: %v", err)
+	}
+	// A session that would start holding a label it may not hold is not
+	// started at all.
+	if bad := agentloop.Forbidden(p.Labels, p.ForbidLabels); len(bad) > 0 {
+		return usage.Errorf("policy.labels holds %v, which policy.forbid_labels forbids, so the session cannot start", bad)
 	}
 	tools := map[string]bool{}
 	for _, t := range r.Tools {
@@ -249,6 +259,9 @@ func (r *Request) validatePolicy() error {
 		}
 		if err := trifecta.CheckLabels(e.Labels); err != nil {
 			return usage.Errorf("policy.tools %q: %v", name, err)
+		}
+		if bad := agentloop.Forbidden(e.Labels, p.ForbidLabels); len(bad) > 0 {
+			return usage.Errorf("policy.tools gives %q the labels %v, which policy.forbid_labels forbids", name, bad)
 		}
 	}
 	return nil
@@ -488,7 +501,8 @@ func (r *Request) Agent(key string) *agentloop.Agent {
 	}
 	if r.Restricted() {
 		a.Labels = slices.Clone(r.Policy.Labels)
-		a.Policy = trifecta.Policy{Tools: maps.Clone(r.Policy.Tools)}
+		a.Forbid = slices.Clone(r.Policy.ForbidLabels)
+		a.Policy = trifecta.Policy{Tools: maps.Clone(r.Policy.Tools), Forbid: slices.Clone(r.Policy.ForbidLabels)}
 	}
 	if r.Retry != nil {
 		a.Retry = &agentloop.RetryPolicy{

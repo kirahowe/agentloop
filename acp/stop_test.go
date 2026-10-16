@@ -12,7 +12,7 @@ import (
 
 var allReasons = []agentloop.Reason{
 	agentloop.ReasonCompleted, agentloop.ReasonMaxTokens, agentloop.ReasonRefused, agentloop.ReasonHeld,
-	agentloop.ReasonLimit, agentloop.ReasonModelError, agentloop.ReasonCanceled, "", "exploded",
+	agentloop.ReasonLimit, agentloop.ReasonModelError, agentloop.ReasonCanceled, agentloop.ReasonForbidden, "", "exploded",
 }
 
 func genOutcome(t *rapid.T) *agentloop.Outcome {
@@ -84,7 +84,7 @@ func TestPropertyStopMapping(t *testing.T) {
 			if stop != w {
 				t.Fatalf("limit %q gave %q, want %q", out.Limit, stop, w)
 			}
-		case agentloop.ReasonModelError, agentloop.ReasonHeld, "", "exploded":
+		case agentloop.ReasonModelError, agentloop.ReasonHeld, agentloop.ReasonForbidden, "", "exploded":
 			if err == nil {
 				t.Fatalf("%q gave the stop reason %q", out.Reason, stop)
 			}

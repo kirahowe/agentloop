@@ -648,3 +648,87 @@ func (c *testClient) notes() []acp.SessionNotification {
 	defer c.mu.Unlock()
 	return append([]acp.SessionNotification(nil), c.updates...)
 }
+
+// A conversation that may not hold private: a tool result carrying it is
+// refused, the client sees only the refusal and the operator's log says
+// which call it was; a session that holds it anyway is not run, and its
+// prompt is answered with an error.
+func TestForbiddenLabelsInAConversation(t *testing.T) {
+	secret := agentloop.Func(
+		agentloop.ToolSpec{Name: "secret", Description: "secret", Parameters: json.RawMessage(`{"type":"object"}`)},
+		func(context.Context, json.RawMessage) (agentloop.Result, error) {
+			return agentloop.Result{Content: "SECRET-TEXT", Labels: []string{"private"}}, nil
+		})
+	m := fake.Script(fake.ToolUse("", fake.Call("c1", "secret", `{}`)), fake.Text("done"))
+	h := serve(t, &agentloop.Agent{Model: m, Tools: []agentloop.Tool{secret}, Forbid: []string{"private"}}, Options{}, false)
+	id := h.newSession()
+	if resp, err := h.prompt(id, "hi"); err != nil || resp.StopReason != acp.StopReasonEndTurn {
+		t.Fatalf("%+v, %v", resp, err)
+	}
+	for _, l := range h.toClient.snapshot() {
+		if bytes.Contains(l, []byte("SECRET-TEXT")) {
+			t.Fatalf("the client saw the refused result: %s", l)
+		}
+	}
+	if !strings.Contains(h.logged(), "refused the result of call c1 to secret") {
+		t.Fatalf("log %q", h.logged())
+	}
+
+	// An agent that would seed a forbidden label opens no session.
+	seeded := serve(t, &agentloop.Agent{Model: noModel(t), Labels: []string{"private"}, Forbid: []string{"private"}}, Options{}, false)
+	if _, err := seeded.client.NewSession(seeded.ctx(), acp.NewSessionRequest{Cwd: "/", McpServers: []acp.McpServer{}}); err == nil {
+		t.Fatal("a session was opened holding a forbidden label")
+	}
+
+	// A session already holding private, from an agent without the rule,
+	// loads, but is not run.
+	dir := t.TempDir()
+	before := serveIn(t, dir, &agentloop.Agent{Model: fake.Script(fake.Text("hi")), Labels: []string{"private"}}, Options{}, false)
+	oid := before.newSession()
+	if _, err := before.prompt(oid, "hi"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := before.client.CloseSession(before.ctx(), acp.CloseSessionRequest{SessionId: oid}); err != nil {
+		t.Fatal(err)
+	}
+	after := serveIn(t, dir, &agentloop.Agent{Model: noModel(t), Forbid: []string{"private"}}, Options{}, false)
+	if _, err := after.client.LoadSession(after.ctx(), acp.LoadSessionRequest{SessionId: oid, Cwd: "/", McpServers: []acp.McpServer{}}); err != nil {
+		t.Fatal(err)
+	}
+	_, err := after.prompt(oid, "more")
+	var re *acp.RequestError
+	if !errors.As(err, &re) || re.Code != -32603 || !strings.Contains(re.Message, "may not hold") {
+		t.Fatalf("prompt: %v", err)
+	}
+}
+
+func noModel(t *testing.T) agentloop.Model {
+	return fake.New(func(*agentloop.Request) (*agentloop.Response, error) {
+		t.Error("the model was called")
+		return nil, errors.New("no model")
+	})
+}
+
+// A prompt whose content brings a label the session may not hold is
+// refused before the label is written: the session stays as it was, and a
+// prompt without it runs.
+func TestAPromptBringingAForbiddenLabelIsRefusedBeforeItIsRecorded(t *testing.T) {
+	h := serve(t, &agentloop.Agent{Model: fake.Script(fake.Text("Hello.")), Forbid: []string{"contaminated"}}, Options{}, false)
+	id := h.newSession()
+	_, err := h.client.Prompt(h.ctx(), acp.PromptRequest{SessionId: id, Prompt: []acp.ContentBlock{
+		acp.TextBlock("read this"), acp.ResourceLinkBlock("page", "https://example.com/x")}})
+	var re *acp.RequestError
+	if !errors.As(err, &re) || !strings.Contains(re.Message, "may not hold") {
+		t.Fatalf("prompt: %v", err)
+	}
+	if resp, err := h.prompt(id, "hi"); err != nil || resp.StopReason != acp.StopReasonEndTurn {
+		t.Fatalf("%+v, %v", resp, err)
+	}
+	b, err := os.ReadFile(SessionPath(h.dir, id))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(b), "contaminated") {
+		t.Fatalf("the session took the label: %s", b)
+	}
+}

@@ -1,6 +1,10 @@
 package agentloop
 
-import "context"
+import (
+	"context"
+	"slices"
+	"sort"
+)
 
 // Verdict is a policy's answer about one tool call.
 type Verdict string
@@ -55,4 +59,18 @@ func (v View) Has(label string) bool {
 		}
 	}
 	return false
+}
+
+// Forbidden is the labels in labels that forbid names, sorted, with no
+// repeats: what a session given labels would hold that it may not. It is
+// empty, never nil, when there are none.
+func Forbidden(labels, forbid []string) []string {
+	out := []string{}
+	for _, l := range labels {
+		if slices.Contains(forbid, l) && !slices.Contains(out, l) {
+			out = append(out, l)
+		}
+	}
+	sort.Strings(out)
+	return out
 }

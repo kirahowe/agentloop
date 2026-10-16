@@ -17,7 +17,9 @@ content an outsider could have written, and a way to send data out. A
 session is labelled `private` or `contaminated` by what it has seen, and
 each tool has a class (`read`, `write`, `egress` or `act`). Once a session
 holds both labels, an egress call waits for a person; once it is
-contaminated, so does an act call.
+contaminated, so does an act call. A policy can also forbid a label outright: a session that
+may not hold `private` never starts holding it, and a tool result that
+carries it is refused before the model sees it.
 
 A session is an append-only log, written to disk entry by entry. If the
 process crashes or is killed at any point, the next run carries on from the

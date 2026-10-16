@@ -20,6 +20,7 @@ import (
 //	canceled                  cancelled
 //	model_error               error -32603, data: the error's kind, status, message and times
 //	held                      error -32603, data: the held calls
+//	forbidden                 error -32603, data: the labels it may not hold
 //
 // The server asks the client about held calls (session/request_permission)
 // and runs on, so a turn it answers has none left held, unless the turn
@@ -49,6 +50,9 @@ func Respond(out *agentloop.Outcome) (acp.StopReason, *acp.RequestError) {
 			return "", internal("the model call failed", map[string]any{"reason": string(out.Reason)})
 		}
 		return "", internal(out.Error.Error(), modelErrorData(out.Error))
+	case agentloop.ReasonForbidden:
+		return "", internal("the session holds a label it may not hold, so it cannot run",
+			map[string]any{"reason": string(out.Reason), "labels": out.Forbidden})
 	case agentloop.ReasonHeld:
 		held := make([]map[string]any, 0, len(out.Held))
 		for _, c := range out.Held {

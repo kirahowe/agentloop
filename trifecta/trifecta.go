@@ -109,6 +109,10 @@ type Policy struct {
 	// Tools is the entry for each tool, by name. A call to a tool with no
 	// entry is denied.
 	Tools map[string]Tool
+	// Forbid is the labels the session may never hold. A call to a tool
+	// whose static labels include one is denied: allowing it would give
+	// the session that label before the call even ran.
+	Forbid []string
 }
 
 var _ agentloop.Policy = Policy{}
@@ -121,12 +125,19 @@ func (p Policy) Decide(_ context.Context, call agentloop.ToolCall, view agentloo
 	if !ok {
 		return agentloop.Decision{Verdict: agentloop.Deny, Reason: fmt.Sprintf("The tool %s has no policy.", call.Name)}
 	}
+	if len(agentloop.Forbidden(t.Labels, p.Forbid)) > 0 {
+		return agentloop.Decision{Verdict: agentloop.Deny, Reason: ForbiddenReason}
+	}
 	d := agentloop.Decision{Verdict: Decide(view.Labels, t), Labels: slices.Clone(t.Labels)}
 	if d.Verdict == agentloop.Hold {
 		d.Reason = holdReason(t)
 	}
 	return d
 }
+
+// ForbiddenReason is what the model is told about a call to a tool whose
+// results always carry a label the session may not hold.
+const ForbiddenReason = "This tool's results carry a label this session may not hold, so it cannot be called here."
 
 // holdReason says why a call waits, for the record and the person.
 func holdReason(t Tool) string {

@@ -116,6 +116,9 @@ func (a *Agent) resolution(ctx context.Context, s *Session, r Resolution) (d Dec
 		if pd.Verdict == Deny {
 			return d, false, fmt.Errorf("%w: call %q: %s", ErrPolicyDenies, r.CallID, pd.Reason)
 		}
+		if len(Forbidden(pd.Labels, a.Forbid)) > 0 {
+			return d, false, fmt.Errorf("%w: call %q: %s", ErrPolicyDenies, r.CallID, ForbiddenDecision)
+		}
 		d.Labels = pd.Labels
 	}
 	return d, false, nil
