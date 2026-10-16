@@ -1,34 +1,28 @@
-package openai
+package openai_test
 
 import (
 	"context"
 	"encoding/json"
-	"os"
 	"testing"
 	"time"
 
 	"github.com/kirahowe/agentloop"
+	"github.com/kirahowe/agentloop/internal/livetest"
+	"github.com/kirahowe/agentloop/openai"
 )
 
 // TestLiveToolUseWithReasoning is a smoke test against the real API. It
-// costs money, so it runs only when AGENTLOOP_LIVE=1 and a key is in
-// AGENTLOOP_OPENAI_KEY. AGENTLOOP_OPENAI_MODEL picks the model, which must
+// costs money, so it runs only with -live and -openai-key-command (see
+// internal/livetest). -openai-model picks the model, which must
 // be a reasoning model because the test sets an effort.
 //
 // It runs a two-turn tool-use conversation and checks that the API accepts
 // the first turn replayed from Native, encrypted reasoning included.
 func TestLiveToolUseWithReasoning(t *testing.T) {
-	key := os.Getenv("AGENTLOOP_OPENAI_KEY")
-	if os.Getenv("AGENTLOOP_LIVE") != "1" || key == "" {
-		t.Skip("set AGENTLOOP_LIVE=1 and AGENTLOOP_OPENAI_KEY to run")
-	}
-	model := os.Getenv("AGENTLOOP_OPENAI_MODEL")
-	if model == "" {
-		model = "gpt-5"
-	}
+	key, model := livetest.OpenAI(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
 	defer cancel()
-	m := New(Config{APIKey: key})
+	m := openai.New(openai.Config{APIKey: key})
 
 	req := &agentloop.Request{
 		Model:           model,

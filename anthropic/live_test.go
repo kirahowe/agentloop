@@ -1,34 +1,28 @@
-package anthropic
+package anthropic_test
 
 import (
 	"context"
 	"encoding/json"
-	"os"
 	"testing"
 	"time"
 
 	"github.com/kirahowe/agentloop"
+	"github.com/kirahowe/agentloop/anthropic"
+	"github.com/kirahowe/agentloop/internal/livetest"
 )
 
 // TestLiveToolUseWithThinking is a smoke test against the real API. It
-// costs money, so it runs only when AGENTLOOP_LIVE=1 and a key is in
-// AGENTLOOP_ANTHROPIC_KEY. AGENTLOOP_ANTHROPIC_MODEL picks the model.
+// costs money, so it runs only with -live and -anthropic-key-command (see
+// internal/livetest). -anthropic-model picks the model.
 //
 // It runs a two-turn tool-use conversation and checks that the API accepts
 // the first turn replayed from Native, thinking blocks and signatures
 // included.
 func TestLiveToolUseWithThinking(t *testing.T) {
-	key := os.Getenv("AGENTLOOP_ANTHROPIC_KEY")
-	if os.Getenv("AGENTLOOP_LIVE") != "1" || key == "" {
-		t.Skip("set AGENTLOOP_LIVE=1 and AGENTLOOP_ANTHROPIC_KEY to run")
-	}
-	model := os.Getenv("AGENTLOOP_ANTHROPIC_MODEL")
-	if model == "" {
-		model = "claude-sonnet-5-5"
-	}
+	key, model := livetest.Anthropic(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
 	defer cancel()
-	m := New(Config{APIKey: key})
+	m := anthropic.New(anthropic.Config{APIKey: key})
 
 	req := &agentloop.Request{
 		Model:           model,

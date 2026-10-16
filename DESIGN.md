@@ -611,5 +611,5 @@ to the session and not passed on: tools get only `tool_env`.
   process with nothing written. Running the same request again is safe.
 - Replay is checked against recorded wire formats and the SDKs' types.
   Whether each provider accepts every replayed shape is confirmed only by
-  the live tests (`AGENTLOOP_LIVE=1`), which spend money and do not run by
+  the live tests (`make live`), which spend money and do not run by
   default.

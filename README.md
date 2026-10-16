@@ -107,8 +107,10 @@ make update   # move every dependency to its latest version, then test
 make tck      # the ACP conformance kit against agentloop acp (needs uv)
 ```
 
-The tests need no network and no key. Live tests against the real APIs run
-only with `AGENTLOOP_LIVE=1` and spend a little money.
+The tests need no network and no key. Live tests against the real APIs spend a
+little money and run only with `make live`, which passes `-live` and a key
+command to the anthropic and openai test packages. The OpenAI test skips
+unless you add `-openai-key-command`.
 
 ## License
 
