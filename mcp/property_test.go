@@ -145,6 +145,17 @@ func TestPropertyDigestCanonical(t *testing.T) {
 		if dd == da {
 			t.Fatal("adding an outputSchema kept the digest")
 		}
+		// Annotations decide nothing, so they are not pinned.
+		plain := &sdk.Tool{Name: "t", Description: desc, InputSchema: json.RawMessage(a.String())}
+		hinted := &sdk.Tool{Name: "t", Description: desc, InputSchema: json.RawMessage(b.String()),
+			Annotations: &sdk.ToolAnnotations{ReadOnlyHint: true, Title: "x"}}
+		dp, err := Digest(plain)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if dh, _ := Digest(hinted); dp != da || dh != da {
+			t.Fatalf("Digest %s and %s, want %s", dp, dh, da)
+		}
 	})
 }
 
@@ -188,16 +199,21 @@ func TestPropertyLabelMerge(t *testing.T) {
 }
 
 // Whatever content a result mixes, the model never sees non-text
-// content, and the call fails exactly when a kind is not allowed.
+// content, and the call fails exactly when a kind is not allowed. The
+// text of an allowed embedded text resource is shown; "rtext" is one.
 func TestPropertyContent(t *testing.T) {
-	kinds := []string{"text", Image, Audio, ResourceLink, Resource}
+	kinds := []string{"text", Image, Audio, ResourceLink, Resource, "rtext"}
 	rapid.Check(t, func(t *rapid.T) {
-		allow := rapid.SliceOfDistinct(rapid.SampledFrom(kinds[1:]), rapid.ID[string]).Draw(t, "allow")
+		allow := rapid.SliceOfDistinct(rapid.SampledFrom(kinds[1:5]), rapid.ID[string]).Draw(t, "allow")
 		picked := rapid.SliceOf(rapid.SampledFrom(kinds)).Draw(t, "content")
 		var content []sdk.Content
 		refused := false
 		for _, k := range picked {
-			if k != "text" && !slices.Contains(allow, k) {
+			kind := k
+			if k == "rtext" {
+				kind = Resource
+			}
+			if k != "text" && !slices.Contains(allow, kind) {
 				refused = true
 			}
 			switch k {
@@ -210,7 +226,9 @@ func TestPropertyContent(t *testing.T) {
 			case ResourceLink:
 				content = append(content, &sdk.ResourceLink{URI: "SECRET", Name: "SECRET", Description: "SECRET"})
 			case Resource:
-				content = append(content, &sdk.EmbeddedResource{Resource: &sdk.ResourceContents{URI: "SECRET", Text: "SECRET"}})
+				content = append(content, &sdk.EmbeddedResource{Resource: &sdk.ResourceContents{URI: "SECRET", MIMEType: "SECRET", Blob: []byte("SECRET")}})
+			case "rtext":
+				content = append(content, &sdk.EmbeddedResource{Resource: &sdk.ResourceContents{URI: "SECRET", MIMEType: "SECRET", Text: "words"}})
 			}
 		}
 		cfg := ToolConfig{Policy: trifecta.Tool{Class: trifecta.Read}, AllowContent: allow}
@@ -221,7 +239,7 @@ func TestPropertyContent(t *testing.T) {
 		if refused != (r.Content == Failed("t") && r.IsError) {
 			t.Fatalf("refused %v, got %+v", refused, r)
 		}
-		if !refused && strings.Count(r.Content, "words") != strings.Count(strings.Join(picked, " "), "text") {
+		if !refused && strings.Count(r.Content, "words") != strings.Count(strings.Join(picked, " "), "text") { // "rtext" counts
 			t.Fatalf("text lost: %q", r.Content)
 		}
 	})

@@ -25,8 +25,10 @@ type proc struct {
 	// Our ends of the server's stdin and stdout.
 	in  *os.File
 	out *os.File
-	// The read end of the server's stderr, when it is copied to a writer.
-	errR *os.File
+	// The read end of the server's stderr, when it is copied to a writer,
+	// and closed when the copy ends.
+	errR    *os.File
+	errDone chan struct{}
 
 	exited  chan struct{}
 	waitErr error
@@ -74,7 +76,11 @@ func start(srv Server) (*proc, io.ReadCloser, io.WriteCloser, error) {
 			return fail(err)
 		}
 		cmd.Stderr = errW
-		go io.Copy(srv.Stderr, p.errR)
+		p.errDone = make(chan struct{})
+		go func() {
+			io.Copy(srv.Stderr, p.errR)
+			close(p.errDone)
+		}()
 	}
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true, Pgid: p.pgid}
 	err = cmd.Start()
@@ -138,6 +144,12 @@ func (p *proc) stop() {
 	}
 	p.out.Close()
 	if p.errR != nil {
+		// What the server wrote before it exited is copied out before
+		// stop returns, so a caller can close the writer after it.
+		select {
+		case <-p.errDone:
+		case <-time.After(killGrace):
+		}
 		p.errR.Close()
 	}
 }

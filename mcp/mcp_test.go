@@ -185,13 +185,18 @@ func TestLabelsSent(t *testing.T) {
 	srv := server(t, map[string]ToolConfig{"meta": read()})
 	off := connect(t, srv)
 	r := call(t, off, "meta", `{}`, "private")
-	if strings.Contains(r.Content, "com.kirahowe.agentloop") {
-		t.Fatalf("labels sent while off: %s", r.Content)
+	var meta map[string]any
+	if err := json.Unmarshal([]byte(r.Content), &meta); err != nil {
+		t.Fatal(err)
+	}
+	// The call id is always sent; the labels only when asked.
+	if _, ok := meta[LabelsKey]; ok || meta[CallIDKey] != "toolu_1" {
+		t.Fatalf("meta while off: %s", r.Content)
 	}
 	srv.SendLabels = true
 	on := connect(t, srv)
 	r = call(t, on, "meta", `{}`, "private", "contaminated")
-	var meta map[string]any
+	meta = nil
 	if err := json.Unmarshal([]byte(r.Content), &meta); err != nil {
 		t.Fatal(err)
 	}
@@ -248,6 +253,14 @@ func TestContent(t *testing.T) {
 
 		c = connect(t, server(t, map[string]ToolConfig{"content": {Policy: read().Policy, AllowContent: []string{kind}}}))
 		r := call(t, c, "content", `{"kind":"`+kind+`"}`)
+		if kind == Resource {
+			// An embedded text resource shows its text, and nothing of
+			// its URI or MIME type.
+			if r.IsError || r.Content != "visible\nTEXT" {
+				t.Fatalf("%s: %+v", kind, r)
+			}
+			continue
+		}
 		if r.IsError || !strings.HasPrefix(r.Content, "visible\n[") || strings.Contains(r.Content, "SECRET") || strings.Contains(r.Content, "ignore") {
 			t.Fatalf("%s: %+v", kind, r)
 		}

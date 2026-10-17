@@ -43,6 +43,10 @@ func ToResult(name string, cfg ToolConfig, output *jsonschema.Schema, r *sdk.Cal
 		if !slices.Contains(cfg.AllowContent, kind) {
 			return failed(fmt.Sprintf("content %d is %s, which the tool does not allow", i, kind))
 		}
+		if t, ok := resourceText(c); ok {
+			texts = append(texts, t)
+			continue
+		}
 		texts = append(texts, placeholder)
 	}
 	text := strings.Join(texts, "\n")
@@ -109,6 +113,16 @@ func MergeLabels(configured, added []string) []string {
 	return u
 }
 
+// resourceText is the text of an embedded text resource. Its URI and
+// MIME type are the server's free text too, and are not shown.
+func resourceText(c sdk.Content) (string, bool) {
+	r, ok := c.(*sdk.EmbeddedResource)
+	if !ok || r.Resource == nil || r.Resource.Blob != nil || r.Resource.Text == "" {
+		return "", false
+	}
+	return r.Resource.Text, true
+}
+
 // mimeTops are the top-level media types a placeholder may name. Nothing
 // else of a server's MIME type reaches the model: a subtype is free text.
 var mimeTops = []string{"application", "audio", "font", "image", "message", "model", "multipart", "text", "video"}
@@ -146,15 +160,18 @@ func describe(c sdk.Content) (kind, placeholder string) {
 }
 
 // Digest is the SHA-256, in hex, of a tool's definition: its name,
-// description, inputSchema and outputSchema as canonical JSON.
+// description, inputSchema and outputSchema as canonical JSON. The
+// annotations are left out: they decide nothing (see Lint), and the SDK
+// would have to encode them again, so the digest would follow the SDK's
+// version.
 func Digest(t *sdk.Tool) (string, error) {
-	in, err := json.Marshal(t.InputSchema)
+	in, err := canonicalValue(t.InputSchema)
 	if err != nil {
 		return "", err
 	}
 	var out json.RawMessage
 	if t.OutputSchema != nil {
-		if out, err = json.Marshal(t.OutputSchema); err != nil {
+		if out, err = canonicalValue(t.OutputSchema); err != nil {
 			return "", err
 		}
 	}

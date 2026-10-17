@@ -119,35 +119,28 @@ func TestEOFMidCallIsStopped(t *testing.T) {
 
 // Regression: a request from the server during a call raced the call's
 // result, so the call often succeeded and the connection stayed in use.
-// Now the violation breaks the connection: the call in flight when the
-// client handles the request fails, and no call runs after it until
-// Reconnect.
+// The SDK handles the request on a goroutine of its own, so recording the
+// violation there still let a later call succeed now and then. It is now
+// recorded as the request is read, before the result after it: the call
+// fails, and no call runs after it until Reconnect.
 func TestServerRequestBreaksTheConnection(t *testing.T) {
 	for i := 0; i < 20; i++ {
-		c := connect(t, raw(t, "race-request", &syncBuffer{}))
+		mode, method := "race-request", "elicitation/create"
+		if i%2 == 1 {
+			mode, method = "sneaky-request", "sampling/createMessage"
+		}
+		c := connect(t, raw(t, mode, &syncBuffer{}))
 		first, err, _ := callT(t, c, 10*time.Second)
 		if err != nil {
 			t.Fatal(err)
 		}
-		second, err, _ := callT(t, c, 10*time.Second)
-		switch {
-		case first.Content == Failed("t"):
-			if !strings.Contains(first.Log, "elicitation/create") {
-				t.Fatalf("log %q", first.Log)
-			}
-			mustNotRun(t, second, err)
-		case first.Content == "ok":
-			// The request was handled after the first call's result:
-			// the second call was in flight then and failed, or was
-			// sent after and did not run.
-			if second.Content != NotRun("t") && (second.Content != Failed("t") || !strings.Contains(second.Log, "elicitation/create")) {
-				t.Fatalf("second %+v %v", second, err)
-			}
-		default:
-			t.Fatalf("first %+v", first)
+		if first.Content != Failed("t") || !strings.Contains(first.Log, method) {
+			t.Fatalf("%s: first %+v", mode, first)
 		}
-		third, err, _ := callT(t, c, 10*time.Second)
-		mustNotRun(t, third, err)
+		for range 2 {
+			r, err, _ := callT(t, c, 10*time.Second)
+			mustNotRun(t, r, err)
+		}
 		c.Close()
 	}
 }

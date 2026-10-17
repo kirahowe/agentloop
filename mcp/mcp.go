@@ -9,9 +9,9 @@
 // (Warnings); they never decide anything.
 //
 // Each allowed tool's definition (name, description, input and output
-// schema) is pinned by its SHA-256 (Digest) when the client connects. A
-// definition that differs from the digest the caller gave, or on Reconnect
-// from the one pinned, is an error.
+// schema) is pinned by its SHA-256 (Digest) when the client
+// connects. A definition that differs from the digest the caller gave, or
+// on Reconnect from the one pinned, is an error.
 //
 // The client declares no capabilities and handles no requests from the
 // server: no sampling, elicitation or roots. A result that asks for input
@@ -20,7 +20,8 @@
 //
 // A result is text. Image, audio, resource_link and embedded resource
 // content fail the call unless the tool allows the kind, and even then the
-// model sees only a placeholder. A tool with an outputSchema shows the
+// model sees only a placeholder, except for the text of an embedded text
+// resource. A tool with an outputSchema shows the
 // model only its structuredContent, validated against that schema and
 // serialised again. Whenever a result cannot be used the model is told
 // only "The tool <name> failed.", and the reason goes to Result.Log.
@@ -59,6 +60,9 @@ const (
 	CallIDKey = "com.kirahowe.agentloop/call-id"
 )
 
+// DefaultStartTimeout bounds a restart when Server.StartTimeout is zero.
+const DefaultStartTimeout = 30 * time.Second
+
 // DefaultMaxMessageBytes caps one message from the server when
 // Server.MaxMessageBytes is zero.
 const DefaultMaxMessageBytes = 1 << 20
@@ -85,9 +89,17 @@ type Server struct {
 	// Stderr receives what the server writes to stderr, for the
 	// operator. Nil discards it.
 	Stderr io.Writer
-	// SendLabels sends the session's labels and the call id in each
-	// call's _meta. Off, the server learns neither.
+	// SendLabels sends the session's labels in each call's _meta. Off,
+	// the server does not learn them. The call id is always sent.
 	SendLabels bool
+	// Restart starts a server that has died, or whose connection was
+	// lost, again for the next call, which must find every definition as
+	// pinned. Off, only Reconnect starts it again. A server that broke the
+	// protocol, or whose restart found a changed definition, is never
+	// restarted on its own.
+	Restart bool
+	// StartTimeout bounds a restart. Zero means DefaultStartTimeout.
+	StartTimeout time.Duration
 	// Tools is the allowlist: each tool the agent may call, by the name
 	// the server gives it.
 	Tools map[string]ToolConfig
@@ -98,6 +110,9 @@ type Server struct {
 
 // A ToolConfig is one allowed tool.
 type ToolConfig struct {
+	// Alias is the name the agent, the model and the policy know the tool
+	// by. Empty means the server's name for it.
+	Alias string
 	// Policy is the tool's class, labels and always_hold.
 	Policy trifecta.Tool
 	// Digest pins the tool's definition. Empty accepts whatever the
@@ -105,7 +120,8 @@ type ToolConfig struct {
 	Digest string
 	// AllowContent lists the non-text content kinds a result may carry
 	// (Image, Audio, ResourceLink, Resource). The model sees a
-	// placeholder for each, never the content.
+	// placeholder for each, never the content, except that an embedded
+	// resource holding text (not a blob) is shown as that text.
 	AllowContent []string
 }
 
@@ -124,7 +140,7 @@ func Failed(name string) string { return fmt.Sprintf("The tool %s failed.", name
 // NotRun is what the model is told of a call that was never sent,
 // because the server stopped or broke the protocol earlier.
 func NotRun(name string) string {
-	return fmt.Sprintf("The tool %s was not run: its MCP server is not running and must be reconnected.", name)
+	return fmt.Sprintf("The tool %s was not run: its MCP server is not running.", name)
 }
 
 // Stopped is what the model is told when the server died during a call.
@@ -139,10 +155,12 @@ type Client struct {
 	warnings []string
 	tools    []*tool
 
-	// lock guards conn. It is a channel so that a call can stop waiting
-	// for it when its context ends.
+	// lock guards conn and refused. It is a channel so that a call can
+	// stop waiting for it when its context ends.
 	lock chan struct{}
 	conn *conn
+	// refused is why the server is not restarted on its own any more.
+	refused string
 }
 
 // Connect starts the server, lists its tools and checks them against the
@@ -175,7 +193,13 @@ func checkServer(srv Server) error {
 	if len(srv.Tools) == 0 {
 		return fmt.Errorf("mcp server %s allows no tools", srv.Name)
 	}
+	aliases := map[string]string{}
 	for name, tc := range srv.Tools {
+		alias := tc.alias(name)
+		if other, dup := aliases[alias]; dup {
+			return fmt.Errorf("mcp server %s: the tools %s and %s are both called %s", srv.Name, min(name, other), max(name, other), alias)
+		}
+		aliases[alias] = name
 		if err := trifecta.CheckLabels(tc.Policy.Labels); err != nil {
 			return fmt.Errorf("mcp server %s, tool %s: %w", srv.Name, name, err)
 		}
@@ -189,6 +213,13 @@ func checkServer(srv Server) error {
 		}
 	}
 	return nil
+}
+
+func (tc ToolConfig) alias(name string) string {
+	if tc.Alias != "" {
+		return tc.Alias
+	}
+	return name
 }
 
 // adopt builds the client's tools from the first listing.
@@ -217,7 +248,7 @@ func (c *Client) adopt(listed map[string]*sdk.Tool) error {
 		}
 		c.pins[name] = d
 		c.tools = append(c.tools, t)
-		c.warnings = append(c.warnings, Lint(name, cfg.Policy, def.Annotations)...)
+		c.warnings = append(c.warnings, Lint(cfg.alias(name), cfg.Policy, def.Annotations)...)
 	}
 	return nil
 }
@@ -231,11 +262,12 @@ func (c *Client) Tools() []agentloop.Tool {
 	return out
 }
 
-// Digests returns the pinned digest of each allowed tool, by name.
+// Digests returns the pinned digest of each allowed tool, by the name
+// the agent knows it by (its alias).
 func (c *Client) Digests() map[string]string {
 	out := make(map[string]string, len(c.pins))
 	for k, v := range c.pins {
-		out[k] = v
+		out[c.srv.Tools[k].alias(k)] = v
 	}
 	return out
 }
@@ -253,6 +285,12 @@ func (c *Client) Reconnect(ctx context.Context) error {
 		return err
 	}
 	defer c.release()
+	return c.redial(ctx)
+}
+
+// redial replaces the connection with a new one whose definitions match
+// the pins. The caller holds the lock.
+func (c *Client) redial(ctx context.Context) error {
 	if c.conn != nil {
 		c.conn.close()
 		c.conn = nil
@@ -278,7 +316,52 @@ func (c *Client) Reconnect(ctx context.Context) error {
 		}
 	}
 	c.conn = cn
+	c.refused = ""
 	return nil
+}
+
+// forCall is the connection a new call is sent on. With Restart, a
+// server that died or lost its connection is started again first. It
+// returns a nil connection and why when the call cannot be sent.
+func (c *Client) forCall(ctx context.Context) (*conn, string, error) {
+	if err := c.acquire(ctx); err != nil {
+		return nil, "", err
+	}
+	defer c.release()
+	cn := c.conn
+	why := "the server is not connected"
+	if cn != nil {
+		if why = cn.brokenReason(); why == "" {
+			return cn, "", nil
+		}
+	}
+	if !c.srv.Restart {
+		return nil, why + "; only Reconnect starts it again", nil
+	}
+	if c.refused != "" {
+		return nil, c.refused + "; it is not restarted on its own", nil
+	}
+	if cn != nil && cn.violated() {
+		c.refused = why
+		return nil, why + "; a server that broke the protocol is not restarted on its own", nil
+	}
+	limit := c.srv.StartTimeout
+	if limit <= 0 {
+		limit = DefaultStartTimeout
+	}
+	rctx, cancel := context.WithTimeout(ctx, limit)
+	defer cancel()
+	if err := c.redial(rctx); err != nil {
+		if ctx.Err() != nil {
+			return nil, "", ctx.Err()
+		}
+		var drift *DriftError
+		if errors.As(err, &drift) {
+			c.refused = err.Error()
+		}
+		return nil, why + "; restarting it failed: " + err.Error(), nil
+	}
+	return c.conn, "", nil
 }
 
 // Close stops the server and everything in its process group.
@@ -302,16 +385,6 @@ func (c *Client) acquire(ctx context.Context) error {
 }
 
 func (c *Client) release() { <-c.lock }
-
-// current is the connection, waiting for a Reconnect or Close in progress
-// no longer than ctx allows.
-func (c *Client) current(ctx context.Context) (*conn, error) {
-	if err := c.acquire(ctx); err != nil {
-		return nil, err
-	}
-	defer c.release()
-	return c.conn, nil
-}
 
 // conn is one running server and the session with it.
 type conn struct {
@@ -341,6 +414,8 @@ func (cn *conn) violationsSince(n int) []string {
 	defer cn.mu.Unlock()
 	return slices.Clone(cn.violations[n:])
 }
+
+func (cn *conn) violated() bool { return cn.violationCount() > 0 }
 
 func (cn *conn) violationCount() int {
 	cn.mu.Lock()
@@ -400,7 +475,7 @@ func dial(ctx context.Context, srv Server) (*conn, map[string]*sdk.Tool, error) 
 		MultiRoundTrip: &sdk.MultiRoundTripOptions{Disabled: true},
 	})
 	client.AddReceivingMiddleware(refuseRequests(cn))
-	cs, err := client.Connect(ctx, &sdk.IOTransport{Reader: r, Writer: w, MaxLineLength: max}, nil)
+	cs, err := client.Connect(ctx, newWire(r, w, cn, max), nil)
 	if err != nil {
 		p.stop()
 		return nil, nil, fmt.Errorf("mcp server %s: connect: %w", srv.Name, err)
@@ -443,6 +518,10 @@ func dial(ctx context.Context, srv Server) (*conn, map[string]*sdk.Tool, error) 
 	return cn, listed, nil
 }
 
+func requestViolation(method string) string {
+	return fmt.Sprintf("the server sent a %s request, which agentloop does not take", method)
+}
+
 // The most pages and tools a listing may have.
 const (
 	maxPages = 100
@@ -459,7 +538,7 @@ func refuseRequests(cn *conn) sdk.Middleware {
 			if method == "ping" || strings.HasPrefix(method, "notifications/") {
 				return next(ctx, method, req)
 			}
-			cn.violation(fmt.Sprintf("the server sent a %s request, which agentloop does not take", method))
+			cn.violation(requestViolation(method))
 			return nil, fmt.Errorf("agentloop takes no %s requests", method)
 		}
 	}
@@ -468,7 +547,8 @@ func refuseRequests(cn *conn) sdk.Middleware {
 // tool is one allowed tool of a client.
 type tool struct {
 	c      *Client
-	name   string
+	name   string // the server's name for it
+	alias  string // the agent's
 	cfg    ToolConfig
 	spec   agentloop.ToolSpec
 	output *jsonschema.Schema
@@ -486,7 +566,8 @@ func newTool(c *Client, name string, cfg ToolConfig, def *sdk.Tool) (*tool, erro
 	if _, err := compileSchema("mcp-input:"+name, params); err != nil {
 		return nil, fmt.Errorf("inputSchema: %w", err)
 	}
-	t := &tool{c: c, name: name, cfg: cfg, spec: agentloop.ToolSpec{Name: name, Description: def.Description, Parameters: params}}
+	alias := cfg.alias(name)
+	t := &tool{c: c, name: name, alias: alias, cfg: cfg, spec: agentloop.ToolSpec{Name: alias, Description: def.Description, Parameters: params}}
 	if def.OutputSchema != nil {
 		raw, err := canonicalValue(def.OutputSchema)
 		if err != nil {
@@ -506,36 +587,28 @@ func (t *tool) Call(ctx context.Context, input json.RawMessage) (agentloop.Resul
 	return t.CallWith(ctx, agentloop.Call{Input: input})
 }
 
-// CallWith makes one tools/call request. It never retries and never
-// reconnects.
+// CallWith makes one tools/call request. It never retries. With
+// Server.Restart it starts a dead server again before the call, never
+// during or after one.
 func (t *tool) CallWith(ctx context.Context, call agentloop.Call) (agentloop.Result, error) {
 	failed := func(why string) (agentloop.Result, error) {
-		return agentloop.Result{Content: Failed(t.name), IsError: true, Log: why}, nil
+		return agentloop.Result{Content: Failed(t.alias), IsError: true, Log: why}, nil
 	}
 	if err := ctx.Err(); err != nil {
 		return agentloop.Result{}, err
 	}
-	notRun := func(why string) (agentloop.Result, error) {
-		return agentloop.Result{Content: NotRun(t.name), IsError: true, Log: why + "; only Reconnect starts it again"}, nil
-	}
-	cn, err := t.c.current(ctx)
+	cn, why, err := t.c.forCall(ctx)
 	if err != nil {
-		return agentloop.Result{Log: "stopped while waiting for a Reconnect or Close: " + err.Error()}, err
+		return agentloop.Result{Log: "stopped while waiting for the server: " + err.Error()}, err
 	}
 	if cn == nil {
-		return notRun("the server is not connected")
-	}
-	if why := cn.brokenReason(); why != "" {
-		return notRun(why)
+		return agentloop.Result{Content: NotRun(t.alias), IsError: true, Log: why}, nil
 	}
 	input := call.Input
 	if len(strings.TrimSpace(string(input))) == 0 {
 		input = json.RawMessage(`{}`)
 	}
-	params := &sdk.CallToolParams{Name: t.name, Arguments: input}
-	if t.c.srv.SendLabels {
-		params.Meta = RequestMeta(call)
-	}
+	params := &sdk.CallToolParams{Name: t.name, Arguments: input, Meta: RequestMeta(call, t.c.srv.SendLabels)}
 	before := cn.violationCount()
 	// The call ends when the server exits, even if something it left
 	// behind holds its stdout open. A response written just before the
@@ -573,9 +646,9 @@ func (t *tool) CallWith(ctx context.Context, call agentloop.Call) (agentloop.Res
 			err = fmt.Errorf("%w: %v", cause, err)
 		}
 		cn.breakWith("the connection was lost during a call: " + err.Error())
-		return agentloop.Result{Content: Stopped(t.name), IsError: true, Log: err.Error()}, nil
+		return agentloop.Result{Content: Stopped(t.alias), IsError: true, Log: err.Error()}, nil
 	}
-	return ToResult(t.name, t.cfg, t.output, res), nil
+	return ToResult(t.alias, t.cfg, t.output, res), nil
 }
 
 // exitWait is how long a call waits for its response after the server
@@ -584,13 +657,17 @@ const exitWait = 200 * time.Millisecond
 
 var errServerExited = errors.New("the server exited")
 
-// RequestMeta is the _meta sent with a call when the server is sent
-// labels. The labels are sorted and never null.
-func RequestMeta(call agentloop.Call) sdk.Meta {
-	labels := slices.Clone(call.Labels)
-	if labels == nil {
-		labels = []string{}
+// RequestMeta is the _meta sent with a call: the call id, and with
+// sendLabels the session's labels, sorted and never null.
+func RequestMeta(call agentloop.Call, sendLabels bool) sdk.Meta {
+	m := sdk.Meta{CallIDKey: call.ID}
+	if sendLabels {
+		labels := slices.Clone(call.Labels)
+		if labels == nil {
+			labels = []string{}
+		}
+		sort.Strings(labels)
+		m[LabelsKey] = labels
 	}
-	sort.Strings(labels)
-	return sdk.Meta{LabelsKey: labels, CallIDKey: call.ID}
+	return m
 }
