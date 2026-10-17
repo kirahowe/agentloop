@@ -38,7 +38,12 @@ func acpCmd(req *request.Request, stdin io.Reader, stdout, stderr io.Writer) err
 	if err != nil {
 		return err
 	}
-	agent, err := req.Agent(key)
+	servers, err := req.StartMCP(context.Background(), stderr)
+	if err != nil {
+		return err
+	}
+	defer servers.Close()
+	agent, err := req.Agent(key, servers)
 	if err != nil {
 		return usage.Errorf("%v", err)
 	}
@@ -68,6 +73,9 @@ func acpCmd(req *request.Request, stdin io.Reader, stdout, stderr io.Writer) err
 		go func() {
 			<-sigs
 			fmt.Fprintln(stderr)
+			// Exiting now skips the deferred Close; the credentials must
+			// not outlive the process.
+			servers.RemoveCredentials()
 			os.Exit(130)
 		}()
 	}

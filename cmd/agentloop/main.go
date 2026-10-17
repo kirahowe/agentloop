@@ -94,6 +94,9 @@ type outcomeLine struct {
 	// which agentloop.Outcome cannot import, and a price table that moves
 	// should not rewrite what an old run_ended entry says.
 	CostUSD *float64 `json:"cost_usd,omitempty"`
+	// ToolsError says why the MCP tools could not be set up, for reason
+	// tools_unavailable.
+	ToolsError *request.ToolsError `json:"tools_error,omitempty"`
 }
 
 // priceFunc is the price lookup for a provider's models. Only Anthropic's
@@ -103,6 +106,17 @@ func priceFunc(provider string) func(string) *agentloop.Prices {
 		return anthropic.PricesFor
 	}
 	return func(string) *agentloop.Prices { return nil }
+}
+
+// reasonToolsUnavailable ends a run whose MCP tools could not be set up:
+// a server did not start or lacks a tool, or a definition is not the one
+// the request or the session pinned. The run never starts, and the
+// outcome's tools_error says why.
+const reasonToolsUnavailable agentloop.Reason = "tools_unavailable"
+
+func toolsUnavailable(stdout io.Writer, req *request.Request, sess *agentloop.Session, te *request.ToolsError) error {
+	return writeJSON(stdout, outcomeLine{Type: "outcome", Outcome: agentloop.Outcome{Reason: reasonToolsUnavailable},
+		Session: req.Session, Labels: ptr(sess.Labels()), ToolsError: te})
 }
 
 func noKeyOutcome(err error) agentloop.Outcome {
@@ -149,9 +163,39 @@ func runCmd(ctx context.Context, req *request.Request, stdout, stderr io.Writer)
 		// drop everything the policy stood for.
 		return usage.Errorf("the session was run under a policy, and this request has none")
 	}
-	agent, err := req.Agent(key)
+	// MCP servers are not started once a signal has come, and a signal
+	// while they start stops them: the outcome says canceled, as it
+	// would from the run itself.
+	canceled := func() error {
+		return writeJSON(stdout, outcomeLine{Type: "outcome", Outcome: agentloop.Outcome{Reason: agentloop.ReasonCanceled}, Session: req.Session, Labels: ptr(sess.Labels())})
+	}
+	if len(req.MCPServers) > 0 && ctx.Err() != nil {
+		return canceled()
+	}
+	servers, err := req.StartMCP(ctx, stderr)
+	if len(req.MCPServers) > 0 && ctx.Err() != nil {
+		servers.Close()
+		return canceled()
+	}
+	var te *request.ToolsError
+	if errors.As(err, &te) {
+		return toolsUnavailable(stdout, req, sess, te)
+	}
+	if err != nil {
+		return err
+	}
+	defer servers.Close()
+	agent, err := req.Agent(key, servers)
 	if err != nil {
 		return usage.Errorf("%v", err)
+	}
+	// A changed tool definition stops the run before anything is
+	// written, a resolution included.
+	var pe *agentloop.PinError
+	if err := sess.CheckPins(agent.Pins); errors.As(err, &pe) {
+		return toolsUnavailable(stdout, req, sess, req.PinsError(pe))
+	} else if err != nil {
+		return err
 	}
 	resolved, err := resolve(ctx, agent, sess, req.Resolve)
 	if err != nil {

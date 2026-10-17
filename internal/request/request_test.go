@@ -31,6 +31,7 @@ func FuzzLoadRequest(f *testing.F) {
 	f.Add(good)
 	f.Add([]byte(`{}`))
 	f.Add([]byte(`{"provider":"anthropic","model":"m","session":"s","prompt":"p","api_key_command":["k"],"tools":[{"name":"mail"}],"tool_command":["x"],"tool_protocol":"envelope","policy":{"tools":{"mail":{"class":"read","labels":["contaminated"]},"read_quarantined":{"class":"read"}}},"quarantine":{"model":"small","tools":["mail"],"retries":2}}`))
+	f.Add([]byte(`{"provider":"anthropic","model":"m","session":"s","prompt":"p","api_key_command":["k"],"mcp_servers":{"m":{"command":["/bin/m","--c={credentials_file}"],"credentials_command":["k"],"send_labels":true}},"tools":[{"name":"look","protocol":"mcp-stdio","server":"m","tool":"lookup","allow_content":["resource"]}],"policy":{"tools":{"look":{"class":"read"}}}}`))
 	f.Add([]byte(`null`))
 	f.Add([]byte(`{"provider":"openai","model":"m","session":"s","tools":[{"name":"a","parameters":{"$ref":"#"}}],"tool_command":["x"]}`))
 	f.Add([]byte(`{"provider":"openai","model":"m","session":"s","tools":[{"name":"a","parameters":{"type":"object","properties":{"a":{"$ref":"#/$defs/a"}},"$defs":{"a":{"$ref":"#/$defs/a"}}}}],"tool_command":["x"]}`))
@@ -79,7 +80,7 @@ func checkAccepted(t *testing.T, req *Request, mode Mode) {
 			}
 		}
 	}
-	if len(req.Tools) > 0 && len(req.ToolCommand) == 0 {
+	if len(req.commandTools()) > 0 && len(req.ToolCommand) == 0 {
 		t.Fatal("tools without a command")
 	}
 	if Seconds(req.TimeoutSeconds) < 0 || Seconds(req.ToolTimeoutSeconds) < 0 {
@@ -88,7 +89,7 @@ func checkAccepted(t *testing.T, req *Request, mode Mode) {
 	if req.TimeoutSeconds > 0 && Seconds(req.TimeoutSeconds) <= 0 {
 		t.Fatal("a positive timeout became none")
 	}
-	a, err := req.Agent("k")
+	a, err := req.Agent("k", req.stubMCP())
 	if err != nil {
 		t.Fatalf("an accepted request does not build: %v", err)
 	}
@@ -158,7 +159,7 @@ func TestPolicyBuildsTheAgent(t *testing.T) {
 		},
 		"tool_protocol": "envelope",
 	}
-	a, _ := load(base).Agent("")
+	a, _ := load(base).Agent("", nil)
 	if !reflect.DeepEqual(a.Labels, []string{"private"}) {
 		t.Fatalf("labels %v", a.Labels)
 	}
@@ -174,7 +175,7 @@ func TestPolicyBuildsTheAgent(t *testing.T) {
 	}
 	base["policy"] = map[string]any{"unrestricted": true}
 	delete(base, "tool_protocol")
-	a, _ = load(base).Agent("")
+	a, _ = load(base).Agent("", nil)
 	if a.Policy != nil || a.Labels != nil || a.Tools[0].(*command.Tool).Envelope {
 		t.Fatalf("an unrestricted request got %+v", a)
 	}
@@ -362,7 +363,7 @@ func TestQuarantineBuildsTheReader(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	a, err := req.Agent("k")
+	a, err := req.Agent("k", req.stubMCP())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -399,7 +400,7 @@ func TestAgentReportsAReaderError(t *testing.T) {
 	// Past Load, so only Agent can notice.
 	bad := -1
 	req.Quarantine.Retries = &bad
-	if a, err := req.Agent("k"); err == nil || a != nil {
+	if a, err := req.Agent("k", req.stubMCP()); err == nil || a != nil {
 		t.Fatalf("agent %v, err %v", a, err)
 	}
 }

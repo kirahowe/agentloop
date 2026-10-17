@@ -47,7 +47,8 @@ type Request struct {
 	Prompt             string                 `json:"prompt"`
 	Session            string                 `json:"session"`
 	SessionDir         string                 `json:"session_dir"`
-	Tools              []agentloop.ToolSpec   `json:"tools"`
+	Tools              []Tool                 `json:"tools"`
+	MCPServers         map[string]MCPServer   `json:"mcp_servers"`
 	ToolCommand        []string               `json:"tool_command"`
 	ToolEnv            map[string]string      `json:"tool_env"`
 	ToolDir            string                 `json:"tool_dir"`
@@ -67,6 +68,48 @@ type Request struct {
 		MaxWaitSeconds float64 `json:"max_wait_seconds"`
 	} `json:"retry"`
 }
+
+// Tool is one tool of the request. A command tool (no protocol) gives its
+// name, description and parameters, and runs tool_command. An MCP tool
+// ("protocol": "mcp-stdio") gives its name, the server it comes from and
+// the server's name for it; the server gives its description and
+// parameters.
+type Tool struct {
+	agentloop.ToolSpec
+	Protocol string `json:"protocol"`
+	Server   string `json:"server"`
+	Tool     string `json:"tool"`
+	// AllowContent lets an MCP tool's results hold these kinds of
+	// non-text content (see mcp.ToolConfig.AllowContent).
+	AllowContent []string `json:"allow_content"`
+	// Digest, when given, pins an MCP tool's definition (see mcp.Digest):
+	// a server that lists another fails the start.
+	Digest string `json:"digest"`
+}
+
+// MCP reports whether the tool comes from an MCP server.
+func (t Tool) MCP() bool { return t.Protocol == ToolProtocolMCPStdio }
+
+// MCPServer is an MCP server run over stdio for the length of the run.
+type MCPServer struct {
+	// Command is the server's argv. An argument may hold
+	// CredentialsPlaceholder.
+	Command []string `json:"command"`
+	// CredentialsCommand, when given, is run once at start. What it
+	// prints is written to a file only this user can read, which is
+	// removed when agentloop exits, and CredentialsPlaceholder in Command
+	// is replaced by that file's path.
+	CredentialsCommand []string `json:"credentials_command"`
+	// SendLabels sends the session's labels with each call.
+	SendLabels bool `json:"send_labels"`
+}
+
+// ToolProtocolMCPStdio is the protocol of a tool from an MCP server.
+const ToolProtocolMCPStdio = "mcp-stdio"
+
+// CredentialsPlaceholder in an MCP server's command is replaced by the
+// path of the file holding what its credentials_command printed.
+const CredentialsPlaceholder = "{credentials_file}"
 
 // Policy is the request's trifecta policy: the session's starting labels,
 // each tool's class and labels, and the labels the session may never
@@ -174,9 +217,6 @@ func (r *Request) validate(mode Mode) error {
 	if len(r.APIKeyCommand) == 0 {
 		return usage.Errorf("request has no api_key_command")
 	}
-	if len(r.Tools) > 0 && len(r.ToolCommand) == 0 {
-		return usage.Errorf("request has tools but no tool_command")
-	}
 	seen := map[string]bool{}
 	for _, t := range r.Tools {
 		if t.Name == "" {
@@ -195,6 +235,12 @@ func (r *Request) validate(mode Mode) error {
 		if p := bytes.TrimSpace(t.Parameters); len(p) > 0 && p[0] != '{' {
 			return usage.Errorf("tool %q: parameters must be a JSON Schema object", t.Name)
 		}
+	}
+	if err := r.validateMCP(); err != nil {
+		return err
+	}
+	if len(r.commandTools()) > 0 && len(r.ToolCommand) == 0 {
+		return usage.Errorf("request has tools but no tool_command")
 	}
 	if err := r.validatePolicy(); err != nil {
 		return err
@@ -227,7 +273,7 @@ func (r *Request) validate(mode Mode) error {
 	if err != nil {
 		return err
 	}
-	a, err := r.Agent("")
+	a, err := r.Agent("", r.stubMCP())
 	if err != nil {
 		return usage.Errorf("bad quarantine: %v", err)
 	}
@@ -262,8 +308,8 @@ func (r *Request) validatePolicy() error {
 		}
 		return nil
 	}
-	if r.ToolProtocol != ToolProtocolEnvelope {
-		return usage.Errorf(`a request with a policy needs "tool_protocol": %q`, ToolProtocolEnvelope)
+	if len(r.commandTools()) > 0 && r.ToolProtocol != ToolProtocolEnvelope {
+		return usage.Errorf(`a request with a policy and command tools needs "tool_protocol": %q`, ToolProtocolEnvelope)
 	}
 	if err := trifecta.CheckLabels(p.Labels); err != nil {
 		return usage.Errorf("policy.labels: %v", err)
@@ -299,6 +345,17 @@ func (r *Request) validatePolicy() error {
 		}
 	}
 	return nil
+}
+
+// commandTools are the tools that run tool_command.
+func (r *Request) commandTools() []Tool {
+	var out []Tool
+	for _, t := range r.Tools {
+		if !t.MCP() {
+			out = append(out, t)
+		}
+	}
+	return out
 }
 
 // toolNames are the names of every tool the agent has: the request's
@@ -484,18 +541,36 @@ func (e *KeyError) Error() string { return e.msg }
 // environment of only PATH and HOME from this process. Its trimmed stdout is
 // the key. The key is returned to the caller and goes nowhere else.
 func FetchKey(ctx context.Context, argv []string, timeout time.Duration) (string, error) {
+	out, err := secretCommand(ctx, "api_key_command", argv, timeout)
+	if err != nil {
+		return "", err
+	}
+	key := strings.TrimSpace(string(out))
+	if key == "" {
+		return "", &KeyError{msg: "The api_key_command printed no key."}
+	}
+	return key, nil
+}
+
+// baseEnv is PATH and HOME from this process, and nothing else.
+func baseEnv() []string {
+	env := []string{}
+	for _, k := range []string{"PATH", "HOME"} {
+		if v, ok := os.LookupEnv(k); ok {
+			env = append(env, k+"="+v)
+		}
+	}
+	return env
+}
+
+// secretCommand runs a command whose stdout is a secret, as FetchKey
+// describes, and returns its stdout. Its errors name the command by the
+// request field it came from and never hold its stdout.
+func secretCommand(ctx context.Context, name string, argv []string, timeout time.Duration) ([]byte, error) {
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, argv[0], argv[1:]...)
-	cmd.Env = nil
-	for _, k := range []string{"PATH", "HOME"} {
-		if v, ok := os.LookupEnv(k); ok {
-			cmd.Env = append(cmd.Env, k+"="+v)
-		}
-	}
-	if cmd.Env == nil {
-		cmd.Env = []string{}
-	}
+	cmd.Env = baseEnv()
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &stdout, &stderr
 	// Stop the command's children too, or one that holds the pipes open
@@ -506,9 +581,9 @@ func FetchKey(ctx context.Context, argv []string, timeout time.Duration) (string
 	err := cmd.Run()
 	if ctx.Err() != nil {
 		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
-			return "", &KeyError{msg: fmt.Sprintf("The api_key_command did not finish within %d seconds.", int(timeout.Seconds()))}
+			return nil, &KeyError{msg: fmt.Sprintf("The %s did not finish within %d seconds.", name, int(timeout.Seconds()))}
 		}
-		return "", &KeyError{msg: "The api_key_command was interrupted.", Canceled: true}
+		return nil, &KeyError{msg: fmt.Sprintf("The %s was interrupted.", name), Canceled: true}
 	}
 	if err != nil {
 		var ee *exec.ExitError
@@ -517,19 +592,15 @@ func FetchKey(ctx context.Context, argv []string, timeout time.Duration) (string
 			if ee.ExitCode() < 0 {
 				what = "was killed (" + ee.String() + ")"
 			}
-			msg := "The api_key_command " + what
+			msg := "The " + name + " " + what
 			if tail := stderrTail(stderr.Bytes()); tail != "" {
 				msg += ": " + tail
 			}
-			return "", &KeyError{msg: msg + "."}
+			return nil, &KeyError{msg: msg + "."}
 		}
-		return "", &KeyError{msg: fmt.Sprintf("The api_key_command could not run: %v.", err)}
+		return nil, &KeyError{msg: fmt.Sprintf("The %s could not run: %v.", name, err)}
 	}
-	key := strings.TrimSpace(stdout.String())
-	if key == "" {
-		return "", &KeyError{msg: "The api_key_command printed no key."}
-	}
-	return key, nil
+	return stdout.Bytes(), nil
 }
 
 // stderrTail is the end of what the key command wrote to stderr, on one line.
@@ -584,23 +655,27 @@ func (r *Request) newModelFor(key, model string) agentloop.Model {
 	return anthropic.New(anthropic.Config{APIKey: key, BaseURL: r.BaseURL, RefusalFallback: fallback})
 }
 
-// Agent builds the agent. The key goes to the model and nowhere else: the
-// tools get exactly tool_env. It fails only when the quarantined reader
-// cannot be built, which Load has already ruled out for a request it
-// accepted.
-func (r *Request) Agent(key string) (*agentloop.Agent, error) {
+// Agent builds the agent, with the MCP tools and pins of m, which may be
+// nil when the request has no MCP servers. The key goes to the model and
+// nowhere else: the tools get exactly tool_env. It fails only when the
+// quarantined reader cannot be built, which Load has already ruled out
+// for a request it accepted.
+func (r *Request) Agent(key string, m *MCP) (*agentloop.Agent, error) {
 	env := make([]string, 0, len(r.ToolEnv))
 	for k, v := range r.ToolEnv {
 		env = append(env, k+"="+v)
 	}
 	sort.Strings(env)
 	var tools []agentloop.Tool
-	for _, spec := range r.Tools {
-		argv := append(append([]string{}, r.ToolCommand...), spec.Name)
+	for _, t := range r.commandTools() {
+		argv := append(append([]string{}, r.ToolCommand...), t.Name)
 		tools = append(tools, &command.Tool{
-			Def: spec, Argv: argv, Env: env, Dir: r.ToolDir,
+			Def: t.ToolSpec, Argv: argv, Env: env, Dir: r.ToolDir,
 			Envelope: r.ToolProtocol == ToolProtocolEnvelope, KnownLabel: trifecta.KnownLabel,
 		})
+	}
+	if m != nil {
+		tools = append(tools, m.Tools...)
 	}
 	retry := agentloop.DefaultRetry
 	if r.Retry != nil {
@@ -628,6 +703,9 @@ func (r *Request) Agent(key string) (*agentloop.Agent, error) {
 		Limits:      r.Limits,
 		ToolTimeout: Seconds(r.ToolTimeoutSeconds),
 	}
+	if a.ToolTimeout == 0 && len(r.MCPServers) > 0 {
+		a.ToolTimeout = DefaultMCPToolTimeout
+	}
 	if r.Restricted() {
 		a.Labels = slices.Clone(r.Policy.Labels)
 		a.Forbid = slices.Clone(r.Policy.ForbidLabels)
@@ -635,6 +713,9 @@ func (r *Request) Agent(key string) (*agentloop.Agent, error) {
 	}
 	if r.Retry != nil {
 		a.Retry = &retry
+	}
+	if m != nil && len(m.Pins) > 0 {
+		a.Pins = maps.Clone(m.Pins)
 	}
 	return a, nil
 }
