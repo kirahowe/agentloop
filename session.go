@@ -27,6 +27,7 @@ type Session struct {
 	calls    map[string]*callState
 	turns    []Turn
 	decided  int
+	pins     map[string]string
 }
 
 // A Turn is one assistant message and how it ended.
@@ -77,6 +78,7 @@ func OpenSession(store Store) (*Session, error) {
 		labels:  map[string]bool{},
 		sources: map[string]LabelSource{},
 		calls:   map[string]*callState{},
+		pins:    map[string]string{},
 	}
 	for i, e := range entries {
 		if e.Seq != i+1 {
@@ -265,6 +267,59 @@ func (s *Session) AddLabels(labels []string, source string) (*Entry, error) {
 	return &e, nil
 }
 
+// A PinError says a tool's definition is not the one the session pinned.
+type PinError struct {
+	Tool, Pinned, Got string
+}
+
+func (e *PinError) Error() string {
+	return fmt.Sprintf("the definition of the tool %s is not the one this session pinned (pinned %s, now %s); a changed definition needs a new session", e.Tool, e.Pinned, e.Got)
+}
+
+// Pins are the digests of tool definitions the session has pinned, by
+// tool name.
+func (s *Session) Pins() map[string]string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return maps.Clone(s.pins)
+}
+
+// CheckPins returns a *PinError for the first tool, by name, whose digest
+// in pins differs from the one the session pinned. A tool the session has
+// not pinned passes.
+func (s *Session) CheckPins(pins map[string]string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, name := range slices.Sorted(maps.Keys(pins)) {
+		if old, ok := s.pins[name]; ok && old != pins[name] {
+			return &PinError{Tool: name, Pinned: old, Got: pins[name]}
+		}
+	}
+	return nil
+}
+
+// pin records the pins the session does not hold yet, and returns the
+// entry it wrote, if any. A pin that differs from the session's is a
+// *PinError and nothing is written.
+func (s *Session) pin(pins map[string]string) (*Entry, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	fresh := map[string]string{}
+	for name, d := range pins {
+		if _, ok := s.pins[name]; !ok {
+			fresh[name] = d
+		}
+	}
+	if len(fresh) == 0 {
+		return nil, nil
+	}
+	e, err := s.appendLocked(Entry{Type: EntryPins, Pins: &PinsEntry{Pins: fresh}})
+	if err != nil {
+		return nil, err
+	}
+	return &e, nil
+}
+
 // record stamps the entry, appends it to the store, and applies it.
 func (s *Session) record(e Entry) (Entry, error) {
 	s.mu.Lock()
@@ -407,6 +462,18 @@ func (s *Session) validate(e Entry) error {
 		if e.Labels == nil {
 			return fmt.Errorf("labels entry has no payload")
 		}
+	case EntryPins:
+		if e.Pins == nil || len(e.Pins.Pins) == 0 {
+			return fmt.Errorf("pins entry has no pins")
+		}
+		for name, d := range e.Pins.Pins {
+			if name == "" || d == "" {
+				return fmt.Errorf("a pin has no tool name or no digest")
+			}
+			if old, ok := s.pins[name]; ok && old != d {
+				return &PinError{Tool: name, Pinned: old, Got: d}
+			}
+		}
 	default:
 		return fmt.Errorf("unknown entry type %q", e.Type)
 	}
@@ -428,6 +495,8 @@ func (s *Session) openCall(id string) (*callState, error) {
 func (s *Session) mutate(e Entry) {
 	s.entries = append(s.entries, e)
 	switch e.Type {
+	case EntryPins:
+		maps.Copy(s.pins, e.Pins.Pins)
 	case EntryLabels:
 		kind := e.Labels.Source
 		if kind == "" {

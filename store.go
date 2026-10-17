@@ -35,6 +35,7 @@ const (
 	EntryModelError  EntryType = "model_error"
 	EntryRunEnded    EntryType = "run_ended"
 	EntryLabels      EntryType = "labels"
+	EntryPins        EntryType = "pins"
 )
 
 // An Entry is one line of a session's log. Exactly one payload field is
@@ -52,6 +53,7 @@ type Entry struct {
 	ModelError  *ModelErrorEntry  `json:"model_error,omitempty"`
 	RunEnded    *Outcome          `json:"run_ended,omitempty"`
 	Labels      *LabelsEntry      `json:"labels,omitempty"`
+	Pins        *PinsEntry        `json:"pins,omitempty"`
 }
 
 // RunStartedEntry records that Run began.
@@ -65,6 +67,12 @@ type LabelsEntry struct {
 	Labels []string `json:"labels"`
 	// Source says where they came from: LabelSeed or LabelPrompt.
 	Source string `json:"source,omitempty"`
+}
+
+// PinsEntry records the digests of tool definitions the session has
+// pinned (see Agent.Pins), by tool name. A pin is never changed.
+type PinsEntry struct {
+	Pins map[string]string `json:"pins"`
 }
 
 // MessageEntry records a message joining the conversation. For an

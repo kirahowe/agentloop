@@ -738,3 +738,31 @@ func TestAPromptBringingAForbiddenLabelIsRefusedBeforeItIsRecorded(t *testing.T)
 		t.Fatalf("the session took the label: %s", b)
 	}
 }
+
+// A prompt on a session that pinned another definition of a tool is
+// refused before its labels are written.
+func TestAPromptOnARepinnedSessionWritesNothing(t *testing.T) {
+	dir := t.TempDir()
+	before := serveIn(t, dir, &agentloop.Agent{Model: fake.Script(fake.Text("hi")), Pins: map[string]string{"t": "aa"}}, Options{}, false)
+	id := before.newSession()
+	if _, err := before.prompt(id, "hi"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := before.client.CloseSession(before.ctx(), acp.CloseSessionRequest{SessionId: id}); err != nil {
+		t.Fatal(err)
+	}
+	was, _ := os.ReadFile(SessionPath(dir, id))
+	after := serveIn(t, dir, &agentloop.Agent{Model: noModel(t), Pins: map[string]string{"t": "bb"}}, Options{}, false)
+	if _, err := after.client.LoadSession(after.ctx(), acp.LoadSessionRequest{SessionId: id, Cwd: "/", McpServers: []acp.McpServer{}}); err != nil {
+		t.Fatal(err)
+	}
+	_, err := after.client.Prompt(after.ctx(), acp.PromptRequest{SessionId: id, Prompt: []acp.ContentBlock{
+		acp.TextBlock("read this"), acp.ResourceLinkBlock("page", "https://example.com/x")}})
+	var re *acp.RequestError
+	if !errors.As(err, &re) || !strings.Contains(re.Message, "pinned") {
+		t.Fatalf("prompt: %v", err)
+	}
+	if now, _ := os.ReadFile(SessionPath(dir, id)); string(now) != string(was) {
+		t.Fatalf("the refused prompt wrote to the session:\n%s", now[len(was):])
+	}
+}

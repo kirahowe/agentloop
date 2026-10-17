@@ -652,9 +652,11 @@ func (s *Server) start(ss *session, prompt string, labels []string) {
 		var err error
 		// A prompt whose content brings a label the session may not hold is
 		// refused before the label is written, so the session stays usable.
+		// So is one on a session that pinned another definition of a
+		// tool: Run would refuse it after the labels were written.
 		if bad := agentloop.Forbidden(labels, agent.Forbid); len(bad) > 0 {
 			out = &agentloop.Outcome{Reason: agentloop.ReasonForbidden, Forbidden: bad}
-		} else {
+		} else if err = ss.sess.CheckPins(agent.Pins); err == nil {
 			e, err = ss.sess.AddLabels(labels, agentloop.LabelPrompt)
 		}
 		if e != nil {

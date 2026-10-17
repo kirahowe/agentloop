@@ -38,6 +38,12 @@ type Agent struct {
 	Retry *RetryPolicy
 	// ToolTimeout bounds one tool call. Zero means no bound.
 	ToolTimeout time.Duration
+	// Pins are digests of tool definitions, by tool name, that the session
+	// must keep. A run records the ones the session lacks, and a run on a
+	// session that pinned a different digest for a tool does not start:
+	// Run returns a *PinError and records nothing. The digests are opaque
+	// here; the mcp package makes them.
+	Pins map[string]string
 	// Observe sees every entry as it is appended and every streamed delta.
 	// It runs on the loop's goroutine; keep it quick.
 	Observe func(Event)
@@ -179,6 +185,9 @@ func (a *Agent) Run(ctx context.Context, s *Session, prompt string) (*Outcome, e
 		return nil, err
 	}
 	defer s.end()
+	if err := s.CheckPins(a.Pins); err != nil {
+		return nil, err
+	}
 	// A session that holds a forbidden label, or would from the agent's
 	// own, is not run at all: nothing is recorded and the model is not
 	// called.
@@ -193,6 +202,11 @@ func (a *Agent) Run(ctx context.Context, s *Session, prompt string) (*Outcome, e
 		return nil, err
 	}
 	if e, err := s.AddLabels(a.Labels, LabelSeed); err != nil {
+		return nil, err
+	} else if e != nil && a.Observe != nil {
+		a.Observe(Event{Entry: e})
+	}
+	if e, err := s.pin(a.Pins); err != nil {
 		return nil, err
 	} else if e != nil && a.Observe != nil {
 		a.Observe(Event{Entry: e})
