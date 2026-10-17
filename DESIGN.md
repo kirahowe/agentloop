@@ -620,8 +620,12 @@ a cancel is reported by the loop as for any tool.
 `run` writes every session entry of the run to stdout as one JSON line,
 and then a last line `{"type": "outcome", ...}` with the outcome, the
 session path and the session's `labels` when the run ended (left out
-when an outcome that never opened the session cannot read it). Nothing else
-goes to stdout. For a held run the outcome's `held` lists each call as
+when an outcome that never opened the session cannot read it) and, when
+every model call of the run was priced, `cost_usd`: the run's cost in US
+dollars, each call at the price of the model that served it. `cost_usd` is
+left out, never 0, when the run made no call, a call's model has no price,
+or the provider is not Anthropic. It is on this line only, not in the
+`run_ended` entry. Nothing else goes to stdout. For a held run the outcome's `held` lists each call as
 `{"id", "name", "input", "input_sha256"}`. A run with a refused result
 lists it in `refused`, and one that did not start for holding a
 forbidden label ends with reason `forbidden` and the labels in

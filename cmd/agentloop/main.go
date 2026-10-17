@@ -17,6 +17,7 @@ import (
 	"syscall"
 
 	"github.com/kirahowe/agentloop"
+	"github.com/kirahowe/agentloop/anthropic"
 	"github.com/kirahowe/agentloop/internal/request"
 	"github.com/kirahowe/agentloop/internal/sessionfile"
 	"github.com/kirahowe/agentloop/internal/usage"
@@ -87,6 +88,21 @@ type outcomeLine struct {
 	// Labels are the session's labels when the run ended. Nil (left out)
 	// means they could not be read, which is not the same as none.
 	Labels *[]string `json:"labels,omitempty"`
+	// CostUSD is what the run's model calls cost, in US dollars. Left out
+	// (never 0) when the run made no call or any call's model is unpriced.
+	// It is on this line alone: the prices belong to the provider package,
+	// which agentloop.Outcome cannot import, and a price table that moves
+	// should not rewrite what an old run_ended entry says.
+	CostUSD *float64 `json:"cost_usd,omitempty"`
+}
+
+// priceFunc is the price lookup for a provider's models. Only Anthropic's
+// are priced; OpenAI's adapter reports no prices.
+func priceFunc(provider string) func(string) *agentloop.Prices {
+	if provider == "anthropic" {
+		return anthropic.PricesFor
+	}
+	return func(string) *agentloop.Prices { return nil }
 }
 
 func noKeyOutcome(err error) agentloop.Outcome {
@@ -151,9 +167,13 @@ func runCmd(ctx context.Context, req *request.Request, stdout, stderr io.Writer)
 	}
 
 	var writeErr error
+	var entries []agentloop.Entry
 	agent.Observe = func(ev agentloop.Event) {
-		if ev.Entry != nil && writeErr == nil {
-			writeErr = writeJSON(stdout, ev.Entry)
+		if ev.Entry != nil {
+			entries = append(entries, *ev.Entry)
+			if writeErr == nil {
+				writeErr = writeJSON(stdout, ev.Entry)
+			}
 		}
 	}
 	out, err := agent.Run(ctx, sess, req.Prompt)
@@ -163,7 +183,7 @@ func runCmd(ctx context.Context, req *request.Request, stdout, stderr io.Writer)
 	if writeErr != nil {
 		return writeErr
 	}
-	return writeJSON(stdout, outcomeLine{Type: "outcome", Outcome: *out, Session: req.Session, Labels: ptr(sess.Labels())})
+	return writeJSON(stdout, outcomeLine{Type: "outcome", Outcome: *out, Session: req.Session, Labels: ptr(sess.Labels()), CostUSD: runCost(callsOf(entries), priceFunc(req.Provider))})
 }
 
 // resolve records a person's decisions on held calls, from the request's

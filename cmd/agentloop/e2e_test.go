@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"math"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -103,8 +104,10 @@ func sse(w http.ResponseWriter, evs ...[2]string) {
 
 func ev(name, data string) [2]string { return [2]string{name, data} }
 
-func startEv() [2]string {
-	return ev("message_start", `{"type":"message_start","message":{"id":"msg_1","type":"message","role":"assistant","model":"claude-test","content":[],"stop_reason":null,"stop_sequence":null,"usage":{"input_tokens":10,"output_tokens":1}}}`)
+func startEv() [2]string { return startEvFor("claude-test") }
+
+func startEvFor(model string) [2]string {
+	return ev("message_start", `{"type":"message_start","message":{"id":"msg_1","type":"message","role":"assistant","model":"`+model+`","content":[],"stop_reason":null,"stop_sequence":null,"usage":{"input_tokens":10,"output_tokens":1}}}`)
 }
 
 func endEvs(reason string) [][2]string {
@@ -115,10 +118,16 @@ func endEvs(reason string) [][2]string {
 }
 
 func textReply(text string) func(http.ResponseWriter) {
+	return textReplyFrom("claude-test", text)
+}
+
+// textReplyFrom is a text reply served by the named model, with the usage
+// every fake reply reports: 10 input tokens and 7 output tokens.
+func textReplyFrom(model, text string) func(http.ResponseWriter) {
 	return func(w http.ResponseWriter) {
 		b, _ := json.Marshal(text)
 		evs := [][2]string{
-			startEv(),
+			startEvFor(model),
 			ev("content_block_start", `{"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}`),
 			ev("content_block_delta", `{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":`+string(b)+`}}`),
 			ev("content_block_stop", `{"type":"content_block_stop","index":0}`),
@@ -436,4 +445,43 @@ func TestVersion(t *testing.T) {
 	if err != nil || !strings.HasPrefix(string(out), "agentloop ") {
 		t.Errorf("%q %v", out, err)
 	}
+}
+
+func TestOutcomeCostUSD(t *testing.T) {
+	// claude-haiku-4-5 costs $1 per million input tokens and $5 per
+	// million output tokens; the fake reply used 10 and 7.
+	const want = (10*1.0 + 7*5.0) / 1e6
+	t.Run("priced model, dated snapshot id", func(t *testing.T) {
+		api := newFakeAPI(t, textReplyFrom("claude-haiku-4-5-20251001", "ok"))
+		f := newFixture(t, api, probeScript)
+		res := f.run()
+		cost, ok := res.outcome(t)["cost_usd"].(float64)
+		if !ok || math.Abs(cost-want) > 1e-12 {
+			t.Errorf("cost_usd = %v, want %v", res.outcome(t)["cost_usd"], want)
+		}
+		for _, l := range res.lines {
+			if l["type"] == "run_ended" {
+				if _, has := l["cost_usd"]; has {
+					t.Errorf("run_ended entry carries cost_usd: %v", l)
+				}
+			}
+		}
+	})
+	t.Run("unpriced model", func(t *testing.T) {
+		api := newFakeAPI(t, textReply("ok"))
+		res := newFixture(t, api, probeScript).run()
+		if c, has := res.outcome(t)["cost_usd"]; has {
+			t.Errorf("cost_usd = %v for an unpriced model", c)
+		}
+	})
+	t.Run("no request made", func(t *testing.T) {
+		api := newFakeAPI(t, textReply("ok"))
+		f := newFixture(t, api, probeScript)
+		f.req["api_key_command"] = []string{"false"}
+		res := f.run()
+		out := res.outcome(t)
+		if _, has := out["cost_usd"]; has || out["reason"] != "model_error" {
+			t.Errorf("outcome = %v", out)
+		}
+	})
 }

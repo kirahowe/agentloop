@@ -77,7 +77,8 @@ The packages:
 `agentloop run request.json` runs one agent to an outcome. The request
 names the provider and model, the system prompt and prompt, the session
 file, the tools, and the command each tool call runs. It prints every
-session entry as a JSON line and then an outcome line. `agentloop acp
+session entry as a JSON line and then an outcome line, which also gives
+the run's cost in US dollars as `cost_usd` when the model is priced. `agentloop acp
 request.json` serves the same agent to an [Agent Client Protocol](https://agentclientprotocol.com)
 client over stdin and stdout, where a client can also list, load, resume
 and close the sessions kept in the request's `session_dir` (with
