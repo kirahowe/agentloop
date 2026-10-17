@@ -55,6 +55,7 @@ type Request struct {
 	Limits             agentloop.Limits       `json:"limits"`
 	ToolKinds          map[string]string      `json:"tool_kinds"`
 	Title              string                 `json:"title"`
+	NewSessionsOnly    *bool                  `json:"new_sessions_only"`
 	Policy             *Policy                `json:"policy"`
 	ToolProtocol       string                 `json:"tool_protocol"`
 	Resolve            []agentloop.Resolution `json:"resolve"`
@@ -275,6 +276,7 @@ func (r *Request) validateMode(mode Mode) error {
 		}
 		for _, f := range []field{
 			{"session_dir", r.SessionDir != ""}, {"tool_kinds", r.ToolKinds != nil}, {"title", r.Title != ""},
+			{"new_sessions_only", r.NewSessionsOnly != nil},
 		} {
 			if f.set {
 				return usage.Errorf("%s is only for agentloop acp", f.name)
@@ -311,6 +313,9 @@ func (r *Request) validateMode(mode Mode) error {
 		if f.set {
 			return usage.Errorf("%s is not used by agentloop acp", f.name)
 		}
+	}
+	if r.NewSessionsOnly != nil && !*r.NewSessionsOnly {
+		return usage.Errorf(`"new_sessions_only": false is refused; leave the field out to allow reopening sessions`)
 	}
 	tools := map[string]bool{}
 	for _, t := range r.Tools {

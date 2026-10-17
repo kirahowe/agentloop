@@ -833,3 +833,45 @@ func TestPropertyIDsAreSafe(t *testing.T) {
 		}
 	})
 }
+
+// A server that opens only new sessions refuses to load, resume or list
+// any, even one it made on this connection or one left by an earlier
+// process, and the log is not touched. A new session works as ever.
+func TestNewSessionsOnlyRefusesReopening(t *testing.T) {
+	dir := t.TempDir()
+	old := serveIn(t, dir, textAgent("Before."), Options{}, false)
+	before := old.newSession()
+	if _, err := old.prompt(before, "hi"); err != nil {
+		t.Fatal(err)
+	}
+	if err := old.close(before); err != nil {
+		t.Fatal(err)
+	}
+	path := SessionPath(dir, before)
+	logBefore, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	h := serveConfigured(t, dir, textAgent("Fresh."), Options{}, false, true)
+	id := h.newSession()
+	if r, err := h.prompt(id, "hello"); err != nil || r.StopReason != acp.StopReasonEndTurn {
+		t.Fatalf("prompt: %+v %v", r, err)
+	}
+	for _, sid := range []acp.SessionId{before, id} {
+		for name, err := range map[string]error{"load": h.load(sid), "resume": h.resume(sid)} {
+			var re *acp.RequestError
+			if !errors.As(err, &re) || re.Code != -32601 {
+				t.Fatalf("%s %s: %v", name, sid, err)
+			}
+		}
+	}
+	_, err = h.client.ListSessions(h.ctx(), acp.ListSessionsRequest{})
+	var re *acp.RequestError
+	if !errors.As(err, &re) || re.Code != -32601 {
+		t.Fatalf("list: %v", err)
+	}
+	if logAfter, _ := os.ReadFile(path); string(logAfter) != string(logBefore) {
+		t.Fatal("the old session's log changed")
+	}
+}

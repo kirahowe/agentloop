@@ -15,13 +15,15 @@ import (
 // speak it closes the connection. A non-empty title is the agent's
 // display name in agentInfo. Only what the server implements is
 // advertised: text, resource links and embedded text in prompts, and
-// loading, resuming, listing and closing sessions.
-func InitializeResponse(version, title string) acp.InitializeResponse {
+// loading, resuming, listing and closing sessions. With newOnly the
+// server refuses to reopen a session, so loading, resuming and listing
+// are left out and only closing is advertised.
+func InitializeResponse(version, title string, newOnly bool) acp.InitializeResponse {
 	info := &acp.Implementation{Name: "agentloop", Version: version}
 	if title != "" {
 		info.Title = &title
 	}
-	return acp.InitializeResponse{
+	r := acp.InitializeResponse{
 		ProtocolVersion: acp.ProtocolVersion(acp.WireProtocolVersion),
 		AgentInfo:       info,
 		AuthMethods:     []acp.AuthMethod{},
@@ -35,6 +37,20 @@ func InitializeResponse(version, title string) acp.InitializeResponse {
 			},
 		},
 	}
+	if newOnly {
+		c := &r.AgentCapabilities
+		c.LoadSession = false
+		c.SessionCapabilities.List = nil
+		c.SessionCapabilities.Resume = nil
+	}
+	return r
+}
+
+// errNewOnly answers session/load, session/resume and session/list when
+// the server opens only new sessions. They are not advertised then, so
+// the method is reported as not found, as for any other.
+func errNewOnly() *acp.RequestError {
+	return &acp.RequestError{Code: -32601, Message: "Method not found"}
 }
 
 // ClientNotices says whether the client can show session notices, which

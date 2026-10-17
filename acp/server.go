@@ -72,6 +72,9 @@ type Config struct {
 	// Unrestricted says the request has no policy. A session a policy has
 	// marked (see Session.Policed) is then refused on load and resume.
 	Unrestricted bool
+	// NewSessionsOnly refuses session/load, session/resume and
+	// session/list, so every session on a connection starts empty.
+	NewSessionsOnly bool
 }
 
 // session is one open session: the log, its lock, where its turn is, and
@@ -201,7 +204,7 @@ func (s *Server) Initialize(_ context.Context, req acp.InitializeRequest) (acp.I
 	s.mu.Lock()
 	s.notices = ClientNotices(req)
 	s.mu.Unlock()
-	return InitializeResponse(s.cfg.Version, s.cfg.Title), nil
+	return InitializeResponse(s.cfg.Version, s.cfg.Title, s.cfg.NewSessionsOnly), nil
 }
 
 // NewSession opens a new session log under its lock. The file is made at
@@ -293,6 +296,9 @@ func (s *Server) register(ss *session) { s.sessions[ss.id] = ss }
 // LoadSession opens a session from its log and sends its history, all of
 // it before the response.
 func (s *Server) LoadSession(ctx context.Context, req acp.LoadSessionRequest) (acp.LoadSessionResponse, error) {
+	if s.cfg.NewSessionsOnly {
+		return acp.LoadSessionResponse{}, errNewOnly()
+	}
 	s.note(len(req.McpServers))
 	info := s.model()
 	if err := s.reopen(ctx, req.SessionId, true, info); err != nil {
@@ -303,6 +309,9 @@ func (s *Server) LoadSession(ctx context.Context, req acp.LoadSessionRequest) (a
 
 // ResumeSession opens a session from its log without sending its history.
 func (s *Server) ResumeSession(ctx context.Context, req acp.ResumeSessionRequest) (acp.ResumeSessionResponse, error) {
+	if s.cfg.NewSessionsOnly {
+		return acp.ResumeSessionResponse{}, errNewOnly()
+	}
 	s.note(len(req.McpServers))
 	info := s.model()
 	if err := s.reopen(ctx, req.SessionId, false, info); err != nil {
@@ -442,6 +451,9 @@ func (s *Server) CloseSession(ctx context.Context, req acp.CloseSessionRequest) 
 // ListSessions lists the session logs in session_dir with the time of
 // each one's last entry. A log that cannot be read is listed without one.
 func (s *Server) ListSessions(_ context.Context, req acp.ListSessionsRequest) (acp.ListSessionsResponse, error) {
+	if s.cfg.NewSessionsOnly {
+		return acp.ListSessionsResponse{}, errNewOnly()
+	}
 	dirents, err := os.ReadDir(s.cfg.SessionDir)
 	if err != nil && !errors.Is(err, fs.ErrNotExist) {
 		return acp.ListSessionsResponse{}, internal(err.Error(), nil)

@@ -43,14 +43,15 @@ func acpCmd(req *request.Request, stdin io.Reader, stdout, stderr io.Writer) err
 		kinds[name] = acp.ToolKind(kind)
 	}
 	srv := acpagent.NewServer(acpagent.Config{
-		Version:      version,
-		Title:        req.Title,
-		SessionDir:   req.SessionDir,
-		Cwd:          acpagent.SessionCwd(req.ToolDir, wd),
-		Agent:        req.Agent(key),
-		Options:      acpagent.Options{Kinds: kinds},
-		Log:          stderr,
-		Unrestricted: !req.Restricted(),
+		Version:         version,
+		Title:           req.Title,
+		SessionDir:      req.SessionDir,
+		Cwd:             acpagent.SessionCwd(req.ToolDir, wd),
+		Agent:           req.Agent(key),
+		Options:         acpagent.Options{Kinds: kinds},
+		Log:             stderr,
+		Unrestricted:    !req.Restricted(),
+		NewSessionsOnly: req.NewSessionsOnly != nil,
 	})
 	conn, err := srv.Connect(stdout, stdin)
 	if err != nil {

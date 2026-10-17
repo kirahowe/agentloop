@@ -43,7 +43,7 @@ func TestPropertySessionIDs(t *testing.T) {
 // loading, resuming, listing and closing sessions, but not deleting them,
 // modes, images, audio or MCP. The answer validates against the schema.
 func TestInitializeResponse(t *testing.T) {
-	r := InitializeResponse("1.2.3", "")
+	r := InitializeResponse("1.2.3", "", false)
 	if err := validate("InitializeResponse", r); err != nil {
 		t.Fatal(err)
 	}
@@ -57,6 +57,20 @@ func TestInitializeResponse(t *testing.T) {
 	}
 	if err := validate("NewSessionResponse", acp.NewSessionResponse{SessionId: NewSessionID([16]byte{})}); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// With newOnly, initialize advertises closing sessions and nothing that
+// reopens one: no load, resume or list.
+func TestInitializeNewSessionsOnly(t *testing.T) {
+	r := InitializeResponse("1.2.3", "", true)
+	if err := validate("InitializeResponse", r); err != nil {
+		t.Fatal(err)
+	}
+	c := r.AgentCapabilities
+	if c.LoadSession || c.SessionCapabilities.List != nil || c.SessionCapabilities.Resume != nil ||
+		c.SessionCapabilities.Close == nil || !c.PromptCapabilities.EmbeddedContext {
+		t.Fatalf("%+v", r)
 	}
 }
 
@@ -107,14 +121,14 @@ func TestRequestToolKindsAreACPs(t *testing.T) {
 // TestInitializeTitle: a title becomes agentInfo.title, and no title
 // leaves the field out of the JSON.
 func TestInitializeTitle(t *testing.T) {
-	r := InitializeResponse("1.2.3", "relay · hub")
+	r := InitializeResponse("1.2.3", "relay · hub", false)
 	if err := validate("InitializeResponse", r); err != nil {
 		t.Fatal(err)
 	}
 	if r.AgentInfo.Title == nil || *r.AgentInfo.Title != "relay · hub" {
 		t.Fatalf("%+v", r.AgentInfo)
 	}
-	b, err := json.Marshal(InitializeResponse("1.2.3", ""))
+	b, err := json.Marshal(InitializeResponse("1.2.3", "", false))
 	if err != nil {
 		t.Fatal(err)
 	}

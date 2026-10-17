@@ -490,10 +490,17 @@ run, so the outcome line is still written.
 `<session_dir>/<id>.jsonl`. It refuses `session`, `prompt` and
 `timeout_seconds`: the client opens sessions and sends prompts, and a
 deadline would end a turn as cancelled, which ACP keeps for the client.
-Two fields are for `acp` alone, and `run` refuses them: `tool_kinds`
+Three fields are for `acp` alone, and `run` refuses them: `tool_kinds`
 (`{"tool name": "read"}`, using ACP's tool kinds, so a client can show
-each call) and `title` (the agent's display name in `agentInfo.title`,
-which a client can show; omitted when empty). The client's `cwd` is
+each call), `title` (the agent's display name in `agentInfo.title`,
+which a client can show; omitted when empty) and `new_sessions_only`.
+With `"new_sessions_only": true` every session starts empty: initialize
+advertises closing sessions but not loading, resuming or listing them,
+and `session/load`, `session/resume` and `session/list` are answered
+`-32601` (method not found) without reading the session directory. A
+conversation then never takes on the history or the labels of an
+earlier one. `false` is refused; leave the field out to allow
+reopening. The client's `cwd` is
 ignored, and so are its MCP servers, with a line on stderr: tools come
 only from the request.
 

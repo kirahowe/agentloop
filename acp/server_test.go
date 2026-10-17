@@ -159,6 +159,12 @@ func serve(t testing.TB, agent *agentloop.Agent, opts Options, notices bool) *ha
 // not a *testing.T. Everything is shut down at the test's cleanup.
 func serveIn(t tb, dir string, agent *agentloop.Agent, opts Options, notices bool) *harness {
 	t.Helper()
+	return serveConfigured(t, dir, agent, opts, notices, false)
+}
+
+// serveConfigured is serveIn with the server's NewSessionsOnly given.
+func serveConfigured(t tb, dir string, agent *agentloop.Agent, opts Options, notices, newOnly bool) *harness {
+	t.Helper()
 	h := &harness{t: t, dir: dir, log: &bytes.Buffer{}, logMu: &sync.Mutex{}, cl: &testClient{}}
 	if opts.ContextWindow > 0 {
 		// The window comes from the model's description, never from the
@@ -168,7 +174,7 @@ func serveIn(t tb, dir string, agent *agentloop.Agent, opts Options, notices boo
 		agent = &a
 	}
 	h.srv = NewServer(Config{Version: "test", SessionDir: h.dir, Agent: agent, Options: opts,
-		Log: lockedWriter{h.logMu, h.log}})
+		Log: lockedWriter{h.logMu, h.log}, NewSessionsOnly: newOnly})
 	aR, aW := io.Pipe() // client to agent
 	cR, cW := io.Pipe() // agent to client
 	h.toAgent = &wire{dst: aW}
@@ -195,7 +201,7 @@ func serveIn(t tb, dir string, agent *agentloop.Agent, opts Options, notices boo
 	if err != nil {
 		t.Fatal(err)
 	}
-	if resp.ProtocolVersion != 1 || !resp.AgentCapabilities.LoadSession {
+	if resp.ProtocolVersion != 1 || resp.AgentCapabilities.LoadSession == newOnly {
 		t.Fatalf("initialize: %+v", resp)
 	}
 	return h

@@ -233,6 +233,9 @@ func TestModes(t *testing.T) {
 		{"run refuses session_dir", Run, run(func(m map[string]any) { m["session_dir"] = "/tmp" }), "session_dir is only for agentloop acp"},
 		{"run refuses tool_kinds", Run, run(func(m map[string]any) { m["tool_kinds"] = map[string]string{} }), "tool_kinds is only"},
 		{"run refuses title", Run, run(func(m map[string]any) { m["title"] = "x" }), "title is only"},
+		{"run refuses new_sessions_only", Run, run(func(m map[string]any) { m["new_sessions_only"] = true }), "new_sessions_only is only"},
+		{"acp with new_sessions_only", ACP, acp(func(m map[string]any) { m["new_sessions_only"] = true }), ""},
+		{"acp refuses new_sessions_only false", ACP, acp(func(m map[string]any) { m["new_sessions_only"] = false }), "is refused"},
 		{"run refuses context_window", Run, run(func(m map[string]any) { m["context_window"] = 1 }), `unknown field "context_window"`},
 	}
 	dir := t.TempDir()
