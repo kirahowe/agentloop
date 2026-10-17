@@ -46,6 +46,7 @@ leaves a record that can be resumed without repeating an action.
 | `agentloop/anthropic` | The `Model` for Anthropic's Messages API |
 | `agentloop/openai` | The `Model` for OpenAI's Responses API |
 | `agentloop/trifecta` | The trifecta rule, pure, and a `Policy` built on it |
+| `agentloop/otel` | A pure converter from a session log to OpenTelemetry GenAI traces, as OTLP/JSON |
 | `agentloop/command` | A `Tool` that runs a program, with the plain or the envelope protocol |
 | `agentloop/mcp` | The tools of one MCP server over stdio, as `Tool` values |
 | `agentloop/fake` | A scripted `Model` for tests |
@@ -471,6 +472,38 @@ server exits, even if a process it left behind holds its stdout. The
 call is never retried. Every later call is not sent, and the model is
 told the tool was not run because its server must be reconnected, until
 the caller calls `Reconnect`. Nothing reconnects on its own.
+
+## Telemetry
+
+`agentloop/otel` turns a session's entries into OTLP/JSON traces with
+`otel.Traces(entries, otel.Options{...})`. It is a pure function: no files,
+no network, no OpenTelemetry SDK, and the same log gives the same bytes.
+The log is not changed, so any old session can be exported.
+
+It follows the OpenTelemetry GenAI semantic conventions at commit
+`f3c6d0c9bb66ebd474668a3a0be25c61226f02c2` of
+`open-telemetry/semantic-conventions-genai`. Every `gen_ai.*` attribute in
+them is still at stability "development", so the commit is pinned in the
+package documentation.
+
+Each run is one trace. The root is `invoke_agent {agent}`, from
+`run_started` to `run_ended` (a run with no end is closed at its last
+entry, as an error). Under it sit `chat {model}` spans, one per assistant
+message and one per failed model call, and `execute_tool {tool}` spans, one
+per call, from its first decision to its `tool_result`. Holds, denials and
+resolutions are `agentloop.policy.decision` events on the tool span.
+`gen_ai.usage.input_tokens` counts cached tokens, which the log's
+`InputTokens` does not, and the cache counts are added as their own
+attributes. Labels go under `agentloop.labels`, never under `gen_ai`.
+
+The log holds only append times, so a chat span starts at the time of the
+entry before it. That includes the loop's own overhead.
+
+Prompts, messages, tool inputs and results, policy reasons and error
+messages are left out unless `Options.IncludeContent` is set. The caller
+supplies the conversation id, the agent name and the provider, which the
+log does not carry. Ids come from a seed, the run's index and the entry's
+`seq`.
 
 ## The command
 

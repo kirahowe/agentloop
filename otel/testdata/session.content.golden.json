@@ -1,0 +1,822 @@
+{
+  "resourceSpans": [
+    {
+      "resource": {
+        "attributes": [
+          {
+            "key": "service.name",
+            "value": {
+              "stringValue": "agentloop-test"
+            }
+          }
+        ]
+      },
+      "scopeSpans": [
+        {
+          "scope": {
+            "name": "github.com/kirahowe/agentloop/otel"
+          },
+          "spans": [
+            {
+              "traceId": "0aeb311c8e25dfec29eb4f615989f475",
+              "spanId": "f35af1db991c31a9",
+              "name": "invoke_agent mailer",
+              "kind": 1,
+              "startTimeUnixNano": "1792227601250000000",
+              "endTimeUnixNano": "1792227615000000000",
+              "attributes": [
+                {
+                  "key": "gen_ai.operation.name",
+                  "value": {
+                    "stringValue": "invoke_agent"
+                  }
+                },
+                {
+                  "key": "gen_ai.provider.name",
+                  "value": {
+                    "stringValue": "fake"
+                  }
+                },
+                {
+                  "key": "gen_ai.agent.name",
+                  "value": {
+                    "stringValue": "mailer"
+                  }
+                },
+                {
+                  "key": "gen_ai.conversation.id",
+                  "value": {
+                    "stringValue": "session-0001"
+                  }
+                },
+                {
+                  "key": "agentloop.run.reason",
+                  "value": {
+                    "stringValue": "held"
+                  }
+                },
+                {
+                  "key": "agentloop.run.turns",
+                  "value": {
+                    "intValue": "1"
+                  }
+                },
+                {
+                  "key": "agentloop.held_calls",
+                  "value": {
+                    "arrayValue": {
+                      "values": [
+                        {
+                          "stringValue": "c2"
+                        }
+                      ]
+                    }
+                  }
+                },
+                {
+                  "key": "gen_ai.output.messages",
+                  "value": {
+                    "stringValue": "[{\"role\":\"assistant\",\"parts\":[{\"type\":\"text\",\"content\":\"Looking at your notes.\"}]}]"
+                  }
+                },
+                {
+                  "key": "gen_ai.usage.input_tokens",
+                  "value": {
+                    "intValue": "420"
+                  }
+                },
+                {
+                  "key": "gen_ai.usage.output_tokens",
+                  "value": {
+                    "intValue": "40"
+                  }
+                },
+                {
+                  "key": "gen_ai.usage.cache_read.input_tokens",
+                  "value": {
+                    "intValue": "300"
+                  }
+                },
+                {
+                  "key": "gen_ai.usage.cache_write.input_tokens",
+                  "value": {
+                    "intValue": "100"
+                  }
+                },
+                {
+                  "key": "agentloop.labels",
+                  "value": {
+                    "arrayValue": {
+                      "values": [
+                        {
+                          "stringValue": "private"
+                        }
+                      ]
+                    }
+                  }
+                }
+              ],
+              "events": [
+                {
+                  "timeUnixNano": "1792227602500000000",
+                  "name": "agentloop.labels",
+                  "attributes": [
+                    {
+                      "key": "agentloop.labels",
+                      "value": {
+                        "arrayValue": {
+                          "values": [
+                            {
+                              "stringValue": "private"
+                            }
+                          ]
+                        }
+                      }
+                    },
+                    {
+                      "key": "agentloop.labels.source",
+                      "value": {
+                        "stringValue": "seed"
+                      }
+                    }
+                  ]
+                }
+              ]
+            },
+            {
+              "traceId": "0aeb311c8e25dfec29eb4f615989f475",
+              "spanId": "7fc23b5ac5ab30f9",
+              "parentSpanId": "f35af1db991c31a9",
+              "name": "chat",
+              "kind": 3,
+              "startTimeUnixNano": "1792227603750000000",
+              "endTimeUnixNano": "1792227605000000000",
+              "attributes": [
+                {
+                  "key": "gen_ai.operation.name",
+                  "value": {
+                    "stringValue": "chat"
+                  }
+                },
+                {
+                  "key": "gen_ai.conversation.id",
+                  "value": {
+                    "stringValue": "session-0001"
+                  }
+                },
+                {
+                  "key": "error.type",
+                  "value": {
+                    "stringValue": "overloaded"
+                  }
+                },
+                {
+                  "key": "agentloop.retry",
+                  "value": {
+                    "boolValue": true
+                  }
+                },
+                {
+                  "key": "agentloop.retry.wait_ms",
+                  "value": {
+                    "intValue": "1"
+                  }
+                }
+              ],
+              "events": [
+                {
+                  "timeUnixNano": "1792227605000000000",
+                  "name": "gen_ai.client.operation.exception",
+                  "attributes": [
+                    {
+                      "key": "exception.type",
+                      "value": {
+                        "stringValue": "overloaded"
+                      }
+                    },
+                    {
+                      "key": "exception.message",
+                      "value": {
+                        "stringValue": "overloaded, try later"
+                      }
+                    }
+                  ]
+                }
+              ],
+              "status": {
+                "message": "overloaded",
+                "code": 2
+              }
+            },
+            {
+              "traceId": "0aeb311c8e25dfec29eb4f615989f475",
+              "spanId": "32229b265744100d",
+              "parentSpanId": "f35af1db991c31a9",
+              "name": "chat fake-model",
+              "kind": 3,
+              "startTimeUnixNano": "1792227605000000000",
+              "endTimeUnixNano": "1792227606250000000",
+              "attributes": [
+                {
+                  "key": "gen_ai.operation.name",
+                  "value": {
+                    "stringValue": "chat"
+                  }
+                },
+                {
+                  "key": "gen_ai.provider.name",
+                  "value": {
+                    "stringValue": "fake"
+                  }
+                },
+                {
+                  "key": "gen_ai.request.model",
+                  "value": {
+                    "stringValue": "fake-model"
+                  }
+                },
+                {
+                  "key": "gen_ai.conversation.id",
+                  "value": {
+                    "stringValue": "session-0001"
+                  }
+                },
+                {
+                  "key": "gen_ai.response.model",
+                  "value": {
+                    "stringValue": "fake-model"
+                  }
+                },
+                {
+                  "key": "gen_ai.response.finish_reasons",
+                  "value": {
+                    "arrayValue": {
+                      "values": [
+                        {
+                          "stringValue": "tool_call"
+                        }
+                      ]
+                    }
+                  }
+                },
+                {
+                  "key": "agentloop.stop",
+                  "value": {
+                    "stringValue": "tool_use"
+                  }
+                },
+                {
+                  "key": "gen_ai.usage.input_tokens",
+                  "value": {
+                    "intValue": "420"
+                  }
+                },
+                {
+                  "key": "gen_ai.usage.output_tokens",
+                  "value": {
+                    "intValue": "40"
+                  }
+                },
+                {
+                  "key": "gen_ai.usage.cache_read.input_tokens",
+                  "value": {
+                    "intValue": "300"
+                  }
+                },
+                {
+                  "key": "gen_ai.usage.cache_write.input_tokens",
+                  "value": {
+                    "intValue": "100"
+                  }
+                },
+                {
+                  "key": "gen_ai.input.messages",
+                  "value": {
+                    "stringValue": "[{\"role\":\"user\",\"parts\":[{\"type\":\"text\",\"content\":\"Mail the boss the Q3 numbers.\"}]}]"
+                  }
+                },
+                {
+                  "key": "gen_ai.output.messages",
+                  "value": {
+                    "stringValue": "[{\"role\":\"assistant\",\"parts\":[{\"type\":\"text\",\"content\":\"Looking at your notes.\"},{\"type\":\"tool_call\",\"id\":\"c1\",\"name\":\"read_note\",\"arguments\":{\"title\":\"q3\"}},{\"type\":\"tool_call\",\"id\":\"c2\",\"name\":\"send_mail\",\"arguments\":{\"to\":\"boss@example.com\",\"body\":\"numbers\"}},{\"type\":\"tool_call\",\"id\":\"c3\",\"name\":\"delete_all\",\"arguments\":{}}]}]"
+                  }
+                }
+              ]
+            },
+            {
+              "traceId": "0aeb311c8e25dfec29eb4f615989f475",
+              "spanId": "e6867e36274de831",
+              "parentSpanId": "f35af1db991c31a9",
+              "name": "execute_tool read_note",
+              "kind": 1,
+              "startTimeUnixNano": "1792227607500000000",
+              "endTimeUnixNano": "1792227610000000000",
+              "attributes": [
+                {
+                  "key": "gen_ai.operation.name",
+                  "value": {
+                    "stringValue": "execute_tool"
+                  }
+                },
+                {
+                  "key": "gen_ai.tool.name",
+                  "value": {
+                    "stringValue": "read_note"
+                  }
+                },
+                {
+                  "key": "gen_ai.tool.call.id",
+                  "value": {
+                    "stringValue": "c1"
+                  }
+                },
+                {
+                  "key": "gen_ai.tool.type",
+                  "value": {
+                    "stringValue": "function"
+                  }
+                },
+                {
+                  "key": "gen_ai.agent.name",
+                  "value": {
+                    "stringValue": "mailer"
+                  }
+                },
+                {
+                  "key": "gen_ai.conversation.id",
+                  "value": {
+                    "stringValue": "session-0001"
+                  }
+                },
+                {
+                  "key": "agentloop.call.state",
+                  "value": {
+                    "stringValue": "finished"
+                  }
+                },
+                {
+                  "key": "agentloop.policy.verdict",
+                  "value": {
+                    "stringValue": "allow"
+                  }
+                },
+                {
+                  "key": "agentloop.labels",
+                  "value": {
+                    "arrayValue": {
+                      "values": [
+                        {
+                          "stringValue": "private"
+                        }
+                      ]
+                    }
+                  }
+                },
+                {
+                  "key": "gen_ai.tool.call.arguments",
+                  "value": {
+                    "stringValue": "{\"title\":\"q3\"}"
+                  }
+                },
+                {
+                  "key": "gen_ai.tool.call.result",
+                  "value": {
+                    "stringValue": "Note: the quarterly numbers are in."
+                  }
+                },
+                {
+                  "key": "agentloop.tool.log",
+                  "value": {
+                    "stringValue": "read 1 file"
+                  }
+                }
+              ],
+              "events": [
+                {
+                  "timeUnixNano": "1792227607500000000",
+                  "name": "agentloop.policy.decision",
+                  "attributes": [
+                    {
+                      "key": "agentloop.policy.verdict",
+                      "value": {
+                        "stringValue": "allow"
+                      }
+                    }
+                  ]
+                },
+                {
+                  "timeUnixNano": "1792227608750000000",
+                  "name": "agentloop.call.started"
+                }
+              ]
+            },
+            {
+              "traceId": "9d1f389621a2e17394bcfef1d8cd5a9f",
+              "spanId": "9fa7f18e47ce16fb",
+              "parentSpanId": "cd95316b41fc9bf0",
+              "name": "execute_tool send_mail",
+              "kind": 1,
+              "startTimeUnixNano": "1792227617500000000",
+              "endTimeUnixNano": "1792227620000000000",
+              "attributes": [
+                {
+                  "key": "gen_ai.operation.name",
+                  "value": {
+                    "stringValue": "execute_tool"
+                  }
+                },
+                {
+                  "key": "gen_ai.tool.name",
+                  "value": {
+                    "stringValue": "send_mail"
+                  }
+                },
+                {
+                  "key": "gen_ai.tool.call.id",
+                  "value": {
+                    "stringValue": "c2"
+                  }
+                },
+                {
+                  "key": "gen_ai.tool.type",
+                  "value": {
+                    "stringValue": "function"
+                  }
+                },
+                {
+                  "key": "gen_ai.agent.name",
+                  "value": {
+                    "stringValue": "mailer"
+                  }
+                },
+                {
+                  "key": "gen_ai.conversation.id",
+                  "value": {
+                    "stringValue": "session-0001"
+                  }
+                },
+                {
+                  "key": "agentloop.call.state",
+                  "value": {
+                    "stringValue": "finished"
+                  }
+                },
+                {
+                  "key": "agentloop.policy.verdict",
+                  "value": {
+                    "stringValue": "allow"
+                  }
+                },
+                {
+                  "key": "gen_ai.tool.call.arguments",
+                  "value": {
+                    "stringValue": "{\"to\":\"boss@example.com\",\"body\":\"numbers\"}"
+                  }
+                },
+                {
+                  "key": "gen_ai.tool.call.result",
+                  "value": {
+                    "stringValue": "sent"
+                  }
+                }
+              ],
+              "events": [
+                {
+                  "timeUnixNano": "1792227611250000000",
+                  "name": "agentloop.policy.decision",
+                  "attributes": [
+                    {
+                      "key": "agentloop.policy.verdict",
+                      "value": {
+                        "stringValue": "hold"
+                      }
+                    },
+                    {
+                      "key": "agentloop.policy.reason",
+                      "value": {
+                        "stringValue": "Mail leaves the building."
+                      }
+                    },
+                    {
+                      "key": "agentloop.policy.input_sha256",
+                      "value": {
+                        "stringValue": "b783e2db5a39469bb58d876f842d23ed324858b1ece12983536fe8bec8d1f0ea"
+                      }
+                    }
+                  ]
+                },
+                {
+                  "timeUnixNano": "1792227616250000000",
+                  "name": "agentloop.policy.decision",
+                  "attributes": [
+                    {
+                      "key": "agentloop.policy.verdict",
+                      "value": {
+                        "stringValue": "allow"
+                      }
+                    },
+                    {
+                      "key": "agentloop.policy.resolved",
+                      "value": {
+                        "boolValue": true
+                      }
+                    },
+                    {
+                      "key": "agentloop.labels",
+                      "value": {
+                        "arrayValue": {
+                          "values": [
+                            {
+                              "stringValue": "private"
+                            }
+                          ]
+                        }
+                      }
+                    }
+                  ]
+                },
+                {
+                  "timeUnixNano": "1792227618750000000",
+                  "name": "agentloop.call.started"
+                }
+              ]
+            },
+            {
+              "traceId": "0aeb311c8e25dfec29eb4f615989f475",
+              "spanId": "332d67c11c202851",
+              "parentSpanId": "f35af1db991c31a9",
+              "name": "execute_tool delete_all",
+              "kind": 1,
+              "startTimeUnixNano": "1792227612500000000",
+              "endTimeUnixNano": "1792227613750000000",
+              "attributes": [
+                {
+                  "key": "gen_ai.operation.name",
+                  "value": {
+                    "stringValue": "execute_tool"
+                  }
+                },
+                {
+                  "key": "gen_ai.tool.name",
+                  "value": {
+                    "stringValue": "delete_all"
+                  }
+                },
+                {
+                  "key": "gen_ai.tool.call.id",
+                  "value": {
+                    "stringValue": "c3"
+                  }
+                },
+                {
+                  "key": "gen_ai.tool.type",
+                  "value": {
+                    "stringValue": "function"
+                  }
+                },
+                {
+                  "key": "gen_ai.agent.name",
+                  "value": {
+                    "stringValue": "mailer"
+                  }
+                },
+                {
+                  "key": "gen_ai.conversation.id",
+                  "value": {
+                    "stringValue": "session-0001"
+                  }
+                },
+                {
+                  "key": "agentloop.call.state",
+                  "value": {
+                    "stringValue": "finished"
+                  }
+                },
+                {
+                  "key": "agentloop.policy.verdict",
+                  "value": {
+                    "stringValue": "deny"
+                  }
+                },
+                {
+                  "key": "error.type",
+                  "value": {
+                    "stringValue": "policy_denied"
+                  }
+                },
+                {
+                  "key": "gen_ai.tool.call.arguments",
+                  "value": {
+                    "stringValue": "{}"
+                  }
+                },
+                {
+                  "key": "agentloop.tool.error",
+                  "value": {
+                    "stringValue": "Never."
+                  }
+                }
+              ],
+              "events": [
+                {
+                  "timeUnixNano": "1792227612500000000",
+                  "name": "agentloop.policy.decision",
+                  "attributes": [
+                    {
+                      "key": "agentloop.policy.verdict",
+                      "value": {
+                        "stringValue": "deny"
+                      }
+                    },
+                    {
+                      "key": "agentloop.policy.reason",
+                      "value": {
+                        "stringValue": "Never."
+                      }
+                    }
+                  ]
+                }
+              ],
+              "status": {
+                "message": "policy_denied",
+                "code": 2
+              }
+            },
+            {
+              "traceId": "9d1f389621a2e17394bcfef1d8cd5a9f",
+              "spanId": "cd95316b41fc9bf0",
+              "name": "invoke_agent mailer",
+              "kind": 1,
+              "startTimeUnixNano": "1792227617500000000",
+              "endTimeUnixNano": "1792227622500000000",
+              "attributes": [
+                {
+                  "key": "gen_ai.operation.name",
+                  "value": {
+                    "stringValue": "invoke_agent"
+                  }
+                },
+                {
+                  "key": "gen_ai.provider.name",
+                  "value": {
+                    "stringValue": "fake"
+                  }
+                },
+                {
+                  "key": "gen_ai.agent.name",
+                  "value": {
+                    "stringValue": "mailer"
+                  }
+                },
+                {
+                  "key": "gen_ai.conversation.id",
+                  "value": {
+                    "stringValue": "session-0001"
+                  }
+                },
+                {
+                  "key": "agentloop.run.reason",
+                  "value": {
+                    "stringValue": "completed"
+                  }
+                },
+                {
+                  "key": "agentloop.run.turns",
+                  "value": {
+                    "intValue": "1"
+                  }
+                },
+                {
+                  "key": "gen_ai.output.messages",
+                  "value": {
+                    "stringValue": "[{\"role\":\"assistant\",\"parts\":[{\"type\":\"text\",\"content\":\"Sent. I did not delete anything.\"}]}]"
+                  }
+                },
+                {
+                  "key": "gen_ai.usage.input_tokens",
+                  "value": {
+                    "intValue": "435"
+                  }
+                },
+                {
+                  "key": "gen_ai.usage.output_tokens",
+                  "value": {
+                    "intValue": "12"
+                  }
+                },
+                {
+                  "key": "gen_ai.usage.cache_read.input_tokens",
+                  "value": {
+                    "intValue": "420"
+                  }
+                },
+                {
+                  "key": "agentloop.labels",
+                  "value": {
+                    "arrayValue": {
+                      "values": [
+                        {
+                          "stringValue": "private"
+                        }
+                      ]
+                    }
+                  }
+                }
+              ]
+            },
+            {
+              "traceId": "9d1f389621a2e17394bcfef1d8cd5a9f",
+              "spanId": "2a638f503a92f7b7",
+              "parentSpanId": "cd95316b41fc9bf0",
+              "name": "chat fake-model",
+              "kind": 3,
+              "startTimeUnixNano": "1792227620000000000",
+              "endTimeUnixNano": "1792227621250000000",
+              "attributes": [
+                {
+                  "key": "gen_ai.operation.name",
+                  "value": {
+                    "stringValue": "chat"
+                  }
+                },
+                {
+                  "key": "gen_ai.provider.name",
+                  "value": {
+                    "stringValue": "fake"
+                  }
+                },
+                {
+                  "key": "gen_ai.request.model",
+                  "value": {
+                    "stringValue": "fake-model"
+                  }
+                },
+                {
+                  "key": "gen_ai.conversation.id",
+                  "value": {
+                    "stringValue": "session-0001"
+                  }
+                },
+                {
+                  "key": "gen_ai.response.model",
+                  "value": {
+                    "stringValue": "fake-model"
+                  }
+                },
+                {
+                  "key": "gen_ai.response.finish_reasons",
+                  "value": {
+                    "arrayValue": {
+                      "values": [
+                        {
+                          "stringValue": "stop"
+                        }
+                      ]
+                    }
+                  }
+                },
+                {
+                  "key": "agentloop.stop",
+                  "value": {
+                    "stringValue": "end_turn"
+                  }
+                },
+                {
+                  "key": "gen_ai.usage.input_tokens",
+                  "value": {
+                    "intValue": "435"
+                  }
+                },
+                {
+                  "key": "gen_ai.usage.output_tokens",
+                  "value": {
+                    "intValue": "12"
+                  }
+                },
+                {
+                  "key": "gen_ai.usage.cache_read.input_tokens",
+                  "value": {
+                    "intValue": "420"
+                  }
+                },
+                {
+                  "key": "gen_ai.input.messages",
+                  "value": {
+                    "stringValue": "[{\"role\":\"user\",\"parts\":[{\"type\":\"text\",\"content\":\"Mail the boss the Q3 numbers.\"}]},{\"role\":\"assistant\",\"parts\":[{\"type\":\"text\",\"content\":\"Looking at your notes.\"},{\"type\":\"tool_call\",\"id\":\"c1\",\"name\":\"read_note\",\"arguments\":{\"title\":\"q3\"}},{\"type\":\"tool_call\",\"id\":\"c2\",\"name\":\"send_mail\",\"arguments\":{\"to\":\"boss@example.com\",\"body\":\"numbers\"}},{\"type\":\"tool_call\",\"id\":\"c3\",\"name\":\"delete_all\",\"arguments\":{}}]},{\"role\":\"tool\",\"parts\":[{\"type\":\"tool_call_response\",\"id\":\"c1\",\"response\":\"Note: the quarterly numbers are in.\"},{\"type\":\"tool_call_response\",\"id\":\"c3\",\"response\":\"Never.\"},{\"type\":\"tool_call_response\",\"id\":\"c2\",\"response\":\"sent\"}]}]"
+                  }
+                },
+                {
+                  "key": "gen_ai.output.messages",
+                  "value": {
+                    "stringValue": "[{\"role\":\"assistant\",\"parts\":[{\"type\":\"text\",\"content\":\"Sent. I did not delete anything.\"}]}]"
+                  }
+                }
+              ]
+            }
+          ],
+          "schemaUrl": "https://opentelemetry.io/schemas/gen-ai-dev/1.42.0-dev"
+        }
+      ]
+    }
+  ]
+}
