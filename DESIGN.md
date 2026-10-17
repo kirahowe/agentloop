@@ -643,8 +643,9 @@ to the session and not passed on: tools get only `tool_env`.
 - A tool is killed with its process group. The group's leader is a
   sentinel (`/bin/cat` reading a pipe) that agentloop reaps only after it
   has swept the group, so the sweep can never reach a group that reused
-  the id. A tool that leaves the group
-  (with `setsid`, say) can outlive its call. On Linux a cgroup could close
+  the id. The program itself is also killed by its pid, so it cannot
+  escape by leaving the group, but a process it starts that leaves the
+  group (with `setsid`, say) can outlive its call. On Linux a cgroup could close
   that gap; macOS has no equivalent.
 - When agentloop itself is killed with SIGKILL, a tool that is running
   carries on as an orphan. Its call is still never run a second time.

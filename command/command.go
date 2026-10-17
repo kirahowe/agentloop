@@ -151,12 +151,16 @@ func (t *Tool) run(ctx context.Context, stdin []byte) (stdout, stderr *capped, w
 		case <-done:
 		case <-ctx.Done():
 			syscall.Kill(-pgid, syscall.SIGTERM)
+			cmd.Process.Signal(syscall.SIGTERM)
 			select {
 			case <-done:
 			case <-time.After(killGrace):
 			}
-			// Always sweep the group, whatever the leader did.
+			// Always sweep the group, whatever the leader did. Then kill
+			// the program itself, which may have left the group: it is
+			// unreaped until Wait returns, so its pid is still its own.
 			syscall.Kill(-pgid, syscall.SIGKILL)
+			cmd.Process.Kill()
 		}
 	}()
 	waitErr = cmd.Wait()
