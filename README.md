@@ -71,6 +71,7 @@ The packages:
 | `agentloop/trifecta` | The trifecta rule and a policy built on it |
 | `agentloop/quarantine` | The quarantined reader tool and its answer schema checks |
 | `agentloop/command` | A tool that runs a program, with exactly the environment you give it |
+| `agentloop/mcp` | The tools of one MCP server, run as a child process over stdio |
 | `agentloop/fake` | A scripted model for tests |
 
 ## The command
@@ -91,7 +92,7 @@ can drift from the model. The request format is in
 
 A request with tools must give a policy: the session's starting labels
 and each tool's class and labels, or `{"unrestricted": true}`. With a real
-policy the tools speak the envelope protocol: JSON in with the session's
+policy, command tools speak the envelope protocol: JSON in with the session's
 labels, JSON out with the labels of what the tool returned. A held call
 ends `agentloop run` with reason `held`, and a later run resolves it with
 the request's `resolve` list. `agentloop acp` asks the client instead,
@@ -114,6 +115,30 @@ run's limits and its cost.
   "mail_read": {"class": "read", "labels": ["contaminated", "private"]},
   "read_quarantined": {"class": "read"}
 }}
+```
+
+A request can also take tools from [MCP](https://modelcontextprotocol.io)
+servers it runs over stdio. The request is the allowlist: it names each
+tool it wants from a server, under its own name for it, and the policy
+gives the tool its class and labels, as for any other tool. The server
+gives the description and schema. agentloop pins each definition by its
+SHA-256 in the session, and a later run on that session refuses a
+definition that has changed, ending with reason `tools_unavailable`. A
+tool's entry may also give the digest it must have. A server gets only PATH and HOME. A secret
+it needs comes from a `credentials_command`, whose output is written to
+a private file that the server's arguments can name as
+`{credentials_file}`. A server sees the session's labels only with
+`send_labels`, and a result can add labels through `_meta` but never
+remove one. Images and other non-text content fail the call unless the
+tool allows them.
+
+```json
+"mcp_servers": {"files": {
+  "command": ["/usr/local/bin/files-mcp", "--token-file", "{credentials_file}"],
+  "credentials_command": ["security", "find-generic-password", "-s", "files", "-w"]
+}},
+"tools": [{"name": "file_read", "protocol": "mcp-stdio", "server": "files", "tool": "read"}],
+"policy": {"tools": {"file_read": {"class": "read", "labels": ["private"]}}}
 ```
 
 The API key is fetched by a command named in the request, such as a

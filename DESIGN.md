@@ -379,6 +379,7 @@ An `Entry` has a sequence number, a time, a type and one payload:
 | `tool_result` | the `ToolResult`, its labels, the operator's `log`, the tool's model `usage`, and a reader's `quarantine` report | when a call finishes, or is refused |
 | `model_error` | the `ModelError`, and whether the loop will retry | on each failed model call |
 | `run_ended` | the `Outcome` | when `Run` returns |
+| `pins` | digests of tool definitions, by tool name | when a run starts with `Agent.Pins` the session lacks |
 
 A session rebuilds its state from the entries: the conversation, the
 labels, the usage, and the state of every tool call (decided, started,
@@ -390,6 +391,14 @@ an assistant turn are gathered into one user message.
 is what a write cut short by a crash leaves, and the next append cuts it
 off. A bad line anywhere else is an error, and so are sequence numbers that
 do not run 1, 2, 3 and so on.
+
+`Agent.Pins` maps tool names to digests of their definitions, which are
+opaque to the core (the `mcp` package makes them). A run records the
+pins the session lacks in one `pins` entry. A run whose pin for a tool
+differs from the session's does not start: `Run` returns a `*PinError`
+and writes nothing. A pin is never changed, so a log that pins one tool
+to two digests does not open. To accept a changed definition, start a
+new session.
 
 Every entry goes through JSON before the session applies it, so the live
 state and the state rebuilt from the same log are always equal, and a
@@ -512,8 +521,8 @@ again.
 `agentloop/mcp` gives an agent the tools of one MCP server, which it runs
 as a child process and speaks to over stdio. It uses the official Go SDK
 (`github.com/modelcontextprotocol/go-sdk`, v1.8.0), which speaks MCP
-2026-07-28 and falls back to older revisions. The request does not use it
-yet.
+2026-07-28 and falls back to older revisions. The command uses it for a
+request's `mcp_servers` (see [MCP tools](#the-command)).
 
 ```go
 c, err := mcp.Connect(ctx, mcp.Server{
@@ -523,18 +532,22 @@ c, err := mcp.Connect(ctx, mcp.Server{
     Dir:   "/path/to/work",
     Stderr: operatorLog,
     SendLabels: false,
+    Restart: true,
     Tools: map[string]mcp.ToolConfig{
-        "mail_read": {Policy: trifecta.Tool{Class: "read", Labels: []string{"contaminated"}},
+        "read_mail": {Alias: "mail_read",
+                      Policy: trifecta.Tool{Class: "read", Labels: []string{"contaminated"}},
                       Digest: "9f2c…"},
     },
 })
-tools := c.Tools()       // []agentloop.Tool, by name
-pins := c.Digests()      // keep these, and pass them next time
+tools := c.Tools()       // []agentloop.Tool, by alias
+pins := c.Digests()      // by alias; keep these, and pass them next time
 warnings := c.Warnings() // annotations that contradict the config
 ```
 
-The configuration decides everything. `Tools` is an allowlist, and each
-entry has the tool's trifecta class, labels and `always_hold`. A tool the
+The configuration decides everything. `Tools` is an allowlist keyed by
+the server's names, and each entry has the tool's trifecta class, labels
+and `always_hold`, and the `Alias` the agent knows it by (the server's
+name when empty). The model and the policy see only the alias. A tool the
 server lists that is not on the allowlist is ignored, and an allowlisted
 tool the server does not list is an error. The server's annotations are
 untrusted (the spec says so) and only linted: `Warnings` reports, for
@@ -546,7 +559,9 @@ linted.
 
 Each allowed tool's definition is pinned when the client connects:
 `Digest` is the SHA-256 in hex of its name, description, `inputSchema`
-and `outputSchema` as canonical JSON (as for `InputDigest`). A tool
+and `outputSchema` as canonical JSON (as for `InputDigest`). Annotations
+are left out: they decide nothing, and the SDK would have to encode them
+again, which would tie the digest to the SDK's version. A tool
 whose definition differs from the `Digest` its entry gives is a
 `DriftError`, and an empty `Digest` accepts what the server lists.
 `Reconnect` starts the server again and requires every definition to
@@ -557,17 +572,25 @@ description and `inputSchema` as the tool's spec.
 The client declares no capabilities (an empty `ClientCapabilities`; a nil
 one would advertise roots), sets no sampling, elicitation or roots
 handler, negotiates no extension, and turns off the SDK's handling of
-input requests. A result with `input_required` fails the call. Any
-request from the server other than `ping` breaks the connection. The SDK
-handles a server's requests apart from the results of calls, so the
-order between the two is lost: the call in flight when the client
-handles the request fails, a call that already had its result keeps it,
-and no call runs after it until `Reconnect`.
+input requests. A result with `input_required` fails the call.
 
-A call is one `tools/call`. With `SendLabels`, its `_meta` carries the
+The client reads the server's stdout itself, as one stream of JSON
+values, and decodes each with the SDK's own decoder, so what it checks
+is what the SDK acts on. It checks each message before the SDK sees it,
+because the SDK handles a server's requests on a goroutine of its own
+and would lose their order with the results. These break the
+connection: a request from the server other than `ping`, a notification
+whose method does not start with `notifications/`, a batch, a frame that
+is not a JSON-RPC message, a message that names a key twice in one
+object, and a message that shares a line with the one before. The call
+whose result follows such a message fails, and no call runs after it
+until `Reconnect`. `Restart` does not start such a server again.
+
+A call is one `tools/call`. Its `_meta` always carries the call id in
+`com.kirahowe.agentloop/call-id`. With `SendLabels` it also carries the
 session's labels in `com.kirahowe.agentloop/labels` (a sorted array,
-never null) and the call id in `com.kirahowe.agentloop/call-id`. Without
-it, the server learns neither. A result's `_meta` may carry
+`[]` when there are none). Without it, the server does not learn them:
+they say the session holds private data. A result's `_meta` may carry
 `com.kirahowe.agentloop/labels`, whatever `SendLabels` says, and those
 labels are added to the configured ones; a result can never take one
 away. A value that is not an array of known labels fails the call.
@@ -577,7 +600,10 @@ A result is text: its text blocks, joined by newlines. Image, audio,
 tool's `AllowContent` names the kind, and then the model sees a
 placeholder such as `[image not shown: image/*, 1234 bytes]` instead. A
 placeholder names only the top-level media type, from the registered
-set, and nothing else of the server's text.
+set, and nothing else of the server's text. The one exception is an
+allowed embedded resource that holds text rather than a blob: the model
+sees its text, as if it were a text block, and nothing of its URI or
+MIME type.
 When the tool has an `outputSchema`, the model sees only the result's
 `structuredContent`, validated against the schema and written again as
 canonical JSON. The server's text is never shown, and missing or invalid
@@ -610,9 +636,14 @@ stdout ended, or a message could not be read (an over-long one, say).
 Its result says the server stopped while it ran, so it may or may not
 have taken effect. A call also ends this way 200 milliseconds after the
 server exits, even if a process it left behind holds its stdout. The
-call is never retried. Every later call is not sent, and the model is
-told the tool was not run because its server must be reconnected, until
-the caller calls `Reconnect`. Nothing reconnects on its own.
+call is never retried. Without `Restart`, every later call is not sent,
+and the model is told the tool was not run, until the caller calls
+`Reconnect`. With `Restart`, the next new call starts the server again
+first, within `StartTimeout` (30 seconds by default), and every allowed
+definition must match its pin. A restart that
+finds a changed definition fails that call and is not tried again; one
+that fails otherwise (the program will not start, say) fails that call
+and is tried again for the next.
 
 ## Telemetry
 
@@ -666,8 +697,19 @@ The request:
   "system": "…",
   "prompt": "…",
   "session": "/path/to/session.jsonl",
-  "tools": [{"name": "…", "description": "…", "parameters": {}}],
+  "tools": [
+    {"name": "…", "description": "…", "parameters": {}},
+    {"name": "mail_read", "protocol": "mcp-stdio", "server": "cleanroom", "tool": "read_mail",
+     "allow_content": ["resource"]}   // an MCP tool, by its alias
+  ],
   "tool_command": ["relay", "tool"],  // a call runs tool_command + [name]
+  "mcp_servers": {
+    "cleanroom": {
+      "command": ["/usr/local/bin/cleanroom", "mcp", "--token-file", "{credentials_file}"],
+      "credentials_command": ["security", "find-generic-password", "-s", "cleanroom", "-w"],
+      "send_labels": true             // false by default
+    }
+  },
   "tool_protocol": "envelope",        // or leave out for the plain protocol
   "policy": {                         // required when there are tools
     "labels": ["private"],            // added to the session at every run start
@@ -716,8 +758,9 @@ price.
 `policy` is required whenever `tools` is not empty. `{"unrestricted":
 true}` turns the trifecta off, for examples and tests, and nothing else
 may sit beside it; `"unrestricted": false` is refused. A real policy
-needs `"tool_protocol": "envelope"`, an entry with a known class for
-every tool and none for anything else, and only known labels.
+needs an entry with a known class for every tool and none for anything
+else, and only known labels. With command tools it also needs
+`"tool_protocol": "envelope"`.
 `forbid_labels` becomes `Agent.Forbid` and `trifecta.Policy.Forbid`. A
 request whose `policy.labels`, or any tool's labels, include a label it
 forbids is unusable, since the session could not start or the tool
@@ -728,6 +771,69 @@ otherwise accept, the last one winning. `resolve` needs a real policy, and
 a request without one refuses a session that `Session.Policed` reports:
 an unrestricted request never carries on a policed session. With a real policy the agent's starting
 labels are `policy.labels` and its policy is `trifecta.Policy`.
+
+**MCP tools.** A tool with `"protocol": "mcp-stdio"` comes from the MCP
+server `server` in `mcp_servers`, where it is called `tool`. Its `name`
+is the alias the model and the policy see. It gives no `description` or
+`parameters`: the server gives them. Every server must give at least
+one tool, and no server tool may be given twice. `digest`, when given,
+is the tool's definition digest (lowercase hex, as on stderr and in the
+`pins` entry), and a server that lists another definition fails the
+start, at a restart too. `allow_content` may
+name `image`, `audio`, `resource_link` and `resource`; see [MCP
+servers](#mcp-servers) for what each lets through. Without it, a result
+with any non-text content fails the call. MCP servers need a real
+policy, which is the only source of each tool's class, labels and
+`always_hold`. `tool_protocol` is needed only when there are command
+tools too. `quarantine.tools` may name an MCP tool. A request with MCP
+servers and no `tool_timeout_seconds` gets 120 seconds, for every tool,
+since a server can leave a call unanswered for ever.
+
+The servers start, in name order, before the session is run, since the
+model needs their tools' definitions for its first turn. Each runs once
+for the whole run with `Restart` on, in `tool_dir`, with PATH and HOME
+from agentloop's environment and nothing else, and writes its stderr to
+agentloop's. A server whose start takes over 30 seconds, lacks a tool
+the request gives, or whose schema does not compile fails the start.
+The digest of each tool's definition goes to stderr and into the
+session as a `pins` entry. A run on a session that pinned a different
+digest stops before anything is written, a `resolve` included: a changed
+definition needs a new session. In `acp` the check comes before a
+prompt's labels are written, so a refused prompt leaves the session as
+it was.
+
+When the servers cannot be set up, `run` writes no entry and ends with
+reason `tools_unavailable` and a `tools_error` that says why:
+
+```json
+{"type": "outcome", "reason": "tools_unavailable", "turns": 0, "usage": {…},
+ "session": "/path/to/session.jsonl", "labels": ["private"],
+ "tools_error": {"server": "files", "tool": "file_read", "pinned": "f11c…", "got": "36c6…",
+                 "message": "The definition of the tool file_read is not the one this session pinned (…). The session cannot go on with it: use a new session."}}
+```
+
+`server`, `tool`, `pinned` and `got` are there when they apply: a
+server that did not start gives `server` and `message`. `labels` are
+the session's. A signal before or while the servers start ends the run
+with reason `canceled` in the same way, and stops them. Where a tool's
+annotations disagree with its class or labels, a warning goes to
+stderr; the policy is unchanged and the model never sees annotations.
+
+A server never gets a secret through its environment. A
+`credentials_command`, run like `api_key_command` (PATH and HOME, empty
+stdin, 30 seconds), prints the secret. agentloop writes its stdout,
+unchanged, to a file of mode 0600 in a directory of mode 0700 made for
+the run, and removes both when it exits, also on the second signal that
+makes `acp` exit at once. The directory, `agentloop-mcp-<digits>` in
+the temp directory, holds a `pid` file with agentloop's pid. A later
+start removes such a directory left behind by a process that is gone
+(one killed with SIGKILL, say), but only when its name, owner, files and
+pid file all have that shape and no process has the pid. `{credentials_file}` in any
+argument of `command` but the first is replaced by that file's path. A
+`credentials_command` needs the placeholder and the placeholder needs a
+`credentials_command`. The secret is never in an argument or on stderr;
+a failing command is reported with its exit status and the end of its
+stderr only.
 
 **Tool protocols.** A call runs `tool_command` with the tool's name
 appended, in `tool_dir`, with exactly `tool_env`. With the plain
