@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 )
 
 // InputDigest is the SHA-256, in hex, of a call's input in canonical JSON:
@@ -116,10 +117,10 @@ func (a *Agent) resolution(ctx context.Context, s *Session, r Resolution) (d Dec
 		if pd.Verdict == Deny {
 			return d, false, fmt.Errorf("%w: call %q: %s", ErrPolicyDenies, r.CallID, pd.Reason)
 		}
-		if len(Forbidden(pd.Labels, a.Forbid)) > 0 {
+		if len(Forbidden(append(slices.Clone(pd.Labels), pd.Deferred...), a.Forbid)) > 0 {
 			return d, false, fmt.Errorf("%w: call %q: %s", ErrPolicyDenies, r.CallID, ForbiddenDecision)
 		}
-		d.Labels = pd.Labels
+		d.Labels, d.Deferred = pd.Labels, pd.Deferred
 	}
 	return d, false, nil
 }

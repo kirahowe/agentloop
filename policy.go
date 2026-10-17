@@ -26,6 +26,12 @@ type Decision struct {
 	// Labels are added to the session when the call is allowed, before
 	// its result exists.
 	Labels []string `json:"labels,omitempty"`
+	// Deferred are labels the call's result will carry, which the session
+	// does not take when the call is allowed. They are recorded with the
+	// decision and given to the tool as Call.Deferred, and the tool puts
+	// them on its result (or fewer, by a rule of its own, as a
+	// quarantined reader does). Agent.Forbid applies to them as to Labels.
+	Deferred []string `json:"deferred,omitempty"`
 }
 
 // A Policy decides whether a tool call may run. It is asked only about

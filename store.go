@@ -85,6 +85,9 @@ type DecisionEntry struct {
 	Verdict Verdict  `json:"verdict"`
 	Reason  string   `json:"reason,omitempty"`
 	Labels  []string `json:"labels,omitempty"`
+	// Deferred are labels the call's result will carry, given to the
+	// tool when it runs (see Decision.Deferred).
+	Deferred []string `json:"deferred,omitempty"`
 	// Resolved marks the decision of a person on a held call.
 	Resolved bool `json:"resolved,omitempty"`
 	// InputSHA256 is set on a hold: the digest of the call's input (see
@@ -106,6 +109,12 @@ type ToolResultEntry struct {
 	// Log is what the tool said for the operator alone, such as a
 	// program's stderr. It is never part of the conversation.
 	Log string `json:"log,omitempty"`
+	// Usage is what the model calls the tool made cost (see
+	// Result.Usage). It counts toward the run's usage and the session's.
+	Usage []ModelUsage `json:"usage,omitempty"`
+	// Quarantine says how a quarantined reader's answer was labelled
+	// (see Result.Quarantine).
+	Quarantine *QuarantineReport `json:"quarantine,omitempty"`
 }
 
 // ModelErrorEntry records one failed model call.

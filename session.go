@@ -206,6 +206,7 @@ func (s *Session) Resolve(callID string, d Decision) error {
 		Verdict:  d.Verdict,
 		Reason:   d.Reason,
 		Labels:   d.Labels,
+		Deferred: d.Deferred,
 		Resolved: true,
 	}})
 	return err
@@ -455,7 +456,7 @@ func (s *Session) mutate(e Entry) {
 				s.decided++
 			}
 		}
-		st.info.Decision = &Decision{Verdict: d.Verdict, Reason: d.Reason, Labels: d.Labels}
+		st.info.Decision = &Decision{Verdict: d.Verdict, Reason: d.Reason, Labels: d.Labels, Deferred: d.Deferred}
 		st.info.Resolved = d.Resolved
 		if d.Verdict == Allow {
 			s.addLabels(d.Labels, LabelSource{Kind: LabelTool, Tool: d.Tool, CallID: d.CallID, Seq: e.Seq})
@@ -468,6 +469,9 @@ func (s *Session) mutate(e Entry) {
 		res := r.Result
 		st.info.Finished = true
 		st.info.Result = &res
+		for _, u := range r.Usage {
+			s.usage.add(u.Usage)
+		}
 		s.addLabels(r.Labels, LabelSource{Kind: LabelTool, Tool: st.info.Call.Name, CallID: res.CallID, Seq: e.Seq})
 		s.placeResult(st, res)
 	}

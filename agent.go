@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 	"time"
 
 	"github.com/kirahowe/agentloop/internal/strictjson"
@@ -450,7 +451,13 @@ func (r *runner) generate(ctx context.Context) (*Response, *Outcome, error) {
 // retryWait says whether to try again after the error, and how long to
 // wait first.
 func (r *runner) retryWait(me *ModelError, attempt int) (time.Duration, bool) {
-	p := r.retry
+	return r.retry.Wait(me, attempt, r.now())
+}
+
+// Wait says whether to try a model call again after it failed with me on
+// the given attempt (0 for the first), and how long to wait first, as of
+// now.
+func (p RetryPolicy) Wait(me *ModelError, attempt int, now time.Time) (time.Duration, bool) {
 	if !me.Transient() || attempt >= p.Retries {
 		return 0, false
 	}
@@ -460,7 +467,7 @@ func (r *runner) retryWait(me *ModelError, attempt int) (time.Duration, bool) {
 	}
 	until := time.Duration(0)
 	if !me.RetryAfter.IsZero() {
-		until = me.RetryAfter.Sub(r.now())
+		until = me.RetryAfter.Sub(now)
 	}
 	wait := backoff
 	if me.Kind == RateLimited && !me.RetryAfter.IsZero() {
@@ -515,9 +522,9 @@ func (r *runner) settleAndCheck(ctx context.Context) (*Outcome, error) {
 		}
 		out.LabelSources = r.s.LabelSources()
 		return out, nil
-	case res.limit:
+	case res.limit != "":
 		out := r.outcome(ReasonLimit)
-		out.Limit = LimitToolCalls
+		out.Limit = res.limit
 		return out, nil
 	}
 	return nil, nil
@@ -526,7 +533,8 @@ func (r *runner) settleAndCheck(ctx context.Context) (*Outcome, error) {
 type settled struct {
 	canceled bool
 	held     []ToolCall
-	limit    bool
+	// limit names the limit that refused a call, if one did.
+	limit string
 }
 
 // stoppedWhileRunning is the result of a call that was started and never
@@ -586,10 +594,20 @@ func (r *runner) settle(ctx context.Context) (settled, error) {
 				if err := r.finish(id, ToolResult{Content: msg, IsError: true}, nil, ""); err != nil {
 					return res, err
 				}
-				res.limit = true
+				res.limit = LimitToolCalls
 				continue
 			}
-			canceled, err := r.execute(ctx, info.Call)
+			// A tool that calls a model (a quarantined reader) spends
+			// tokens, so the token limit is checked between calls too.
+			if max := r.a.Limits.MaxTokens; max > 0 && r.usage.Total() >= max {
+				msg := "This call was not run: the limit on tokens was reached."
+				if err := r.finish(id, ToolResult{Content: msg, IsError: true}, nil, ""); err != nil {
+					return res, err
+				}
+				res.limit = LimitTokens
+				continue
+			}
+			canceled, err := r.execute(ctx, info.Call, info.Decision.Deferred)
 			if err != nil {
 				return res, err
 			}
@@ -623,8 +641,8 @@ func (r *runner) decide(ctx context.Context, call ToolCall) Decision {
 	switch d.Verdict {
 	case Allow:
 		// Whatever the policy says, an allow may not give the session a
-		// label it may not hold.
-		if len(Forbidden(d.Labels, r.a.Forbid)) > 0 {
+		// label it may not hold, now or with the result.
+		if len(Forbidden(append(slices.Clone(d.Labels), d.Deferred...), r.a.Forbid)) > 0 {
 			return Decision{Verdict: Deny, Reason: ForbiddenDecision}
 		}
 		return d
@@ -635,7 +653,11 @@ func (r *runner) decide(ctx context.Context, call ToolCall) Decision {
 }
 
 func (r *runner) recordDecision(call ToolCall, d Decision) error {
-	e := &DecisionEntry{CallID: call.ID, Tool: call.Name, Verdict: d.Verdict, Reason: d.Reason, Labels: d.Labels}
+	e := &DecisionEntry{CallID: call.ID, Tool: call.Name, Verdict: d.Verdict, Reason: d.Reason, Labels: d.Labels, Deferred: d.Deferred}
+	if d.Verdict != Allow {
+		// Deferred labels go with an allow only.
+		e.Deferred = nil
+	}
 	if d.Verdict == Hold {
 		// A hold adds nothing: its labels are asked for again when a
 		// person allows the call.
@@ -646,13 +668,17 @@ func (r *runner) recordDecision(call ToolCall, d Decision) error {
 }
 
 func (r *runner) finish(id string, res ToolResult, labels []string, log string) error {
-	res.CallID = id
-	return r.record(Entry{Type: EntryToolResult, ToolResult: &ToolResultEntry{Result: res, Labels: labels, Log: log}})
+	return r.finishEntry(id, ToolResultEntry{Result: res, Labels: labels, Log: log})
+}
+
+func (r *runner) finishEntry(id string, e ToolResultEntry) error {
+	e.Result.CallID = id
+	return r.record(Entry{Type: EntryToolResult, ToolResult: &e})
 }
 
 // execute runs an allowed call and records its result. It reports
 // whether the context ended meanwhile.
-func (r *runner) execute(ctx context.Context, call ToolCall) (canceled bool, err error) {
+func (r *runner) execute(ctx context.Context, call ToolCall, deferred []string) (canceled bool, err error) {
 	tool, ok := r.tb.tools[call.Name]
 	if !ok {
 		// Allowed in an earlier run, whose agent had the tool; this one
@@ -671,7 +697,7 @@ func (r *runner) execute(ctx context.Context, call ToolCall) (canceled bool, err
 	var out Result
 	var callErr error
 	if ct, ok := tool.(CallTool); ok {
-		out, callErr = ct.CallWith(callCtx, Call{ID: call.ID, Input: call.Input, Labels: r.s.Labels()})
+		out, callErr = ct.CallWith(callCtx, Call{ID: call.ID, Input: call.Input, Labels: r.s.Labels(), Deferred: slices.Clone(deferred)})
 	} else {
 		out, callErr = tool.Call(callCtx, call.Input)
 	}
@@ -691,17 +717,23 @@ func (r *runner) execute(ctx context.Context, call ToolCall) (canceled bool, err
 			res.Content = fmt.Sprintf("The tool failed: %v", callErr)
 		}
 	}
-	labels, log := out.Labels, out.Log
+	labels, log, report := out.Labels, out.Log, out.Quarantine
+	// What the tool's model calls cost is spent whatever became of the
+	// result.
+	for _, u := range out.Usage {
+		r.usage.add(u.Usage)
+	}
 	if bad := Forbidden(out.Labels, r.a.Forbid); len(bad) > 0 {
 		// The model never sees the result and the session never takes its
 		// labels. Nothing of what the tool said is kept, not even in the
 		// log: it is what the session may not hold.
 		res = ToolResult{Content: RefusedResult, IsError: true}
-		labels = nil
+		labels, report = nil, nil
 		log = fmt.Sprintf("agentloop refused this result: it carried %v, which this session may not hold.", bad)
 		r.refused = append(r.refused, Refusal{CallID: call.ID, Tool: call.Name, Labels: bad})
 	}
-	if err := r.finish(call.ID, res, labels, log); err != nil {
+	e := ToolResultEntry{Result: res, Labels: labels, Log: log, Usage: out.Usage, Quarantine: report}
+	if err := r.finishEntry(call.ID, e); err != nil {
 		return false, err
 	}
 	return ctx.Err() != nil, nil
