@@ -14,7 +14,10 @@
 // the reader rests on that validation, never on the model having followed
 // the schema.
 //
-// Everything here is pure: no I/O, no clock, no state.
+// Reader is the read_quarantined tool built on them. Its rules
+// (ResultLabels, ReaderPrompt, ParseReply, AnswerContent) are pure
+// functions; Reader.CallWith is the shell that calls the inner tool and
+// the model. Everything else here is pure: no I/O, no clock, no state.
 package quarantine
 
 import (

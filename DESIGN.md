@@ -102,11 +102,21 @@ references.
 
 A `Result` can carry labels, which are added to the session when the
 result is recorded. Its `Log` is for the operator: it is kept in the
-`tool_result` entry and never shown to the model.
+`tool_result` entry and never shown to the model. Its `Usage` lists the
+model calls the tool made for the run, each with the model that served
+it. They count toward the run's usage and its `MaxTokens` limit, and the
+`tool_result` entry keeps them, so the session's usage rebuilds from the
+log. A refused result keeps its usage. `Quarantine` is a quarantined
+reader's report (below), kept in the entry for clients to show.
 
 A tool that also implements `CallTool` is called through `CallWith`,
-which gives it the call's id and the session's labels as the call runs
-(those include the labels the call's own decision added).
+which gives it the call's id, the session's labels as the call runs
+(those include the labels the call's own decision added), and the
+labels its decision deferred. A tool that implements `InputChecker`
+checks input of its own after the schema and before the policy; a
+reason it returns denies the call. `CompileInput` compiles a tool's
+parameters as the agent does, so a tool can check input meant for
+another.
 
 ### Policies
 
@@ -117,6 +127,7 @@ type Decision struct {
     Verdict Verdict
     Reason  string   // shown to the model on deny; recorded always
     Labels  []string // added to the session when the call is allowed
+    Deferred []string // given to the tool; its result carries them, or fewer
 }
 
 type Policy interface {
@@ -140,6 +151,12 @@ allows a call, before the result exists (cleanroom's rule). A tool can add
 labels with its result. Labels are never removed, so a policy can refuse
 an `egress` call once the session holds `private`, for example.
 
+A policy can also defer labels to the result. Deferred labels are
+recorded in the decision entry but not added to the session; the tool
+gets them as `Call.Deferred` and puts them, or fewer by a rule of its
+own, on its result. Only the quarantined reader uses this. `Agent.Forbid`
+applies to deferred labels as to the others.
+
 `Agent.Labels` are added to the session whenever a run starts, in a
 `labels` entry written only when one of them is new. `Session.AddLabels`
 does the same from outside a run.
@@ -152,9 +169,9 @@ says, with `Forbidden(labels, forbid)`, the pure intersection:
 - A run on a session that holds a forbidden label, or would from
   `Agent.Labels`, does not start. It writes nothing, calls no model, and
   ends with reason `forbidden`, the labels in `Outcome.Forbidden`.
-- A decision that would add a forbidden label is a deny, with the reason
-  `ForbiddenDecision`, and `Resolve` refuses a person's allow of such a
-  call with `ErrPolicyDenies`.
+- A decision that would add a forbidden label, or defer one, is a deny,
+  with the reason `ForbiddenDecision`, and `Resolve` refuses a person's
+  allow of such a call with `ErrPolicyDenies`.
 - A tool result that carries a forbidden label is refused. The model is
   told only `RefusedResult` ("This result was refused: it carries a
   label this session may not hold."), the session does not take the
@@ -218,10 +235,23 @@ session takes on when the call is allowed, before it runs, and keeps
 whatever becomes of the call. A tool with no entry is denied, and so is
 a tool whose static labels include one of `Policy.Forbid`.
 
+`Policy.Readers` names the quarantined reader tools, each with the inner
+tools it may read through. A reader call's input names its inner tool,
+and the call is decided as the inner call would be: held when the
+reader's own entry or the inner tool's would hold it, with that entry's
+reason. Since inner tools are `read`, the trifecta itself never holds
+them, so the hold that matters is `always_hold`. The decision's labels
+are the reader's own static labels (normally none); the inner tool's
+static labels are deferred. An inner tool off the reader's list, with no
+entry, or of a class other than `read` is denied, and so is a call whose
+reader or inner static labels include a forbidden one. A person
+resolving a held reader call sees its whole input (the inner tool, its
+input, the question and the schema), never the inner content, which does
+not exist yet.
+
 ### Quarantined answers
 
-`agentloop/quarantine` is the pure part of a quarantined reader, which
-nothing uses yet. A reader is a model with no tools that reads content
+`agentloop/quarantine` holds a quarantined reader. A reader is a model with no tools that reads content
 an outsider may have written and answers the caller's question as JSON
 matching the caller's schema. `quarantine.Check` says whether a JSON
 Schema 2020-12 admits free text: a string or object key the schema does
@@ -238,6 +268,90 @@ know count as free text, wherever they appear. `$ref` may point only at
 the root or at the root's `$defs`. `Compile` compiles a schema with
 format assertion on and nothing loaded, and `Answer` validates an answer
 and returns it as canonical JSON, which is what a caller must be given.
+
+The design follows the dual LLM pattern (Willison, 2023): a privileged
+model with tools, and a quarantined one with none that reads the
+untrusted text. As in CaMeL (Debenedetti et al., arXiv:2503.18813) the
+reader fills a schema and may say it cannot answer, and as in FIDES
+(Costa et al., arXiv:2505.23643) a typed answer keeps its
+confidentiality label and can lose its integrity label. Dropping
+`contaminated` is a deliberate endorsement: it says the answer cannot
+carry instructions, not that it is true. No label ever comes from the
+reader's output or the inner content.
+
+`quarantine.Reader` is the tool, `read_quarantined`. A call's input has
+four fields, all required: `tool`, one of the reader's inner tools;
+`input`, that tool's input; `question`, at most 2000 characters; and
+`schema`, a JSON Schema 2020-12 for the answer. Before the policy
+decides, `CheckInput` checks `input` against the inner tool's schema and
+compiles `schema`; a schema that does not compile is a deny with the
+compiler's reason. A schema that admits free text is allowed, and its
+answer keeps `contaminated`.
+
+The reader is also built with each inner tool's static labels
+(`Reader.Labels`, from the same policy entries). When the call runs, the
+reader runs the inner call, telling it the session's labels, the
+deferred ones and the static ones. The reader labels are the deferred
+and static labels and whatever the inner result's labels add. Keeping
+the static labels in the reader as well means a decision made without
+deferred labels, by a hand-built policy or resolution, still cannot
+lose `private`. Then:
+
+- On an answer, the content is `{"answer":<value>,"free_text":<bool>}`,
+  canonical, with `<value>` the bytes `Answer` returned and `free_text`
+  `Check`'s verdict on the schema. A decline is
+  `{"free_text":<bool>,"unanswerable":true}`. The result's labels are
+  the reader labels, less `contaminated` when the schema admits no free
+  text. `private` always passes through.
+- On a failure the content is one fixed sentence and the result is an
+  error: "The inner tool failed.", "The reader could not answer in the
+  schema." or "The reader is unavailable." Its labels are the reader
+  labels less `contaminated`, as for a closed answer: that the call
+  failed is one outsider-influenced bit, which can be private.
+
+Nothing the inner tool or the reader wrote reaches the caller on any
+path but a validated answer. A result whose labels include a forbidden
+label is refused by the loop like any other, which covers an inner
+result that adds `private` in a session that may not hold it.
+
+The reader is one `Model.Generate` per attempt, with the reader's model,
+effort and output cap, no tools, the fixed system prompt
+`ReaderSystem`, and a fresh conversation each time. The user message
+holds the question, the schema, and the inner content between markers.
+Nothing relies on the markers or the instructions; the schema and the
+validation limit what a fooled reader can produce. Reasoning parts are
+dropped and the text parts are read as the reply: exactly one of
+`{"answer": <value>}` or `{"unanswerable": true}`, strict JSON (no key
+twice, bounded depth and numbers), optionally inside one Markdown code
+fence. Only the value under `answer` is validated against the caller's
+schema, compiled as given. An invalid reply is asked again, up to
+`Retries` times, in a new conversation that also says why the last reply
+was refused; that message can quote the reader's reply and goes only
+back to the reader. A failed model call is retried under the agent's
+retry policy. No structured-output mode is asked of the provider.
+
+The result's `Usage` lists every reader call, and its `log` holds one
+JSON object for the operator, with digests and sizes only:
+
+```json
+{"quarantine": {
+  "inner": {"tool": "mail_read", "input_sha256": "…", "labels": ["contaminated", "private"],
+            "is_error": false, "content_bytes": 5121, "content_sha256": "…"},
+  "reader": {"model": "claude-haiku-5-5", "attempts": 1, "model_errors": 0,
+             "usage": {"input_tokens": 1840, "output_tokens": 22}, "output_sha256": "…"},
+  "schema": {"free_text": false},
+  "dropped": ["contaminated"]}}
+```
+
+The inner content, the inner tool's own log and the reader's text are
+not kept anywhere. A `tool_result` whose labels no longer say
+`contaminated` must not carry outsider text in any field. The entry's
+`quarantine` field holds `{"tool", "free_text", "dropped"}` for clients.
+
+Crash safety is as for any tool. The deferred labels are not on the
+session until the result is, and until then the caller has seen nothing
+of the inner call. A reader killed mid-call leaves the usual "may or may
+not have taken effect" result, and its usage so far is not recorded.
 
 ### Sessions and stores
 
@@ -260,9 +374,9 @@ An `Entry` has a sequence number, a time, a type and one payload:
 | `run_started` | the prompt, if any | when `Run` starts |
 | `labels` | labels added from outside any call, and their `source`: `seed` or `prompt` | when a run's starting labels, or `AddLabels`, add one the session lacks |
 | `message` | a `Message`, and for an assistant turn its `Stop`, `Usage` and serving model | when a user prompt is added or a response arrives |
-| `decision` | call id, tool name, verdict, reason, labels; `resolved` for a person's; `input_sha256` for a hold | when a call is checked, or when a held call is resolved |
+| `decision` | call id, tool name, verdict, reason, labels, `deferred` labels on an allow; `resolved` for a person's; `input_sha256` for a hold | when a call is checked, or when a held call is resolved |
 | `call_started` | call id | immediately before the tool runs |
-| `tool_result` | the `ToolResult`, its labels, and the operator's `log` | when a call finishes, or is refused |
+| `tool_result` | the `ToolResult`, its labels, the operator's `log`, the tool's model `usage`, and a reader's `quarantine` report | when a call finishes, or is refused |
 | `model_error` | the `ModelError`, and whether the loop will retry | on each failed model call |
 | `run_ended` | the `Outcome` | when `Run` returns |
 
@@ -301,7 +415,7 @@ type Agent struct {
 type Limits struct {
     MaxTurns     int   // model calls per run; zero means no limit
     MaxToolCalls int   // per run
-    MaxTokens    int64 // Usage.Total per run
+    MaxTokens    int64 // Usage.Total per run, tools' model calls included
 }
 
 type RetryPolicy struct {
@@ -373,6 +487,11 @@ in order:
   labels now, and the call is decided again. A person's allow stands.
 - An allowed call is recorded as started, run under the tool timeout, and
   its result recorded. A Go error from the tool becomes an error result.
+  Before it runs, the tool-call and token limits are checked: a tool can
+  spend tokens (a quarantined reader does), so the token limit can be
+  reached in the middle of a turn. A call past a limit gets an error
+  result saying so, keeps its decision's labels, and the run ends with
+  `limit`.
 - A denied call gets an error result with the reason.
 - A held call is left for later. The other calls of the turn still settle.
 
@@ -568,9 +687,31 @@ The request:
   "tool_timeout_seconds": 300,
   "timeout_seconds": 1800,            // the run ends with canceled at this deadline
   "limits": {"max_turns": 0, "max_tool_calls": 0, "max_tokens": 0},
-  "retry": {"retries": 3, "backoff_seconds": 2, "max_wait_seconds": 60}
+  "retry": {"retries": 3, "backoff_seconds": 2, "max_wait_seconds": 60},
+  "quarantine": {                     // turns on read_quarantined
+    "model": "claude-haiku-5-5",      // same provider, base_url and key
+    "effort": "low",
+    "max_output_tokens": 2048,        // 0 or left out: the adapter's default
+    "retries": 1,                     // re-asks after an invalid answer, 0 to 5
+    "tools": ["mail_read"]            // the inner tools it may read through
+  }
 }
 ```
+
+**The quarantined reader.** With a `quarantine` block, agentloop adds
+`read_quarantined` to the tools itself, with a parameter schema whose
+`tool` is an enum of `quarantine.tools`, and builds it from the request:
+the reader model on the request's provider, `base_url` and key, the
+request's `retry` for failed model calls, and the inner tools as their
+command tools. A tool in `tools` named `read_quarantined` is refused.
+The block needs a real policy, and the policy an entry for
+`read_quarantined` of class `read`. Each of `quarantine.tools` must be
+one of `tools`, of class `read`, named once, and not `read_quarantined`.
+An inner tool stays callable on its own, where it takes its labels the
+ordinary way. `tool_kinds` may name `read_quarantined`. The reader's
+calls are in the `tool_result`'s usage, so they count toward
+`limits.max_tokens` and `cost_usd` prices each at the reader model's
+price.
 
 `policy` is required whenever `tools` is not empty. `{"unrestricted":
 true}` turns the trifecta off, for examples and tests, and nothing else
@@ -740,8 +881,16 @@ pure functions in `acp/` (`Translator.Step` for a live turn, `Replay` for
 | a tool call in an assistant message | `tool_call`, `pending`, with the request's kind for the tool (`other` if none) |
 | a held call | `session/request_permission` (above) |
 | `call_started` | `tool_call_update`, `in_progress` |
-| `tool_result` | `tool_call_update`, `completed` or `failed`, the content as text, `rawOutput` `{content, is_error}` |
-| an assistant message, when the provider gave the window | `usage_update`, used = the turn's input, cache and output tokens, size = the window |
+| `tool_result` | `tool_call_update`, `completed` or `failed`, the content as text, `rawOutput` `{content, is_error}`, and a reader's report in `_meta["agentloop/quarantine"]` |
+| an assistant message, when the provider gave the window or the model is priced | `usage_update`, used = the turn's input, cache and output tokens, size = the window, and the session's cost |
+| a `tool_result` with model usage (a reader's) | `usage_update` as of the last assistant message, with the new cost |
+
+The cost on a `usage_update` is the session's, from its first entry:
+each assistant message at the model's price, and each model call a tool
+recorded at the price of the model that served it (`Options.PriceOf`,
+the provider adapter's table). If any of those models has no price, no
+cost is sent from then on, never a partial one. A reopened session
+counts its log the same way, so live, replay and reopen agree.
 | `model_error` | `notice`, only to a client that advertises notices |
 | a user message | nothing live (the client showed it); `user_message_chunk`, id `u<seq>`, on load |
 
@@ -765,7 +914,10 @@ call shows them as of its last entry). When the labels change and nothing
 else sent for the change carries them (a seed, a resource in a prompt, a
 resolution), a `session_info_update` with only that `_meta` follows; one
 also follows `session/new` and `session/resume` of a labelled session,
-and ends the replay of a labelled one. And `_meta["agentloop/retry"]` on a notice for a
+and ends the replay of a labelled one. `_meta["agentloop/quarantine"]`
+on a reader call's result holds `{"tool", "free_text", "dropped"}`, so
+a client can show that a reader answered and what the session did not
+take. And `_meta["agentloop/retry"]` on a notice for a
 model call that will be retried holds `kind`, `wait_ms`, `retry_at`,
 `attempt` and, when there was one, the HTTP `status`, so a client can
 count down to the retry.
@@ -803,6 +955,19 @@ to the session and not passed on: tools get only `tool_env`.
   envelope returns; a tool that under-labels its output, or an egress
   tool classed `read`, gets through. It also treats the model provider as
   an accepted destination: everything a session sees is sent to it.
+- A quarantined reader can be fooled. An injection in the inner content
+  can make it pick the wrong enum value or boolean, and with
+  `contaminated` dropped, the session's later `act` calls are no longer
+  held on that answer's account. A caller should treat an answer as a
+  claim from outside content and prefer questions whose wrong answer is
+  harmless, such as classification and routing. A closed answer still
+  carries a few bits (a boolean, an array's length, a number's digits),
+  which matters for confidentiality only, and `private` passes through.
+  Numbers are not bounded, so an answer can encode text as numbers if
+  the caller's schema invites it. The reader's prompt is not a defense;
+  validation is.
+- A reader's inner content goes whole to the reader model, whose context
+  is the only cap beyond the envelope protocol's 1 MiB output limit.
 - A tool is killed with its process group. The group's leader is a
   sentinel (`/bin/cat` reading a pipe) that agentloop reaps only after it
   has swept the group, so the sweep can never reach a group that reused

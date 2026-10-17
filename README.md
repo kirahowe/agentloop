@@ -69,6 +69,7 @@ The packages:
 | `agentloop/anthropic` | Anthropic's Messages API |
 | `agentloop/openai` | OpenAI's Responses API |
 | `agentloop/trifecta` | The trifecta rule and a policy built on it |
+| `agentloop/quarantine` | The quarantined reader tool and its answer schema checks |
 | `agentloop/command` | A tool that runs a program, with exactly the environment you give it |
 | `agentloop/fake` | A scripted model for tests |
 
@@ -96,6 +97,24 @@ ends `agentloop run` with reason `held`, and a later run resolves it with
 the request's `resolve` list. `agentloop acp` asks the client instead,
 with `session/request_permission`, and shows the session's labels on
 every tool call.
+
+A request can also turn on a quarantined reader with a `quarantine`
+block. The agent then has a built-in tool, `read_quarantined`, that runs
+one of the named `read` tools, gives its result to a second model with
+no tools, and returns only that model's answer to a question, checked
+against a JSON Schema the agent gave. If the schema admits no free text
+(booleans, numbers, enums, dates, objects with fixed keys, arrays of at
+most 100 items), the answer does not make the session `contaminated`.
+`private` always passes through. The reader's calls count toward the
+run's limits and its cost.
+
+```json
+"quarantine": {"model": "claude-haiku-5-5", "effort": "low", "retries": 1, "tools": ["mail_read"]},
+"policy": {"tools": {
+  "mail_read": {"class": "read", "labels": ["contaminated", "private"]},
+  "read_quarantined": {"class": "read"}
+}}
+```
 
 The API key is fetched by a command named in the request, such as a
 keychain lookup, and reaches only the model.
