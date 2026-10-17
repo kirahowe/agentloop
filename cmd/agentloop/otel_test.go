@@ -75,3 +75,22 @@ func TestOtelUsageErrors(t *testing.T) {
 		}
 	}
 }
+
+// A run's transcript ends with an outcome line; it is not an entry and
+// does not change the export.
+func TestOtelAcceptsATranscript(t *testing.T) {
+	b, err := os.ReadFile("../../otel/testdata/session.jsonl")
+	if err != nil {
+		t.Fatal(err)
+	}
+	f := filepath.Join(t.TempDir(), "session.jsonl")
+	withOutcome := append(b, []byte(`{"type":"outcome","reason":"completed","session":"/x/y.jsonl"}`+"\n")...)
+	if err := os.WriteFile(f, withOutcome, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	want, _, _ := runOtel(t, "../../otel/testdata/session.jsonl", "--conversation-id", "k")
+	got, _, code := runOtel(t, f, "--conversation-id", "k")
+	if code != 0 || got != want {
+		t.Fatalf("code %d; transcript export differs from the session's", code)
+	}
+}

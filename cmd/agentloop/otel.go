@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strings"
 
 	"github.com/kirahowe/agentloop"
@@ -21,7 +22,7 @@ var (
 	spanIDRe  = regexp.MustCompile(`^[0-9a-f]{16}$`)
 )
 
-// otelCmd converts one session file to OTLP/JSON traces, offline. The
+// otelCmd converts one session file (or a run's transcript) to OTLP/JSON traces, offline. The
 // output is one ExportTraceServiceRequest on one line, with no content:
 // no messages, tool inputs or results.
 func otelCmd(args []string, stdout io.Writer) error {
@@ -60,6 +61,9 @@ func otelCmd(args []string, stdout io.Writer) error {
 	if err != nil {
 		return usage.Errorf("%v", err)
 	}
+	// A run's stdout (a transcript) is a session log plus a last outcome
+	// line, which is not an entry.
+	entries = slices.DeleteFunc(entries, func(e agentloop.Entry) bool { return e.Type == "outcome" })
 	id := *conv
 	if id == "" {
 		base := filepath.Base(path)

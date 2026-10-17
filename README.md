@@ -155,7 +155,8 @@ and the same file always gives the same bytes.
 `--conversation-id ID` sets `gen_ai.conversation.id`; the default is the
 file's name without its extension. `--parent-trace` and `--parent-span`
 (hex ids) put every run under a span made elsewhere, such as an eval's
-workflow span. Flags may come before or after the file. A usage error
+workflow span. The file may also be a run's transcript (what `agentloop run`
+prints); its closing outcome line is skipped. Flags may come before or after the file. A usage error
 exits 2.
 
 Each run is one `invoke_agent` span, with a `chat` span per model call
