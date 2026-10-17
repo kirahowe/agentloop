@@ -38,6 +38,10 @@ func acpCmd(req *request.Request, stdin io.Reader, stdout, stderr io.Writer) err
 	if err != nil {
 		return err
 	}
+	agent, err := req.Agent(key)
+	if err != nil {
+		return usage.Errorf("%v", err)
+	}
 	kinds := map[string]acp.ToolKind{}
 	for name, kind := range req.ToolKinds {
 		kinds[name] = acp.ToolKind(kind)
@@ -47,8 +51,8 @@ func acpCmd(req *request.Request, stdin io.Reader, stdout, stderr io.Writer) err
 		Title:           req.Title,
 		SessionDir:      req.SessionDir,
 		Cwd:             acpagent.SessionCwd(req.ToolDir, wd),
-		Agent:           req.Agent(key),
-		Options:         acpagent.Options{Kinds: kinds},
+		Agent:           agent,
+		Options:         acpagent.Options{Kinds: kinds, PriceOf: priceFunc(req.Provider)},
 		Log:             stderr,
 		Unrestricted:    !req.Restricted(),
 		NewSessionsOnly: req.NewSessionsOnly != nil,

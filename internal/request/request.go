@@ -28,6 +28,7 @@ import (
 	"github.com/kirahowe/agentloop/internal/strictjson"
 	"github.com/kirahowe/agentloop/internal/usage"
 	"github.com/kirahowe/agentloop/openai"
+	"github.com/kirahowe/agentloop/quarantine"
 	"github.com/kirahowe/agentloop/trifecta"
 )
 
@@ -59,6 +60,7 @@ type Request struct {
 	Policy             *Policy                `json:"policy"`
 	ToolProtocol       string                 `json:"tool_protocol"`
 	Resolve            []agentloop.Resolution `json:"resolve"`
+	Quarantine         *Quarantine            `json:"quarantine"`
 	Retry              *struct {
 		Retries        int     `json:"retries"`
 		BackoffSeconds float64 `json:"backoff_seconds"`
@@ -76,6 +78,27 @@ type Policy struct {
 	Tools        map[string]trifecta.Tool `json:"tools"`
 	ForbidLabels []string                 `json:"forbid_labels"`
 }
+
+// Quarantine turns on the quarantined reader, read_quarantined: the
+// reader model, on the request's provider with its base_url and key, and
+// the tools it may read through.
+type Quarantine struct {
+	Model           string `json:"model"`
+	Effort          string `json:"effort"`
+	MaxOutputTokens int    `json:"max_output_tokens"`
+	// Retries is how many times the reader is asked again after an
+	// answer that is not valid. Nil means DefaultQuarantineRetries.
+	Retries *int     `json:"retries"`
+	Tools   []string `json:"tools"`
+}
+
+// DefaultQuarantineRetries is the reader's retries when the request
+// gives none.
+const DefaultQuarantineRetries = 1
+
+// MaxQuarantineRetries bounds quarantine.retries, since each one is a
+// model call.
+const MaxQuarantineRetries = 5
 
 // Restricted reports whether the request has a real policy.
 func (r *Request) Restricted() bool {
@@ -159,6 +182,9 @@ func (r *Request) validate(mode Mode) error {
 		if t.Name == "" {
 			return usage.Errorf("a tool has no name")
 		}
+		if t.Name == quarantine.ToolName {
+			return usage.Errorf("%s is built in; give a quarantine block instead of a tool by that name", quarantine.ToolName)
+		}
 		if !toolName.MatchString(t.Name) {
 			return usage.Errorf("tool name %q is not 1 to 64 letters, digits, - or _", t.Name)
 		}
@@ -171,6 +197,9 @@ func (r *Request) validate(mode Mode) error {
 		}
 	}
 	if err := r.validatePolicy(); err != nil {
+		return err
+	}
+	if err := r.validateQuarantine(); err != nil {
 		return err
 	}
 	if r.ToolTimeoutSeconds < 0 || r.TimeoutSeconds < 0 {
@@ -198,7 +227,11 @@ func (r *Request) validate(mode Mode) error {
 	if err != nil {
 		return err
 	}
-	if _, err := r.Agent("").Run(context.Background(), sess, ""); err != nil {
+	a, err := r.Agent("")
+	if err != nil {
+		return usage.Errorf("bad quarantine: %v", err)
+	}
+	if _, err := a.Run(context.Background(), sess, ""); err != nil {
 		return usage.Errorf("bad tool definition: %v", err)
 	}
 	return nil
@@ -244,10 +277,10 @@ func (r *Request) validatePolicy() error {
 		return usage.Errorf("policy.labels holds %v, which policy.forbid_labels forbids, so the session cannot start", bad)
 	}
 	tools := map[string]bool{}
-	for _, t := range r.Tools {
-		tools[t.Name] = true
-		if _, ok := p.Tools[t.Name]; !ok {
-			return usage.Errorf("policy.tools has no entry for the tool %q", t.Name)
+	for _, name := range r.toolNames() {
+		tools[name] = true
+		if _, ok := p.Tools[name]; !ok {
+			return usage.Errorf("policy.tools has no entry for the tool %q", name)
 		}
 	}
 	for _, name := range slices.Sorted(maps.Keys(p.Tools)) {
@@ -264,6 +297,72 @@ func (r *Request) validatePolicy() error {
 		if bad := agentloop.Forbidden(e.Labels, p.ForbidLabels); len(bad) > 0 {
 			return usage.Errorf("policy.tools gives %q the labels %v, which policy.forbid_labels forbids", name, bad)
 		}
+	}
+	return nil
+}
+
+// toolNames are the names of every tool the agent has: the request's
+// tools, and read_quarantined when there is a quarantine block.
+func (r *Request) toolNames() []string {
+	var names []string
+	for _, t := range r.Tools {
+		names = append(names, t.Name)
+	}
+	if r.Quarantine != nil {
+		names = append(names, quarantine.ToolName)
+	}
+	return names
+}
+
+// validateQuarantine checks the quarantine block. The reader needs a
+// real policy, since its whole purpose is the labels; it reads only
+// through tools of class read, which bring content in and do nothing
+// else; and it cannot read through itself.
+func (r *Request) validateQuarantine() error {
+	q := r.Quarantine
+	if q == nil {
+		return nil
+	}
+	if !r.Restricted() {
+		return usage.Errorf("quarantine needs a policy: the reader exists to keep labels off the session")
+	}
+	if q.Model == "" {
+		return usage.Errorf("quarantine has no model")
+	}
+	switch agentloop.Effort(q.Effort) {
+	case "", agentloop.EffortLow, agentloop.EffortMedium, agentloop.EffortHigh, agentloop.EffortXHigh, agentloop.EffortMax:
+	default:
+		return usage.Errorf("unknown quarantine.effort %q", q.Effort)
+	}
+	if q.MaxOutputTokens < 0 {
+		return usage.Errorf("quarantine.max_output_tokens cannot be negative")
+	}
+	if q.Retries != nil && (*q.Retries < 0 || *q.Retries > MaxQuarantineRetries) {
+		return usage.Errorf("quarantine.retries must be from 0 to %d", MaxQuarantineRetries)
+	}
+	if len(q.Tools) == 0 {
+		return usage.Errorf("quarantine.tools names no tool to read through")
+	}
+	if e := r.Policy.Tools[quarantine.ToolName]; e.Class != trifecta.Read {
+		return usage.Errorf("policy.tools must give %s the class read", quarantine.ToolName)
+	}
+	given := map[string]bool{}
+	for _, t := range r.Tools {
+		given[t.Name] = true
+	}
+	seen := map[string]bool{}
+	for _, name := range q.Tools {
+		switch {
+		case name == quarantine.ToolName:
+			return usage.Errorf("quarantine.tools cannot name %s itself", quarantine.ToolName)
+		case seen[name]:
+			return usage.Errorf("quarantine.tools names %q twice", name)
+		case !given[name]:
+			return usage.Errorf("quarantine.tools names %q, which is not one of the tools", name)
+		case r.Policy.Tools[name].Class != trifecta.Read:
+			return usage.Errorf("quarantine.tools names %q, whose class is %q; the reader reads only through tools of class read", name, r.Policy.Tools[name].Class)
+		}
+		seen[name] = true
 	}
 	return nil
 }
@@ -318,8 +417,8 @@ func (r *Request) validateMode(mode Mode) error {
 		return usage.Errorf(`"new_sessions_only": false is refused; leave the field out to allow reopening sessions`)
 	}
 	tools := map[string]bool{}
-	for _, t := range r.Tools {
-		tools[t.Name] = true
+	for _, name := range r.toolNames() {
+		tools[name] = true
 	}
 	names := slices.Sorted(maps.Keys(r.ToolKinds))
 	for _, name := range names {
@@ -469,10 +568,16 @@ var refusalFallbackModels = map[string]bool{
 }
 
 func (r *Request) newModel(key string) agentloop.Model {
+	return r.newModelFor(key, r.Model)
+}
+
+// newModelFor is the provider's model for one model id, on the request's
+// base_url and key.
+func (r *Request) newModelFor(key, model string) agentloop.Model {
 	if r.Provider == "openai" {
 		return openai.New(openai.Config{APIKey: key, BaseURL: r.BaseURL})
 	}
-	fallback := refusalFallbackModels[r.Model]
+	fallback := refusalFallbackModels[model]
 	if r.RefusalFallback != nil {
 		fallback = *r.RefusalFallback
 	}
@@ -480,8 +585,10 @@ func (r *Request) newModel(key string) agentloop.Model {
 }
 
 // Agent builds the agent. The key goes to the model and nowhere else: the
-// tools get exactly tool_env.
-func (r *Request) Agent(key string) *agentloop.Agent {
+// tools get exactly tool_env. It fails only when the quarantined reader
+// cannot be built, which Load has already ruled out for a request it
+// accepted.
+func (r *Request) Agent(key string) (*agentloop.Agent, error) {
 	env := make([]string, 0, len(r.ToolEnv))
 	for k, v := range r.ToolEnv {
 		env = append(env, k+"="+v)
@@ -495,6 +602,23 @@ func (r *Request) Agent(key string) *agentloop.Agent {
 			Envelope: r.ToolProtocol == ToolProtocolEnvelope, KnownLabel: trifecta.KnownLabel,
 		})
 	}
+	retry := agentloop.DefaultRetry
+	if r.Retry != nil {
+		retry = agentloop.RetryPolicy{
+			Retries: r.Retry.Retries,
+			Backoff: Seconds(r.Retry.BackoffSeconds),
+			MaxWait: Seconds(r.Retry.MaxWaitSeconds),
+		}
+	}
+	var readers map[string][]string
+	reader, err := r.reader(key, tools, retry)
+	if err != nil {
+		return nil, err
+	}
+	if reader != nil {
+		tools = append(tools, reader)
+		readers = map[string][]string{quarantine.ToolName: slices.Clone(r.Quarantine.Tools)}
+	}
 	a := &agentloop.Agent{
 		Model:       r.newModel(key),
 		ModelID:     r.Model,
@@ -507,16 +631,43 @@ func (r *Request) Agent(key string) *agentloop.Agent {
 	if r.Restricted() {
 		a.Labels = slices.Clone(r.Policy.Labels)
 		a.Forbid = slices.Clone(r.Policy.ForbidLabels)
-		a.Policy = trifecta.Policy{Tools: maps.Clone(r.Policy.Tools), Forbid: slices.Clone(r.Policy.ForbidLabels)}
+		a.Policy = trifecta.Policy{Tools: maps.Clone(r.Policy.Tools), Forbid: slices.Clone(r.Policy.ForbidLabels), Readers: readers}
 	}
 	if r.Retry != nil {
-		a.Retry = &agentloop.RetryPolicy{
-			Retries: r.Retry.Retries,
-			Backoff: Seconds(r.Retry.BackoffSeconds),
-			MaxWait: Seconds(r.Retry.MaxWaitSeconds),
+		a.Retry = &retry
+	}
+	return a, nil
+}
+
+// reader is the read_quarantined tool, reading through the named tools
+// among tools, or nil when the request has no quarantine block.
+func (r *Request) reader(key string, tools []agentloop.Tool, retry agentloop.RetryPolicy) (*quarantine.Reader, error) {
+	q := r.Quarantine
+	if q == nil {
+		return nil, nil
+	}
+	var inner []agentloop.Tool
+	labels := map[string][]string{}
+	for _, t := range tools {
+		if name := t.Spec().Name; slices.Contains(q.Tools, name) {
+			inner = append(inner, t)
+			labels[name] = slices.Clone(r.Policy.Tools[name].Labels)
 		}
 	}
-	return a
+	retries := DefaultQuarantineRetries
+	if q.Retries != nil {
+		retries = *q.Retries
+	}
+	return quarantine.NewReader(quarantine.Reader{
+		Model:           r.newModelFor(key, q.Model),
+		ModelID:         q.Model,
+		Effort:          agentloop.Effort(q.Effort),
+		MaxOutputTokens: q.MaxOutputTokens,
+		Retries:         retries,
+		Retry:           retry,
+		Inner:           inner,
+		Labels:          labels,
+	})
 }
 
 // Brief squeezes s onto one short line.

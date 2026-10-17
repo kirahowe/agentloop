@@ -9,12 +9,18 @@ type modelCall struct {
 }
 
 // callsOf lists the model calls among a run's entries: the assistant
-// messages, which are the entries that record a call's usage.
+// messages, and the calls a tool made for the run (a quarantined
+// reader's), which its tool_result records.
 func callsOf(entries []agentloop.Entry) []modelCall {
 	var rs []modelCall
 	for _, e := range entries {
 		if m := e.Message; m != nil && m.Message.Role == agentloop.Assistant {
 			rs = append(rs, modelCall{Model: m.Model, Usage: m.Usage})
+		}
+		if t := e.ToolResult; t != nil {
+			for _, u := range t.Usage {
+				rs = append(rs, modelCall{Model: u.Model, Usage: u.Usage})
+			}
 		}
 	}
 	return rs

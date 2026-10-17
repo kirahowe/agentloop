@@ -14,6 +14,7 @@ import (
 	"github.com/kirahowe/agentloop"
 	"github.com/kirahowe/agentloop/command"
 	"github.com/kirahowe/agentloop/internal/usage"
+	"github.com/kirahowe/agentloop/quarantine"
 	"github.com/kirahowe/agentloop/trifecta"
 )
 
@@ -29,6 +30,7 @@ func FuzzLoadRequest(f *testing.F) {
 	})
 	f.Add(good)
 	f.Add([]byte(`{}`))
+	f.Add([]byte(`{"provider":"anthropic","model":"m","session":"s","prompt":"p","api_key_command":["k"],"tools":[{"name":"mail"}],"tool_command":["x"],"tool_protocol":"envelope","policy":{"tools":{"mail":{"class":"read","labels":["contaminated"]},"read_quarantined":{"class":"read"}}},"quarantine":{"model":"small","tools":["mail"],"retries":2}}`))
 	f.Add([]byte(`null`))
 	f.Add([]byte(`{"provider":"openai","model":"m","session":"s","tools":[{"name":"a","parameters":{"$ref":"#"}}],"tool_command":["x"]}`))
 	f.Add([]byte(`{"provider":"openai","model":"m","session":"s","tools":[{"name":"a","parameters":{"type":"object","properties":{"a":{"$ref":"#/$defs/a"}},"$defs":{"a":{"$ref":"#/$defs/a"}}}}],"tool_command":["x"]}`))
@@ -72,7 +74,7 @@ func checkAccepted(t *testing.T, req *Request, mode Mode) {
 			t.Fatalf("acp accepted %+v", req)
 		}
 		for name, kind := range req.ToolKinds {
-			if !slices.ContainsFunc(req.Tools, func(s agentloop.ToolSpec) bool { return s.Name == name }) || !slices.Contains(ToolKinds, kind) {
+			if !slices.Contains(req.toolNames(), name) || !slices.Contains(ToolKinds, kind) {
 				t.Fatalf("acp accepted tool_kinds %v", req.ToolKinds)
 			}
 		}
@@ -86,7 +88,10 @@ func checkAccepted(t *testing.T, req *Request, mode Mode) {
 	if req.TimeoutSeconds > 0 && Seconds(req.TimeoutSeconds) <= 0 {
 		t.Fatal("a positive timeout became none")
 	}
-	a := req.Agent("k")
+	a, err := req.Agent("k")
+	if err != nil {
+		t.Fatalf("an accepted request does not build: %v", err)
+	}
 	sess, _ := agentloop.OpenSession(agentloop.NewMemoryStore())
 	// The agent the request describes must start: an accepted request
 	// never fails at tool setup.
@@ -153,7 +158,7 @@ func TestPolicyBuildsTheAgent(t *testing.T) {
 		},
 		"tool_protocol": "envelope",
 	}
-	a := load(base).Agent("")
+	a, _ := load(base).Agent("")
 	if !reflect.DeepEqual(a.Labels, []string{"private"}) {
 		t.Fatalf("labels %v", a.Labels)
 	}
@@ -169,7 +174,7 @@ func TestPolicyBuildsTheAgent(t *testing.T) {
 	}
 	base["policy"] = map[string]any{"unrestricted": true}
 	delete(base, "tool_protocol")
-	a = load(base).Agent("")
+	a, _ = load(base).Agent("")
 	if a.Policy != nil || a.Labels != nil || a.Tools[0].(*command.Tool).Envelope {
 		t.Fatalf("an unrestricted request got %+v", a)
 	}
@@ -258,5 +263,143 @@ func TestModes(t *testing.T) {
 				t.Fatalf("err = %v, want one containing %q", err, c.want)
 			}
 		})
+	}
+}
+
+func quarantineBase() map[string]any {
+	return map[string]any{
+		"provider": "anthropic", "model": "big", "api_key_command": []string{"printf", "k"},
+		"session": "/tmp/s.jsonl", "prompt": "p",
+		"tools": []map[string]any{
+			{"name": "mail_read", "parameters": map[string]any{"type": "object"}},
+			{"name": "web_post", "parameters": map[string]any{"type": "object"}},
+		},
+		"tool_command":  []string{"x"},
+		"tool_protocol": "envelope",
+		"policy": map[string]any{
+			"tools": map[string]any{
+				"mail_read":        map[string]any{"class": "read", "labels": []string{"contaminated", "private"}},
+				"web_post":         map[string]any{"class": "egress"},
+				"read_quarantined": map[string]any{"class": "read"},
+			},
+		},
+		"quarantine": map[string]any{"model": "small", "effort": "low", "max_output_tokens": 512, "retries": 2, "tools": []string{"mail_read"}},
+	}
+}
+
+func TestQuarantineRequests(t *testing.T) {
+	q := func(m map[string]any) map[string]any { return m["quarantine"].(map[string]any) }
+	pol := func(m map[string]any) map[string]any { return m["policy"].(map[string]any)["tools"].(map[string]any) }
+	cases := []struct {
+		name string
+		mode Mode
+		edit func(m map[string]any)
+		want string
+	}{
+		{"accepted", Run, func(map[string]any) {}, ""},
+		{"retries default", Run, func(m map[string]any) { delete(q(m), "retries") }, ""},
+		{"acp with a kind for the reader", ACP, func(m map[string]any) {
+			delete(m, "session")
+			delete(m, "prompt")
+			m["session_dir"] = "/tmp/sessions"
+			m["tool_kinds"] = map[string]string{"read_quarantined": "read"}
+		}, ""},
+		{"needs a policy", Run, func(m map[string]any) {
+			m["policy"] = map[string]any{"unrestricted": true}
+			delete(m, "tool_protocol")
+		}, "quarantine needs a policy"},
+		{"needs a model", Run, func(m map[string]any) { delete(q(m), "model") }, "quarantine has no model"},
+		{"bad effort", Run, func(m map[string]any) { q(m)["effort"] = "huge" }, "quarantine.effort"},
+		{"negative max_output_tokens", Run, func(m map[string]any) { q(m)["max_output_tokens"] = -1 }, "max_output_tokens"},
+		{"negative retries", Run, func(m map[string]any) { q(m)["retries"] = -1 }, "quarantine.retries"},
+		{"too many retries", Run, func(m map[string]any) { q(m)["retries"] = MaxQuarantineRetries + 1 }, "quarantine.retries"},
+		{"no inner tools", Run, func(m map[string]any) { q(m)["tools"] = []string{} }, "names no tool"},
+		{"inner tool not among the tools", Run, func(m map[string]any) { q(m)["tools"] = []string{"ghost"} }, `"ghost", which is not one of the tools`},
+		{"inner tool not read", Run, func(m map[string]any) { q(m)["tools"] = []string{"web_post"} }, `whose class is "egress"`},
+		{"inner tool twice", Run, func(m map[string]any) { q(m)["tools"] = []string{"mail_read", "mail_read"} }, "twice"},
+		{"the reader itself", Run, func(m map[string]any) { q(m)["tools"] = []string{"read_quarantined"} }, "cannot name read_quarantined itself"},
+		{"no policy entry for the reader", Run, func(m map[string]any) { delete(pol(m), "read_quarantined") }, `no entry for the tool "read_quarantined"`},
+		{"the reader not class read", Run, func(m map[string]any) { pol(m)["read_quarantined"] = map[string]any{"class": "act"} }, "give read_quarantined the class read"},
+		{"a policy entry for the reader without quarantine", Run, func(m map[string]any) { delete(m, "quarantine") }, `"read_quarantined", which is not one of the tools`},
+		{"a tool named like the reader", Run, func(m map[string]any) {
+			m["tools"] = append(m["tools"].([]map[string]any), map[string]any{"name": "read_quarantined"})
+		}, "is built in"},
+		{"a forbidden inner label", Run, func(m map[string]any) {
+			m["policy"].(map[string]any)["forbid_labels"] = []string{"private"}
+		}, "forbid_labels forbids"},
+		{"unknown quarantine field", Run, func(m map[string]any) { q(m)["max_answer_bytes"] = 10 }, "unknown field"},
+	}
+	dir := t.TempDir()
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			m := quarantineBase()
+			c.edit(m)
+			b, _ := json.Marshal(m)
+			path := filepath.Join(dir, "r.json")
+			if err := os.WriteFile(path, b, 0o644); err != nil {
+				t.Fatal(err)
+			}
+			req, err := Load(path, c.mode)
+			if c.want == "" {
+				if err != nil {
+					t.Fatalf("refused: %v", err)
+				}
+				checkAccepted(t, req, c.mode)
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), c.want) {
+				t.Fatalf("err = %v, want one containing %q", err, c.want)
+			}
+		})
+	}
+}
+
+func TestQuarantineBuildsTheReader(t *testing.T) {
+	b, _ := json.Marshal(quarantineBase())
+	path := filepath.Join(t.TempDir(), "r.json")
+	os.WriteFile(path, b, 0o644)
+	req, err := Load(path, Run)
+	if err != nil {
+		t.Fatal(err)
+	}
+	a, err := req.Agent("k")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var reader *quarantine.Reader
+	for _, tool := range a.Tools {
+		if r, ok := tool.(*quarantine.Reader); ok {
+			reader = r
+		}
+	}
+	if reader == nil {
+		t.Fatal("no reader tool")
+	}
+	if reader.ModelID != "small" || reader.Effort != agentloop.EffortLow || reader.MaxOutputTokens != 512 || reader.Retries != 2 ||
+		len(reader.Inner) != 1 || reader.Inner[0].Spec().Name != "mail_read" || reader.Retry != agentloop.DefaultRetry ||
+		!reflect.DeepEqual(reader.Labels, map[string][]string{"mail_read": {"contaminated", "private"}}) {
+		t.Errorf("reader = %+v", reader)
+	}
+	p := a.Policy.(trifecta.Policy)
+	if !reflect.DeepEqual(p.Readers, map[string][]string{"read_quarantined": {"mail_read"}}) {
+		t.Errorf("readers = %v", p.Readers)
+	}
+}
+
+// A reader that cannot be built is an error from Agent, never a request
+// that quietly runs without it.
+func TestAgentReportsAReaderError(t *testing.T) {
+	b, _ := json.Marshal(quarantineBase())
+	path := filepath.Join(t.TempDir(), "r.json")
+	os.WriteFile(path, b, 0o644)
+	req, err := Load(path, Run)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Past Load, so only Agent can notice.
+	bad := -1
+	req.Quarantine.Retries = &bad
+	if a, err := req.Agent("k"); err == nil || a != nil {
+		t.Fatalf("agent %v, err %v", a, err)
 	}
 }

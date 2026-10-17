@@ -34,6 +34,11 @@ type Options struct {
 	// With it, each usage_update carries the session's cumulative cost in
 	// US dollars; without it, none does.
 	Prices *agentloop.Prices
+	// PriceOf is the price of any model of the provider, nil for one it
+	// does not know. It prices the model calls a tool made for the run (a
+	// quarantined reader's), each at its own model's price. A nil PriceOf
+	// prices none, so a session with such calls reports no cost.
+	PriceOf func(model string) *agentloop.Prices
 	// Notices says the client advertised session notices, which carry
 	// retry status. Without them nothing is sent for a model error.
 	Notices bool
@@ -57,9 +62,16 @@ type Translator struct {
 	text, thought string
 	// attempt counts failed model calls since the last message.
 	attempt int
-	// total is the usage of every assistant message so far, in this run
-	// and in the session before it.
-	total agentloop.Usage
+	// cost is what the session's model calls have cost so far, in this
+	// run and before it: each assistant message at Options.Prices, and
+	// each call a tool made at its own model's price. unpriced says some
+	// call could not be priced, and then no cost is sent, never a partial
+	// one.
+	cost     float64
+	unpriced bool
+	// used is the context the last assistant message took, which an
+	// update after a tool's model calls repeats.
+	used int64
 	// labels are the session's labels as of the last entry, sorted. Every
 	// tool call, tool call update and usage update carries them.
 	labels []string
@@ -68,10 +80,38 @@ type Translator struct {
 // NewTranslator makes the translator for a session's live events.
 func NewTranslator(opts Options) Translator { return Translator{opts: opts} }
 
-// WithUsage is the translator for a session that has already spent u, as
-// a reopened one has, so the cost it reports includes earlier turns.
-func (t Translator) WithUsage(u agentloop.Usage) Translator {
-	t.total = sumUsage(t.total, u)
+// WithHistory is the translator for a session that already has these
+// entries, as a reopened one has, so the cost it reports includes
+// earlier turns, priced as they were live.
+func (t Translator) WithHistory(entries []agentloop.Entry) Translator {
+	for _, e := range entries {
+		t = t.spend(e)
+	}
+	return t
+}
+
+// spend adds what an entry's model calls cost.
+func (t Translator) spend(e agentloop.Entry) Translator {
+	switch {
+	case e.Type == agentloop.EntryMessage && e.Message != nil && e.Message.Message.Role == agentloop.Assistant:
+		u := e.Message.Usage
+		t.used = u.InputTokens + u.CacheReadTokens + u.CacheWriteTokens + u.OutputTokens
+		if p := t.opts.Prices; p != nil {
+			t.cost += p.Cost(u)
+		}
+	case e.Type == agentloop.EntryToolResult && e.ToolResult != nil:
+		for _, u := range e.ToolResult.Usage {
+			var p *agentloop.Prices
+			if t.opts.PriceOf != nil {
+				p = t.opts.PriceOf(u.Model)
+			}
+			if p == nil {
+				t.unpriced = true
+				continue
+			}
+			t.cost += p.Cost(u.Usage)
+		}
+	}
 	return t
 }
 
@@ -105,15 +145,6 @@ func labelsMeta(labels []string) map[string]json.RawMessage {
 	}
 	b, _ := json.Marshal(labels)
 	return map[string]json.RawMessage{"agentloop/labels": b}
-}
-
-func sumUsage(a, b agentloop.Usage) agentloop.Usage {
-	return agentloop.Usage{
-		InputTokens:      a.InputTokens + b.InputTokens,
-		OutputTokens:     a.OutputTokens + b.OutputTokens,
-		CacheReadTokens:  a.CacheReadTokens + b.CacheReadTokens,
-		CacheWriteTokens: a.CacheWriteTokens + b.CacheWriteTokens,
-	}
 }
 
 // Step takes one event and returns the next translator and the updates to
@@ -174,6 +205,7 @@ func LabelsUpdate(labels []string) Update {
 func (t Translator) entryUpdates(e agentloop.Entry) (Translator, []Update) {
 	streamedText, streamedThought := t.text, t.thought
 	t.seq, t.text, t.thought = e.Seq, "", ""
+	t = t.spend(e)
 	if add := entryLabels(e); len(add) > 0 {
 		t.labels = trifecta.Union(t.labels, add)
 	}
@@ -191,8 +223,7 @@ func (t Translator) entryUpdates(e agentloop.Entry) (Translator, []Update) {
 		for _, c := range m.Message.ToolCalls() {
 			ups = append(ups, toolCall(c, t.opts.Kinds, acp.ToolCallStatusPending, nil, t.labels))
 		}
-		t.total = sumUsage(t.total, m.Usage)
-		if u, ok := t.usage(m.Usage, t.labels); ok {
+		if u, ok := t.usage(t.labels); ok {
 			ups = append(ups, u)
 		}
 		return t, ups
@@ -207,7 +238,15 @@ func (t Translator) entryUpdates(e agentloop.Entry) (Translator, []Update) {
 		if e.ToolResult == nil {
 			return t, nil
 		}
-		return t, []Update{toolResult(*e.ToolResult, t.labels)}
+		ups := []Update{toolResult(*e.ToolResult, t.labels)}
+		// A tool's own model calls change the cost now, not at the next
+		// turn, which may never come.
+		if len(e.ToolResult.Usage) > 0 {
+			if u, ok := t.usage(t.labels); ok {
+				ups = append(ups, u)
+			}
+		}
+		return t, ups
 	case agentloop.EntryModelError:
 		if e.ModelError == nil {
 			return t, nil
@@ -254,7 +293,6 @@ func Replay(opts Options, entries []agentloop.Entry) []Update {
 	}
 	var ups []Update
 	var last *agentloop.MessageEntry
-	var total agentloop.Usage
 	for _, e := range entries {
 		if e.Type != agentloop.EntryMessage || e.Message == nil {
 			continue
@@ -271,7 +309,6 @@ func Replay(opts Options, entries []agentloop.Entry) []Update {
 			continue
 		}
 		last = m
-		total = sumUsage(total, m.Usage)
 		ups = append(ups, assistantChunks(e.Seq, *m, "", "")...)
 		for _, c := range m.Message.ToolCalls() {
 			status := acp.ToolCallStatusPending
@@ -290,7 +327,7 @@ func Replay(opts Options, entries []agentloop.Entry) []Update {
 		}
 	}
 	if last != nil {
-		if u, ok := (Translator{opts: opts, total: total}).usage(last.Usage, labels); ok {
+		if u, ok := NewTranslator(opts).WithHistory(entries).usage(labels); ok {
 			ups = append(ups, u)
 		}
 	}
@@ -397,6 +434,7 @@ func toolCall(c agentloop.ToolCall, kinds map[string]acp.ToolKind, status acp.To
 	}
 	if res != nil {
 		tc.Status, tc.Content, tc.RawOutput = resultFields(*res)
+		addQuarantineMeta(tc.Meta, *res)
 	}
 	return acp.SessionUpdate{ToolCall: tc}
 }
@@ -406,7 +444,25 @@ func toolResult(r agentloop.ToolResultEntry, labels []string) Update {
 	var status acp.ToolCallStatus
 	status, u.Content, u.RawOutput = resultFields(r)
 	u.Status = &status
+	addQuarantineMeta(u.Meta, r)
 	return acp.SessionUpdate{ToolCallUpdate: u}
+}
+
+// addQuarantineMeta puts a quarantined reader's report in
+// _meta["agentloop/quarantine"]: the inner tool, whether the answer's
+// schema admits free text, and the labels the result left out, so a
+// client can show that a reader answered.
+func addQuarantineMeta(meta map[string]json.RawMessage, r agentloop.ToolResultEntry) {
+	q := r.Quarantine
+	if q == nil {
+		return
+	}
+	dropped := q.Dropped
+	if dropped == nil {
+		dropped = []string{}
+	}
+	b, _ := json.Marshal(agentloop.QuarantineReport{Tool: q.Tool, FreeText: q.FreeText, Dropped: dropped})
+	meta["agentloop/quarantine"] = b
 }
 
 // resultFields is how a result shows on a call: failed when it is an
@@ -422,19 +478,19 @@ func resultFields(r agentloop.ToolResultEntry) (acp.ToolCallStatus, []acp.ToolCa
 	return status, content, raw
 }
 
-// usage is the usage_update for a call that used u, with the session's
-// cost so far when the model is priced. Used is the call's own count,
-// which is what is in context. A priced model with no known window still
-// reports its cost, with a size of 0: the protocol requires the size, and
-// zero is the one value that claims nothing about the window.
-func (t Translator) usage(u agentloop.Usage, labels []string) (Update, bool) {
+// usage is the usage_update as of the last assistant message, with the
+// session's cost so far when every call in it is priced. Used is that
+// message's own count, which is what is in context. A priced model with
+// no known window still reports its cost, with a size of 0: the protocol
+// requires the size, and zero is the one value that claims nothing about
+// the window.
+func (t Translator) usage(labels []string) (Update, bool) {
 	if t.opts.ContextWindow <= 0 && t.opts.Prices == nil {
 		return Update{}, false
 	}
-	used := u.InputTokens + u.CacheReadTokens + u.CacheWriteTokens + u.OutputTokens
-	up := &acp.SessionUsageUpdate{Used: uint64(max(used, 0)), Size: uint64(max(t.opts.ContextWindow, 0)), Meta: labelsMeta(labels)}
-	if p := t.opts.Prices; p != nil {
-		up.Cost = &acp.Cost{Amount: p.Cost(t.total), Currency: "USD"}
+	up := &acp.SessionUsageUpdate{Used: uint64(max(t.used, 0)), Size: uint64(max(t.opts.ContextWindow, 0)), Meta: labelsMeta(labels)}
+	if t.opts.Prices != nil && !t.unpriced {
+		up.Cost = &acp.Cost{Amount: t.cost, Currency: "USD"}
 	}
 	return acp.SessionUpdate{UsageUpdate: up}, true
 }

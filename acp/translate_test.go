@@ -267,7 +267,7 @@ func TestCostIncludesEarlierTurns(t *testing.T) {
 	if len(replay) != 1 || replay[0].Cost.Amount != 8 {
 		t.Fatalf("replay %+v", replay)
 	}
-	tr := NewTranslator(opts).WithUsage(agentloop.Usage{InputTokens: 2_000_000})
+	tr := NewTranslator(opts).WithHistory(earlier)
 	_, ups := tr.Step(usageAssistant(4, agentloop.Usage{InputTokens: 1_000_000}))
 	live := usageUpdates(ups)
 	if len(live) != 1 || live[0].Cost.Amount != 12 {

@@ -149,7 +149,10 @@ func runCmd(ctx context.Context, req *request.Request, stdout, stderr io.Writer)
 		// drop everything the policy stood for.
 		return usage.Errorf("the session was run under a policy, and this request has none")
 	}
-	agent := req.Agent(key)
+	agent, err := req.Agent(key)
+	if err != nil {
+		return usage.Errorf("%v", err)
+	}
 	resolved, err := resolve(ctx, agent, sess, req.Resolve)
 	if err != nil {
 		return err

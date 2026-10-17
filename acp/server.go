@@ -286,7 +286,7 @@ func (s *Server) newSession(id acp.SessionId, conn *acp.AgentSideConnection, ses
 	opts.Prices = info.Prices
 	return &session{
 		id: id, conn: conn, sess: sess, unlock: unlock,
-		tr: NewTranslator(opts).WithUsage(sess.Usage()).WithLabels(sess.Labels()), waiting: map[PromptID]chan answer{},
+		tr: NewTranslator(opts).WithHistory(sess.Entries()).WithLabels(sess.Labels()), waiting: map[PromptID]chan answer{},
 		released: make(chan struct{}),
 	}
 }
