@@ -47,12 +47,9 @@ leaves a record that can be resumed without repeating an action.
 | `agentloop/openai` | The `Model` for OpenAI's Responses API |
 | `agentloop/trifecta` | The trifecta rule, pure, and a `Policy` built on it |
 | `agentloop/command` | A `Tool` that runs a program, with the plain or the envelope protocol |
+| `agentloop/mcp` | The tools of one MCP server over stdio, as `Tool` values |
 | `agentloop/fake` | A scripted `Model` for tests |
 | `cmd/agentloop` | The command: runs one agent from a JSON request |
-
-An MCP client package, giving the agent the tools of one MCP server and
-nothing else, comes next. It is how an agent gets put behind a gateway
-such as cleanroom.
 
 ## The core
 
@@ -367,6 +364,113 @@ When `ctx` is cancelled, the model call or the tool stops, and the run
 ends with `canceled`. A call that was running gets the same result as
 after a crash: it may or may not have taken effect, and it is not run
 again.
+
+### MCP servers
+
+`agentloop/mcp` gives an agent the tools of one MCP server, which it runs
+as a child process and speaks to over stdio. It uses the official Go SDK
+(`github.com/modelcontextprotocol/go-sdk`, v1.8.0), which speaks MCP
+2026-07-28 and falls back to older revisions. The request does not use it
+yet.
+
+```go
+c, err := mcp.Connect(ctx, mcp.Server{
+    Name:  "cleanroom",
+    Argv:  []string{"/usr/local/bin/cleanroom", "mcp"},
+    Env:   []string{"PATH=/usr/bin:/bin"},  // the whole environment
+    Dir:   "/path/to/work",
+    Stderr: operatorLog,
+    SendLabels: false,
+    Tools: map[string]mcp.ToolConfig{
+        "mail_read": {Policy: trifecta.Tool{Class: "read", Labels: []string{"contaminated"}},
+                      Digest: "9f2c…"},
+    },
+})
+tools := c.Tools()       // []agentloop.Tool, by name
+pins := c.Digests()      // keep these, and pass them next time
+warnings := c.Warnings() // annotations that contradict the config
+```
+
+The configuration decides everything. `Tools` is an allowlist, and each
+entry has the tool's trifecta class, labels and `always_hold`. A tool the
+server lists that is not on the allowlist is ignored, and an allowlisted
+tool the server does not list is an error. The server's annotations are
+untrusted (the spec says so) and only linted: `Warnings` reports, for
+example, a `read` tool with `destructiveHint` true, a `read` tool with
+`openWorldHint` true whose labels lack `contaminated`, a `write` tool with
+`openWorldHint` true, or a tool of any other class with `readOnlyHint`
+true. The SDK reads an absent `readOnlyHint` as false, so false is never
+linted.
+
+Each allowed tool's definition is pinned when the client connects:
+`Digest` is the SHA-256 in hex of its name, description, `inputSchema`
+and `outputSchema` as canonical JSON (as for `InputDigest`). A tool
+whose definition differs from the `Digest` its entry gives is a
+`DriftError`, and an empty `Digest` accepts what the server lists.
+`Reconnect` starts the server again and requires every definition to
+match what the first connect pinned. To accept a changed definition the
+caller connects again with the new digest. The model sees the pinned
+description and `inputSchema` as the tool's spec.
+
+The client declares no capabilities (an empty `ClientCapabilities`; a nil
+one would advertise roots), sets no sampling, elicitation or roots
+handler, negotiates no extension, and turns off the SDK's handling of
+input requests. A result with `input_required` fails the call. Any
+request from the server other than `ping` breaks the connection. The SDK
+handles a server's requests apart from the results of calls, so the
+order between the two is lost: the call in flight when the client
+handles the request fails, a call that already had its result keeps it,
+and no call runs after it until `Reconnect`.
+
+A call is one `tools/call`. With `SendLabels`, its `_meta` carries the
+session's labels in `com.kirahowe.agentloop/labels` (a sorted array,
+never null) and the call id in `com.kirahowe.agentloop/call-id`. Without
+it, the server learns neither. A result's `_meta` may carry
+`com.kirahowe.agentloop/labels`, whatever `SendLabels` says, and those
+labels are added to the configured ones; a result can never take one
+away. A value that is not an array of known labels fails the call.
+
+A result is text: its text blocks, joined by newlines. Image, audio,
+`resource_link` and embedded resource content fail the call unless the
+tool's `AllowContent` names the kind, and then the model sees a
+placeholder such as `[image not shown: image/*, 1234 bytes]` instead. A
+placeholder names only the top-level media type, from the registered
+set, and nothing else of the server's text.
+When the tool has an `outputSchema`, the model sees only the result's
+`structuredContent`, validated against the schema and written again as
+canonical JSON. The server's text is never shown, and missing or invalid
+`structuredContent` fails the call. `isError` makes an error result; for
+a tool with an `outputSchema` its text goes to `Log` and the model is
+told only that the tool returned an error. A call that fails is shown to
+the model as "The tool <name> failed.", with the reason in `Log`, as with
+the envelope protocol. A JSON-RPC error from the server is such a
+failure.
+
+The server gets exactly `Argv`, `Env` and `Dir`, as a command tool does:
+a nil `Env` is an empty environment, and nothing is inherited. Secrets
+the server needs come from its own configuration. Its stderr goes to
+`Stderr`, and one message from it may be at most `MaxMessageBytes` (1 MiB
+by default). A listing may have at most 100 pages and 1000 tools, and
+no cursor twice. The server runs in a process group whose leader is a
+sentinel, as for a command tool. `Close` closes the server's stdin,
+waits two seconds, sends SIGTERM to the group and the server, waits two
+more, and kills the group and then the server by its pid (it is still
+unreaped, so the pid is its own), which catches a server that left the
+group. It returns within about eight seconds whatever the server does.
+A call that is waiting for a `Reconnect` or `Close` to finish stops
+waiting when its context ends.
+
+A call runs under the agent's tool timeout. On a timeout or a cancel the
+SDK sends `notifications/cancelled`, and the server stays connected for
+the next call. A call that gets any error other than a JSON-RPC error
+or its own context's end has lost the connection: the server died, its
+stdout ended, or a message could not be read (an over-long one, say).
+Its result says the server stopped while it ran, so it may or may not
+have taken effect. A call also ends this way 200 milliseconds after the
+server exits, even if a process it left behind holds its stdout. The
+call is never retried. Every later call is not sent, and the model is
+told the tool was not run because its server must be reconnected, until
+the caller calls `Reconnect`. Nothing reconnects on its own.
 
 ## The command
 
