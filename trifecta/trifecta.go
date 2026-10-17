@@ -14,6 +14,7 @@ package trifecta
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"slices"
 	"sort"
@@ -113,6 +114,10 @@ type Policy struct {
 	// whose static labels include one is denied: allowing it would give
 	// the session that label before the call even ran.
 	Forbid []string
+	// Readers names the quarantined reader tools, each with the inner
+	// tools it may read through. A reader call is decided as its inner
+	// call would be (see DecideReader).
+	Readers map[string][]string
 }
 
 var _ agentloop.Policy = Policy{}
@@ -125,12 +130,59 @@ func (p Policy) Decide(_ context.Context, call agentloop.ToolCall, view agentloo
 	if !ok {
 		return agentloop.Decision{Verdict: agentloop.Deny, Reason: fmt.Sprintf("The tool %s has no policy.", call.Name)}
 	}
+	if inner, ok := p.Readers[call.Name]; ok {
+		return p.decideReader(call, t, inner, view)
+	}
 	if len(agentloop.Forbidden(t.Labels, p.Forbid)) > 0 {
 		return agentloop.Decision{Verdict: agentloop.Deny, Reason: ForbiddenReason}
 	}
 	d := agentloop.Decision{Verdict: Decide(view.Labels, t), Labels: slices.Clone(t.Labels)}
 	if d.Verdict == agentloop.Hold {
 		d.Reason = holdReason(t)
+	}
+	return d
+}
+
+// decideReader decides a call to a quarantined reader, whose input names
+// the inner tool it reads through in "tool".
+//
+// The call is decided as the inner call would be: held if the reader's
+// own entry or the inner tool's holds it, with that entry's reason. The
+// decision's labels are the reader's own static labels. The inner tool's
+// static labels describe what the reader sees, not what the caller sees,
+// so they are deferred to the result, where the reader decides what
+// passes through. A forbidden label among either set denies the call.
+// An inner tool that is not on the reader's list, has no entry, or is
+// not class read is denied.
+func (p Policy) decideReader(call agentloop.ToolCall, outer Tool, allowed []string, view agentloop.View) agentloop.Decision {
+	deny := func(reason string) agentloop.Decision {
+		return agentloop.Decision{Verdict: agentloop.Deny, Reason: reason}
+	}
+	var in struct {
+		Tool string `json:"tool"`
+	}
+	if err := json.Unmarshal(call.Input, &in); err != nil || in.Tool == "" {
+		return deny(fmt.Sprintf("The input to %s does not name an inner tool.", call.Name))
+	}
+	if !slices.Contains(allowed, in.Tool) {
+		return deny(fmt.Sprintf("%s cannot read through %s.", call.Name, in.Tool))
+	}
+	inner, ok := p.Tools[in.Tool]
+	if !ok {
+		return deny(fmt.Sprintf("The tool %s has no policy.", in.Tool))
+	}
+	if inner.Class != Read {
+		return deny(fmt.Sprintf("%s reads only through tools of class read, and %s is %q.", call.Name, in.Tool, inner.Class))
+	}
+	if len(agentloop.Forbidden(append(slices.Clone(outer.Labels), inner.Labels...), p.Forbid)) > 0 {
+		return deny(ForbiddenReason)
+	}
+	d := agentloop.Decision{Verdict: agentloop.Allow, Labels: slices.Clone(outer.Labels), Deferred: slices.Clone(inner.Labels)}
+	switch {
+	case Decide(view.Labels, outer) == agentloop.Hold:
+		d.Verdict, d.Reason = agentloop.Hold, holdReason(outer)
+	case Decide(view.Labels, inner) == agentloop.Hold:
+		d.Verdict, d.Reason = agentloop.Hold, holdReason(inner)
 	}
 	return d
 }
