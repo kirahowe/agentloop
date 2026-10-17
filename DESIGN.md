@@ -47,6 +47,7 @@ leaves a record that can be resumed without repeating an action.
 | `agentloop/openai` | The `Model` for OpenAI's Responses API |
 | `agentloop/trifecta` | The trifecta rule, pure, and a `Policy` built on it |
 | `agentloop/otel` | A pure converter from a session log to OpenTelemetry GenAI traces, as OTLP/JSON |
+| `agentloop/quarantine` | Pure checks for a quarantined reader: whether an answer schema admits free text, and validating an answer |
 | `agentloop/command` | A `Tool` that runs a program, with the plain or the envelope protocol |
 | `agentloop/mcp` | The tools of one MCP server over stdio, as `Tool` values |
 | `agentloop/fake` | A scripted `Model` for tests |
@@ -216,6 +217,27 @@ tool entries. Each decision carries the tool's static labels, which the
 session takes on when the call is allowed, before it runs, and keeps
 whatever becomes of the call. A tool with no entry is denied, and so is
 a tool whose static labels include one of `Policy.Forbid`.
+
+### Quarantined answers
+
+`agentloop/quarantine` is the pure part of a quarantined reader, which
+nothing uses yet. A reader is a model with no tools that reads content
+an outsider may have written and answers the caller's question as JSON
+matching the caller's schema. `quarantine.Check` says whether a JSON
+Schema 2020-12 admits free text: a string or object key the schema does
+not fix. Strings fixed by `enum` or `const`, or closed by the `date`,
+`time` and `date-time` formats, are not free text, and neither are
+booleans, numbers and null. Arrays and objects are free of text when
+their items, keys and values are, and an array must also say
+`maxItems` of at most 100. A fixed string or property name of one code
+point or none (after NFC) is free text, since an array of them spells.
+Numbers are not bounded. `patternProperties`,
+`unevaluatedProperties`, `unevaluatedItems`, `$id`, `$anchor`,
+`$dynamicRef`, the content keywords and every keyword `Check` does not
+know count as free text, wherever they appear. `$ref` may point only at
+the root or at the root's `$defs`. `Compile` compiles a schema with
+format assertion on and nothing loaded, and `Answer` validates an answer
+and returns it as canonical JSON, which is what a caller must be given.
 
 ### Sessions and stores
 
