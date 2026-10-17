@@ -2,6 +2,7 @@
 //
 //	agentloop run REQUEST.json   run one agent to an outcome
 //	agentloop acp REQUEST.json   serve it to an ACP client on stdin and stdout
+//	agentloop otel SESSION.jsonl  convert a session log to OpenTelemetry traces
 //	agentloop version
 package main
 
@@ -32,7 +33,7 @@ func main() {
 
 func realMain(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	if len(args) == 0 {
-		fmt.Fprintln(stderr, "usage: agentloop run|acp REQUEST.json | agentloop version")
+		fmt.Fprintln(stderr, "usage: agentloop run|acp REQUEST.json | agentloop otel SESSION.jsonl | agentloop version")
 		return 2
 	}
 	var err error
@@ -40,6 +41,8 @@ func realMain(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	case "version":
 		fmt.Fprintln(stdout, "agentloop", version)
 		return 0
+	case "otel":
+		err = otelCmd(args[1:], stdout)
 	case "acp":
 		if len(args) != 2 {
 			fmt.Fprintln(stderr, "usage: agentloop acp REQUEST.json")

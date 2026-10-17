@@ -76,12 +76,14 @@ func (s stampedStore) Append(e agentloop.Entry) error {
 }
 
 // recordSession runs a scripted agent: a retried model error, one read
-// that adds a label, one call held and then allowed by a person, and one
+// with a deferred label, a pin and a reader's model call, one call held and then allowed by a person, and one
 // call the policy denies.
 func recordSession(t *testing.T) {
 	read := agentloop.Func(agentloop.ToolSpec{Name: "read_note", Description: "Read a note.", Parameters: json.RawMessage(`{"type":"object"}`)},
 		func(context.Context, json.RawMessage) (agentloop.Result, error) {
-			return agentloop.Result{Content: "Note: the quarterly numbers are in.", Labels: []string{"private"}, Log: "read 1 file"}, nil
+			return agentloop.Result{Content: "Note: the quarterly numbers are in.", Labels: []string{"private"}, Log: "read 1 file",
+				Usage:      []agentloop.ModelUsage{{Model: "reader-1", Usage: agentloop.Usage{InputTokens: 30, OutputTokens: 5, CacheReadTokens: 50}}},
+				Quarantine: &agentloop.QuarantineReport{Tool: "read_note", FreeText: false, Dropped: []string{"contaminated"}}}, nil
 		})
 	send := agentloop.Func(agentloop.ToolSpec{Name: "send_mail", Description: "Send mail.", Parameters: json.RawMessage(`{"type":"object"}`)},
 		func(context.Context, json.RawMessage) (agentloop.Result, error) {
@@ -98,6 +100,9 @@ func recordSession(t *testing.T) {
 		case "delete_all":
 			return agentloop.Decision{Verdict: agentloop.Deny, Reason: "Never."}
 		}
+		if c.Name == "read_note" {
+			return agentloop.Decision{Verdict: agentloop.Allow, Deferred: []string{"private"}}
+		}
 		return agentloop.Decision{Verdict: agentloop.Allow}
 	})
 	model := fake.Script(
@@ -112,6 +117,7 @@ func recordSession(t *testing.T) {
 	)
 	agent := &agentloop.Agent{
 		Model: model, ModelID: "fake-1", Tools: []agentloop.Tool{read, send, del}, Policy: policy,
+		Pins:   map[string]string{"read_note": "0123abcd"},
 		Labels: []string{"private"},
 		Retry:  &agentloop.RetryPolicy{Retries: 2, Backoff: time.Millisecond, MaxWait: time.Millisecond},
 	}

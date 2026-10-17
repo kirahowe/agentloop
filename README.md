@@ -144,6 +144,34 @@ tool allows them.
 The API key is fetched by a command named in the request, such as a
 keychain lookup, and reaches only the model.
 
+### Traces
+
+`agentloop otel SESSION.jsonl` turns a session file into OpenTelemetry
+traces, offline. It prints one OTLP/JSON `ExportTraceServiceRequest` on
+one line, or writes it to `--out FILE`. Nothing is sent anywhere, and
+the session is not changed, so old sessions can be exported at any time
+and the same file always gives the same bytes.
+
+`--conversation-id ID` sets `gen_ai.conversation.id`; the default is the
+file's name without its extension. `--parent-trace` and `--parent-span`
+(hex ids) put every run under a span made elsewhere, such as an eval's
+workflow span. Flags may come before or after the file. A usage error
+exits 2.
+
+Each run is one `invoke_agent` span, with a `chat` span per model call
+and an `execute_tool` span per tool call. A quarantined reader's model
+calls are `chat` spans under the tool span. A run with no `run_ended`
+(a crash) ends with status ERROR and reason `crashed`. The export has
+no content: no messages, tool inputs or results, policy reasons or
+tool logs. Labels are exported, so treat the telemetry backend as
+inside the policy.
+
+The OpenTelemetry GenAI conventions are at Development stability and
+nothing in them is stable. The command follows the pinned commit and
+schema URL named in the [otel package documentation](otel/doc.go),
+which also lists every span and attribute. Expect renames when the
+pin moves.
+
 ## Building
 
 Go 1.27 or later.

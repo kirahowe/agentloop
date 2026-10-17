@@ -23,7 +23,7 @@
               "name": "invoke_agent mailer",
               "kind": 1,
               "startTimeUnixNano": "1792227601250000000",
-              "endTimeUnixNano": "1792227615000000000",
+              "endTimeUnixNano": "1792227616250000000",
               "attributes": [
                 {
                   "key": "gen_ai.operation.name",
@@ -76,19 +76,19 @@
                 {
                   "key": "gen_ai.usage.input_tokens",
                   "value": {
-                    "intValue": "420"
+                    "intValue": "500"
                   }
                 },
                 {
                   "key": "gen_ai.usage.output_tokens",
                   "value": {
-                    "intValue": "40"
+                    "intValue": "45"
                   }
                 },
                 {
                   "key": "gen_ai.usage.cache_read.input_tokens",
                   "value": {
-                    "intValue": "300"
+                    "intValue": "350"
                   }
                 },
                 {
@@ -134,17 +134,35 @@
                       }
                     }
                   ]
+                },
+                {
+                  "timeUnixNano": "1792227603750000000",
+                  "name": "agentloop.pins",
+                  "attributes": [
+                    {
+                      "key": "agentloop.pins.tools",
+                      "value": {
+                        "arrayValue": {
+                          "values": [
+                            {
+                              "stringValue": "read_note"
+                            }
+                          ]
+                        }
+                      }
+                    }
+                  ]
                 }
               ]
             },
             {
               "traceId": "0aeb311c8e25dfec29eb4f615989f475",
-              "spanId": "7fc23b5ac5ab30f9",
+              "spanId": "32229b265744100d",
               "parentSpanId": "f35af1db991c31a9",
               "name": "chat",
               "kind": 3,
-              "startTimeUnixNano": "1792227603750000000",
-              "endTimeUnixNano": "1792227605000000000",
+              "startTimeUnixNano": "1792227605000000000",
+              "endTimeUnixNano": "1792227606250000000",
               "attributes": [
                 {
                   "key": "gen_ai.operation.name",
@@ -179,7 +197,7 @@
               ],
               "events": [
                 {
-                  "timeUnixNano": "1792227605000000000",
+                  "timeUnixNano": "1792227606250000000",
                   "name": "gen_ai.client.operation.exception",
                   "attributes": [
                     {
@@ -198,12 +216,12 @@
             },
             {
               "traceId": "0aeb311c8e25dfec29eb4f615989f475",
-              "spanId": "32229b265744100d",
+              "spanId": "64d6be944f418962",
               "parentSpanId": "f35af1db991c31a9",
               "name": "chat fake-model",
               "kind": 3,
-              "startTimeUnixNano": "1792227605000000000",
-              "endTimeUnixNano": "1792227606250000000",
+              "startTimeUnixNano": "1792227606250000000",
+              "endTimeUnixNano": "1792227607500000000",
               "attributes": [
                 {
                   "key": "gen_ai.operation.name",
@@ -281,12 +299,12 @@
             },
             {
               "traceId": "0aeb311c8e25dfec29eb4f615989f475",
-              "spanId": "e6867e36274de831",
+              "spanId": "e0574d79e1c419ee",
               "parentSpanId": "f35af1db991c31a9",
               "name": "execute_tool read_note",
               "kind": 1,
-              "startTimeUnixNano": "1792227607500000000",
-              "endTimeUnixNano": "1792227610000000000",
+              "startTimeUnixNano": "1792227608750000000",
+              "endTimeUnixNano": "1792227611250000000",
               "attributes": [
                 {
                   "key": "gen_ai.operation.name",
@@ -347,11 +365,35 @@
                       ]
                     }
                   }
+                },
+                {
+                  "key": "agentloop.quarantine.tool",
+                  "value": {
+                    "stringValue": "read_note"
+                  }
+                },
+                {
+                  "key": "agentloop.quarantine.free_text",
+                  "value": {
+                    "boolValue": false
+                  }
+                },
+                {
+                  "key": "agentloop.quarantine.dropped",
+                  "value": {
+                    "arrayValue": {
+                      "values": [
+                        {
+                          "stringValue": "contaminated"
+                        }
+                      ]
+                    }
+                  }
                 }
               ],
               "events": [
                 {
-                  "timeUnixNano": "1792227607500000000",
+                  "timeUnixNano": "1792227608750000000",
                   "name": "agentloop.policy.decision",
                   "attributes": [
                     {
@@ -359,23 +401,94 @@
                       "value": {
                         "stringValue": "allow"
                       }
+                    },
+                    {
+                      "key": "agentloop.policy.deferred",
+                      "value": {
+                        "arrayValue": {
+                          "values": [
+                            {
+                              "stringValue": "private"
+                            }
+                          ]
+                        }
+                      }
                     }
                   ]
                 },
                 {
-                  "timeUnixNano": "1792227608750000000",
+                  "timeUnixNano": "1792227610000000000",
                   "name": "agentloop.call.started"
                 }
               ]
             },
             {
+              "traceId": "0aeb311c8e25dfec29eb4f615989f475",
+              "spanId": "e91d902ae92af665",
+              "parentSpanId": "e0574d79e1c419ee",
+              "name": "chat reader-1",
+              "kind": 3,
+              "startTimeUnixNano": "1792227608750000000",
+              "endTimeUnixNano": "1792227611250000000",
+              "attributes": [
+                {
+                  "key": "gen_ai.operation.name",
+                  "value": {
+                    "stringValue": "chat"
+                  }
+                },
+                {
+                  "key": "gen_ai.provider.name",
+                  "value": {
+                    "stringValue": "fake"
+                  }
+                },
+                {
+                  "key": "gen_ai.request.model",
+                  "value": {
+                    "stringValue": "reader-1"
+                  }
+                },
+                {
+                  "key": "gen_ai.conversation.id",
+                  "value": {
+                    "stringValue": "session-0001"
+                  }
+                },
+                {
+                  "key": "gen_ai.response.model",
+                  "value": {
+                    "stringValue": "reader-1"
+                  }
+                },
+                {
+                  "key": "gen_ai.usage.input_tokens",
+                  "value": {
+                    "intValue": "80"
+                  }
+                },
+                {
+                  "key": "gen_ai.usage.output_tokens",
+                  "value": {
+                    "intValue": "5"
+                  }
+                },
+                {
+                  "key": "gen_ai.usage.cache_read.input_tokens",
+                  "value": {
+                    "intValue": "50"
+                  }
+                }
+              ]
+            },
+            {
               "traceId": "9d1f389621a2e17394bcfef1d8cd5a9f",
-              "spanId": "9fa7f18e47ce16fb",
-              "parentSpanId": "cd95316b41fc9bf0",
+              "spanId": "f5914714dec55006",
+              "parentSpanId": "b7daaa19dea5de8b",
               "name": "execute_tool send_mail",
               "kind": 1,
-              "startTimeUnixNano": "1792227617500000000",
-              "endTimeUnixNano": "1792227620000000000",
+              "startTimeUnixNano": "1792227618750000000",
+              "endTimeUnixNano": "1792227621250000000",
               "attributes": [
                 {
                   "key": "gen_ai.operation.name",
@@ -428,7 +541,7 @@
               ],
               "events": [
                 {
-                  "timeUnixNano": "1792227611250000000",
+                  "timeUnixNano": "1792227612500000000",
                   "name": "agentloop.policy.decision",
                   "attributes": [
                     {
@@ -440,7 +553,7 @@
                   ]
                 },
                 {
-                  "timeUnixNano": "1792227616250000000",
+                  "timeUnixNano": "1792227617500000000",
                   "name": "agentloop.policy.decision",
                   "attributes": [
                     {
@@ -470,19 +583,19 @@
                   ]
                 },
                 {
-                  "timeUnixNano": "1792227618750000000",
+                  "timeUnixNano": "1792227620000000000",
                   "name": "agentloop.call.started"
                 }
               ]
             },
             {
               "traceId": "0aeb311c8e25dfec29eb4f615989f475",
-              "spanId": "332d67c11c202851",
+              "spanId": "acd8d4cdd76c5d99",
               "parentSpanId": "f35af1db991c31a9",
               "name": "execute_tool delete_all",
               "kind": 1,
-              "startTimeUnixNano": "1792227612500000000",
-              "endTimeUnixNano": "1792227613750000000",
+              "startTimeUnixNano": "1792227613750000000",
+              "endTimeUnixNano": "1792227615000000000",
               "attributes": [
                 {
                   "key": "gen_ai.operation.name",
@@ -541,7 +654,7 @@
               ],
               "events": [
                 {
-                  "timeUnixNano": "1792227612500000000",
+                  "timeUnixNano": "1792227613750000000",
                   "name": "agentloop.policy.decision",
                   "attributes": [
                     {
@@ -560,11 +673,11 @@
             },
             {
               "traceId": "9d1f389621a2e17394bcfef1d8cd5a9f",
-              "spanId": "cd95316b41fc9bf0",
+              "spanId": "b7daaa19dea5de8b",
               "name": "invoke_agent mailer",
               "kind": 1,
-              "startTimeUnixNano": "1792227617500000000",
-              "endTimeUnixNano": "1792227622500000000",
+              "startTimeUnixNano": "1792227618750000000",
+              "endTimeUnixNano": "1792227623750000000",
               "attributes": [
                 {
                   "key": "gen_ai.operation.name",
@@ -636,12 +749,12 @@
             },
             {
               "traceId": "9d1f389621a2e17394bcfef1d8cd5a9f",
-              "spanId": "2a638f503a92f7b7",
-              "parentSpanId": "cd95316b41fc9bf0",
+              "spanId": "4b1a16475eddfeef",
+              "parentSpanId": "b7daaa19dea5de8b",
               "name": "chat fake-model",
               "kind": 3,
-              "startTimeUnixNano": "1792227620000000000",
-              "endTimeUnixNano": "1792227621250000000",
+              "startTimeUnixNano": "1792227621250000000",
+              "endTimeUnixNano": "1792227622500000000",
               "attributes": [
                 {
                   "key": "gen_ai.operation.name",

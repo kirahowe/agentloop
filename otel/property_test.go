@@ -69,12 +69,22 @@ func (g *gen) result(id string, isErr bool, labels []string) {
 			Labels: labels,
 			Log:    g.text("log"),
 		}
+		if rapid.Bool().Draw(g.t, "reader") {
+			for i, n := 0, rapid.IntRange(1, 2).Draw(g.t, "nreader"); i < n; i++ {
+				e.ToolResult.Usage = append(e.ToolResult.Usage, agentloop.ModelUsage{
+					Model: rapid.SampledFrom([]string{"", "reader-a"}).Draw(g.t, "rmodel"), Usage: g.usage()})
+			}
+			e.ToolResult.Quarantine = &agentloop.QuarantineReport{Tool: "read", FreeText: rapid.Bool().Draw(g.t, "free"), Dropped: g.labels()}
+		}
 	})
 }
 
 func (g *gen) decide(id string, v agentloop.Verdict, resolved bool) {
 	g.add(agentloop.EntryDecision, func(e *agentloop.Entry) {
 		d := &agentloop.DecisionEntry{CallID: id, Tool: g.toolName[id], Verdict: v, Labels: g.labels(), Resolved: resolved}
+		if rapid.Bool().Draw(g.t, "deferred") {
+			d.Deferred = g.labels()
+		}
 		if rapid.Bool().Draw(g.t, "reason") {
 			d.Reason = g.text("reason")
 		}
@@ -154,6 +164,12 @@ func (g *gen) run() {
 	g.add(agentloop.EntryRunStarted, func(e *agentloop.Entry) {
 		e.RunStarted = &agentloop.RunStartedEntry{Prompt: g.text("prompt")}
 	})
+	if rapid.Bool().Draw(g.t, "pins") {
+		g.nextID++
+		g.add(agentloop.EntryPins, func(e *agentloop.Entry) {
+			e.Pins = &agentloop.PinsEntry{Pins: map[string]string{fmt.Sprintf("tool_%d", g.nextID): g.text("pin")}}
+		})
+	}
 	if l := g.labels(); len(l) > 0 && rapid.Bool().Draw(g.t, "seed") {
 		g.add(agentloop.EntryLabels, func(e *agentloop.Entry) {
 			e.Labels = &agentloop.LabelsEntry{Labels: l, Source: agentloop.LabelSeed}
@@ -309,6 +325,7 @@ func TestPropertyShapeOfTraces(t *testing.T) {
 				calls[e.CallStarted.CallID] = true
 			case agentloop.EntryToolResult:
 				calls[e.ToolResult.Result.CallID] = true
+				assistant += len(e.ToolResult.Usage) // a reader's calls are chat spans too
 			}
 		}
 		var roots, chats, tools int
@@ -406,8 +423,16 @@ func TestPropertyUsage(t *testing.T) {
 			}
 		}
 		var got []int64
-		for _, s := range spansOf(t, raw) {
-			if !strings.HasPrefix(s["name"].(string), "chat") {
+		spans := spansOf(t, raw)
+		runIDs := map[string]bool{}
+		for _, s := range spans {
+			if strings.HasPrefix(s["name"].(string), "invoke_agent") {
+				runIDs[s["spanId"].(string)] = true
+			}
+		}
+		for _, s := range spans {
+			// Reader calls under a tool span are checked elsewhere.
+			if !strings.HasPrefix(s["name"].(string), "chat") || (s["parentSpanId"] != nil && !runIDs[s["parentSpanId"].(string)]) {
 				continue
 			}
 			for _, a := range s["attributes"].([]any) {

@@ -29,6 +29,12 @@ type Options struct {
 	ServiceName string
 	// TraceSeed makes trace and span ids. Default: ConversationID.
 	TraceSeed string
+	// ParentTraceID and ParentSpanID (hex, 32 and 16 characters) hang
+	// every run under a span made elsewhere, such as an eval's
+	// invoke_workflow span. All runs then share that trace id. Both are
+	// needed; if either is empty they are ignored.
+	ParentTraceID string
+	ParentSpanID  string
 	// IncludeContent adds the opt-in content attributes. See the package
 	// documentation. Off by default.
 	IncludeContent bool
@@ -102,17 +108,18 @@ type run struct {
 
 // A call is everything the log says about one tool call.
 type call struct {
-	id, name string
-	input    json.RawMessage
-	touched  bool
-	firstSeq int
-	first    time.Time
-	last     time.Time
-	started  bool
-	verdict  agentloop.Verdict
-	events   []Event
-	result   *agentloop.ToolResultEntry
-	owner    *run
+	id, name  string
+	input     json.RawMessage
+	touched   bool
+	firstSeq  int
+	first     time.Time
+	last      time.Time
+	started   bool
+	verdict   agentloop.Verdict
+	events    []Event
+	result    *agentloop.ToolResultEntry
+	resultSeq int
+	owner     *run
 }
 
 type converter struct {
@@ -171,6 +178,17 @@ func (c *converter) entry(i int, entries []agentloop.Entry) {
 			}
 			r.events = append(r.events, Event{nanos(e.Time), "agentloop.labels", attrs})
 		}
+	case agentloop.EntryPins:
+		if e.Pins != nil {
+			if r := c.anchor(); r != nil {
+				names := make([]string, 0, len(e.Pins.Pins))
+				for n := range e.Pins.Pins {
+					names = append(names, n)
+				}
+				sort.Strings(names)
+				r.events = append(r.events, Event{nanos(e.Time), "agentloop.pins", []KeyValue{strArray("agentloop.pins.tools", names)}})
+			}
+		}
 	case agentloop.EntryMessage:
 		if e.Message != nil {
 			c.message(i, entries)
@@ -188,7 +206,15 @@ func (c *converter) entry(i int, entries []agentloop.Entry) {
 	case agentloop.EntryToolResult:
 		if e.ToolResult != nil {
 			k := c.call(e.ToolResult.Result.CallID, "", e)
-			k.result = e.ToolResult
+			k.result, k.resultSeq = e.ToolResult, e.Seq
+			if r := c.anchor(); r != nil {
+				for _, u := range e.ToolResult.Usage {
+					r.usage.InputTokens += u.Usage.InputTokens
+					r.usage.OutputTokens += u.Usage.OutputTokens
+					r.usage.CacheReadTokens += u.Usage.CacheReadTokens
+					r.usage.CacheWriteTokens += u.Usage.CacheWriteTokens
+				}
+			}
 			for _, l := range e.ToolResult.Labels {
 				c.labels[l] = true
 			}
@@ -244,6 +270,9 @@ func (c *converter) decision(e agentloop.Entry) {
 	}
 	if len(d.Labels) > 0 {
 		attrs = append(attrs, strArray("agentloop.labels", d.Labels))
+	}
+	if len(d.Deferred) > 0 {
+		attrs = append(attrs, strArray("agentloop.policy.deferred", d.Deferred))
 	}
 	if c.opts.IncludeContent {
 		if d.Reason != "" {
@@ -418,7 +447,7 @@ func name(op, subject string) string {
 
 // addSpan puts a child span in run r's trace, or in a trace of its own
 // when no run has started yet. The end is never before the start.
-func (c *converter) addSpan(r *run, kind string, seq int, s Span, start, end time.Time) {
+func (c *converter) addSpan(r *run, kind string, seq int, s Span, start, end time.Time) string {
 	if r != nil {
 		s.TraceID, s.ParentSpanID = r.traceID, r.spanID
 	} else {
@@ -430,6 +459,14 @@ func (c *converter) addSpan(r *run, kind string, seq int, s Span, start, end tim
 	}
 	s.StartTimeUnixNano, s.EndTimeUnixNano = nanos(start), nanos(end)
 	c.spans = append(c.spans, orderedSpan{s, seq})
+	return s.SpanID
+}
+
+func maxTime(a, b time.Time) time.Time {
+	if b.Before(a) {
+		return a
+	}
+	return b
 }
 
 func (c *converter) closeRun(r *run, end time.Time, out *agentloop.Outcome) {
@@ -502,6 +539,7 @@ func (c *converter) runSpan(r *run) {
 	c.spans = append(c.spans, orderedSpan{Span{
 		TraceID:           r.traceID,
 		SpanID:            r.spanID,
+		ParentSpanID:      c.parentSpan(),
 		Name:              name("invoke_agent", c.opts.AgentName),
 		Kind:              KindInternal,
 		StartTimeUnixNano: nanos(r.start),
@@ -583,18 +621,63 @@ func (c *converter) callSpans() {
 		if k.owner != nil && start.Before(k.owner.start) {
 			start = k.owner.start
 		}
-		c.addSpan(k.owner, "call", k.firstSeq, Span{
+		if k.result != nil && k.result.Quarantine != nil {
+			q := k.result.Quarantine
+			attrs = append(attrs,
+				str("agentloop.quarantine.tool", q.Tool),
+				boolean("agentloop.quarantine.free_text", q.FreeText))
+			if len(q.Dropped) > 0 {
+				attrs = append(attrs, strArray("agentloop.quarantine.dropped", q.Dropped))
+			}
+		}
+		callSpan := c.addSpan(k.owner, "call", k.firstSeq, Span{
 			Name:       name("execute_tool", k.name),
 			Kind:       KindInternal,
 			Attributes: attrs,
 			Events:     k.events,
 			Status:     status,
 		}, start, k.last)
+		// The quarantined reader's model calls are chat spans under the
+		// tool span. The log has no times for them, so each spans the
+		// tool call.
+		if k.result != nil {
+			for j, u := range k.result.Usage {
+				reqModel := u.Model
+				if reqModel == "" {
+					reqModel = c.requestModel("")
+				}
+				ia := c.inferenceAttrs(reqModel)
+				if u.Model != "" {
+					ia = append(ia, str("gen_ai.response.model", u.Model))
+				}
+				ia = append(ia, usageAttrs(u.Usage)...)
+				rs := Span{Name: name("chat", reqModel), Kind: KindClient, Attributes: ia}
+				if k.owner != nil {
+					rs.TraceID = k.owner.traceID
+				} else {
+					rs.TraceID = c.traceID(-1)
+				}
+				rs.ParentSpanID = callSpan
+				rs.SpanID = c.spanID(rs.TraceID, "reader"+strconv.Itoa(j), k.resultSeq)
+				rs.StartTimeUnixNano, rs.EndTimeUnixNano = nanos(start), nanos(maxTime(start, k.last))
+				c.spans = append(c.spans, orderedSpan{rs, k.firstSeq})
+			}
+		}
 	}
 }
 
 func (c *converter) traceID(index int) string {
+	if c.opts.ParentTraceID != "" && c.opts.ParentSpanID != "" {
+		return c.opts.ParentTraceID
+	}
 	return hexID(16, c.opts.TraceSeed, "trace", strconv.Itoa(index))
+}
+
+func (c *converter) parentSpan() string {
+	if c.opts.ParentTraceID != "" {
+		return c.opts.ParentSpanID
+	}
+	return ""
 }
 
 func (c *converter) spanID(trace, kind string, seq int) string {

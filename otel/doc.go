@@ -64,6 +64,25 @@
 // metadata, not content, and are always exported. Treat the telemetry
 // backend as inside the policy.
 //
+// Three more entry types have a place. A pins entry is an event
+// agentloop.pins on the run span, with the pinned tool names in
+// agentloop.pins.tools (the digests stay out). A decision's deferred labels
+// are agentloop.policy.deferred on its decision event. A tool_result's
+// usage, the model calls a quarantined reader made, becomes one
+// "chat {model}" span (CLIENT) per call under the execute_tool span, with
+// gen_ai.usage.*. The convention's "SHOULD NOT record two spans for one
+// call" is about the MCP client span, not about a tool that calls a
+// model, so a child inference span is the right shape here. The log has no
+// times for those calls, so each spans its tool call. The reader's calls
+// also count in a crashed run's usage, as they do in an outcome's. A
+// tool_result's quarantine report is agentloop.quarantine.tool,
+// agentloop.quarantine.free_text and agentloop.quarantine.dropped on the
+// tool span. The outcome reason tools_unavailable is not in the log (the
+// run never starts), so nothing converts it.
+//
+// Options.ParentTraceID and ParentSpanID hang every run under a span made
+// elsewhere; the runs then share that trace.
+//
 // # Timing
 //
 // An entry carries only the time it was appended. A chat span ends at its
