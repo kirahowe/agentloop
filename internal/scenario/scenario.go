@@ -750,8 +750,10 @@ func (sc *Scenario) checkCall(name string, c agentloop.Call) {
 			t.Fatalf("always_hold call %s ran without a person", c.ID)
 		case pol.Class == trifecta.Egress && has(trifecta.Private) && has(trifecta.Contaminated):
 			t.Fatalf("egress call %s ran on a private, contaminated session (%v) without a person", c.ID, before)
-		case pol.Class == trifecta.Act && has(trifecta.Contaminated):
-			t.Fatalf("act call %s ran on a contaminated session (%v) without a person", c.ID, before)
+		case pol.Class == trifecta.Edit && has(trifecta.Contaminated):
+			t.Fatalf("edit call %s ran on a contaminated session (%v) without a person", c.ID, before)
+		case pol.Class == trifecta.Act && (d.Consent == nil || trifecta.Consented(pol.Consent, c.Input) != *d.Consent):
+			t.Fatalf("act call %s ran without a person or a matching consent rule", c.ID)
 		}
 	} else if d.Verdict != agentloop.Allow {
 		t.Fatalf("call %s runs on a person's %s", c.ID, d.Verdict)

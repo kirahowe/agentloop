@@ -96,6 +96,9 @@ type DecisionEntry struct {
 	// Deferred are labels the call's result will carry, given to the
 	// tool when it runs (see Decision.Deferred).
 	Deferred []string `json:"deferred,omitempty"`
+	// Consent is the index of the standing consent rule that allowed the
+	// call, when one did (see Decision.Consent).
+	Consent *int `json:"consent,omitempty"`
 	// Resolved marks the decision of a person on a held call.
 	Resolved bool `json:"resolved,omitempty"`
 	// InputSHA256 is set on a hold: the digest of the call's input (see

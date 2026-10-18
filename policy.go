@@ -32,6 +32,9 @@ type Decision struct {
 	// them on its result (or fewer, by a rule of its own, as a
 	// quarantined reader does). Agent.Forbid applies to them as to Labels.
 	Deferred []string `json:"deferred,omitempty"`
+	// Consent is the index of the operator's standing consent rule that
+	// allowed the call, when one did (trifecta.Consented).
+	Consent *int `json:"consent,omitempty"`
 }
 
 // A Policy decides whether a tool call may run. It is asked only about

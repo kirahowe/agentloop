@@ -2,6 +2,7 @@ package trifecta
 
 import (
 	"context"
+	"encoding/json"
 	"reflect"
 	"slices"
 	"testing"
@@ -18,9 +19,10 @@ func genLabels() *rapid.Generator[[]string] {
 func genTool() *rapid.Generator[Tool] {
 	return rapid.Custom(func(t *rapid.T) Tool {
 		return Tool{
-			Class:      rapid.SampledFrom([]Class{Read, Write, Egress, Act, Act, Egress, "", "sned"}).Draw(t, "class"),
+			Class:      rapid.SampledFrom([]Class{Read, Write, Edit, Egress, Act, Act, Egress, Edit, "", "sned", "Edit"}).Draw(t, "class"),
 			Labels:     genLabels().Draw(t, "labels"),
 			AlwaysHold: rapid.IntRange(0, 4).Draw(t, "always") == 0,
+			Consent:    rapid.SampledFrom([][]map[string]json.RawMessage{nil, {{"group": json.RawMessage(`"Kira only"`)}}}).Draw(t, "consent"),
 		}
 	})
 }
@@ -36,11 +38,13 @@ func TestDecideIsTheRule(t *testing.T) {
 		switch {
 		case tool.AlwaysHold:
 			want = agentloop.Hold
+		case tool.Class == Act:
+			want = agentloop.Hold
+		case tool.Class == Edit && contaminated:
+			want = agentloop.Hold
 		case tool.Class == Egress && private && contaminated:
 			want = agentloop.Hold
-		case tool.Class == Act && contaminated:
-			want = agentloop.Hold
-		case tool.Class != Read && tool.Class != Write && tool.Class != Egress && tool.Class != Act:
+		case tool.Class != Read && tool.Class != Write && tool.Class != Edit && tool.Class != Egress:
 			want = agentloop.Hold
 		}
 		if got := Decide(labels, tool); got != want {
@@ -50,7 +54,7 @@ func TestDecideIsTheRule(t *testing.T) {
 }
 
 // No set of labels lets an egress call through once the session holds
-// both private and contaminated, or an act call once it holds
+// both private and contaminated, or an edit call once it holds
 // contaminated; and more labels never turn a hold into an allow.
 func TestDecideIsMonotone(t *testing.T) {
 	rapid.Check(t, func(t *rapid.T) {
@@ -80,8 +84,14 @@ func TestDecideTable(t *testing.T) {
 		{both, Tool{Class: Egress}, agentloop.Hold},
 		{both, Tool{Class: Read}, agentloop.Allow},
 		{both, Tool{Class: Write}, agentloop.Allow},
-		{[]string{Private}, Tool{Class: Act}, agentloop.Allow},
+		{nil, Tool{Class: Act}, agentloop.Hold},
+		{[]string{Private}, Tool{Class: Act}, agentloop.Hold},
 		{[]string{Contaminated}, Tool{Class: Act}, agentloop.Hold},
+		{nil, Tool{Class: Edit}, agentloop.Allow},
+		{[]string{Private}, Tool{Class: Edit}, agentloop.Allow},
+		{[]string{Contaminated}, Tool{Class: Edit}, agentloop.Hold},
+		{both, Tool{Class: Edit}, agentloop.Hold},
+		{nil, Tool{Class: Edit, AlwaysHold: true}, agentloop.Hold},
 		{nil, Tool{Class: Read, AlwaysHold: true}, agentloop.Hold},
 		{nil, Tool{Class: "reed"}, agentloop.Hold},
 	}
@@ -97,9 +107,14 @@ func TestPolicyDecide(t *testing.T) {
 		tool := genTool().Draw(t, "tool")
 		p := Policy{Tools: map[string]Tool{"t": tool}}
 		view := agentloop.View{Labels: Union(nil, genLabels().Draw(t, "session"))}
-		d := p.Decide(context.Background(), agentloop.ToolCall{ID: "c", Name: "t"}, view)
-		if d.Verdict != Decide(view.Labels, tool) {
-			t.Fatalf("policy %s, rule %s", d.Verdict, Decide(view.Labels, tool))
+		input := json.RawMessage(rapid.SampledFrom([]string{`{}`, `{"group":"Kira only"}`, `{"group":"Everyone"}`}).Draw(t, "input"))
+		d := p.Decide(context.Background(), agentloop.ToolCall{ID: "c", Name: "t", Input: input}, view)
+		verdict, rule := DecideCall(view.Labels, tool, input)
+		if d.Verdict != verdict {
+			t.Fatalf("policy %s, rule %s", d.Verdict, verdict)
+		}
+		if (rule >= 0) != (d.Consent != nil) || d.Consent != nil && *d.Consent != rule {
+			t.Fatalf("policy consent %v, rule %d", d.Consent, rule)
 		}
 		if !reflect.DeepEqual(append([]string{}, d.Labels...), append([]string{}, tool.Labels...)) {
 			t.Fatalf("decision labels %v, tool labels %v", d.Labels, tool.Labels)

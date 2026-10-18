@@ -671,8 +671,9 @@ func (r *runner) decide(ctx context.Context, call ToolCall) Decision {
 }
 
 func (r *runner) recordDecision(call ToolCall, d Decision) error {
-	e := &DecisionEntry{CallID: call.ID, Tool: call.Name, Verdict: d.Verdict, Reason: d.Reason, Labels: d.Labels, Deferred: d.Deferred}
+	e := &DecisionEntry{CallID: call.ID, Tool: call.Name, Verdict: d.Verdict, Reason: d.Reason, Labels: d.Labels, Deferred: d.Deferred, Consent: d.Consent}
 	if d.Verdict != Allow {
+		e.Consent = nil
 		// Deferred labels go with an allow only.
 		e.Deferred = nil
 	}

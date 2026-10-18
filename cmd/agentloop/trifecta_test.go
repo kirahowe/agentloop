@@ -350,3 +350,82 @@ func TestForbiddenLabelsRefuseAResult(t *testing.T) {
 		t.Fatalf("%d model requests", n)
 	}
 }
+
+// A request's policy carries the operator's standing consent: an act call
+// whose input matches a rule runs on a contaminated session, and is
+// recorded with the rule's index; a near miss is held. An edit call runs
+// on a session that is private but clean.
+func TestConsentAndEditFromTheRequest(t *testing.T) {
+	api := newFakeAPI(t,
+		toolReply("toolu_3", "broken", `{}`),
+		toolReply("toolu_1", "read_mail", `{}`),
+		toolReply("toolu_2", "web_post", `{"group":"Kira only","body":"hi"}`),
+		toolReply("toolu_4", "web_post", `{"group":"Kira only ","body":"hi"}`),
+		textReply("done"),
+	)
+	f, calls := trifectaFixture(t, api)
+	pol := f.req["policy"].(map[string]any)["tools"].(map[string]any)
+	pol["web_post"] = map[string]any{"class": "act", "consent": []map[string]any{{"group": "Everyone"}, {"group": "Kira only"}}}
+	pol["broken"] = map[string]any{"class": "edit"}
+	res := f.run()
+	out := res.outcome(t)
+	if res.code != 0 || out["reason"] != "held" {
+		t.Fatalf("exit %d outcome %v stderr %s", res.code, out, res.stderr)
+	}
+	held := out["held"].([]any)
+	if len(held) != 1 || held[0].(map[string]any)["id"] != "toolu_4" {
+		t.Fatalf("held %v", held)
+	}
+	got := readCalls(t, calls)
+	if !strings.Contains(got, `web_post {"input":{"group":"Kira only","body":"hi"}`) || !strings.Contains(got, "broken ") {
+		t.Fatalf("calls: %s", got)
+	}
+	var rule any = "none"
+	for _, l := range res.lines {
+		if d, ok := l["decision"].(map[string]any); ok && d["call_id"] == "toolu_2" {
+			rule = d["consent"]
+		}
+	}
+	if rule != float64(1) {
+		t.Fatalf("toolu_2's decision has consent %v, want rule 1", rule)
+	}
+}
+
+// An edit call from a contaminated session is held: what it writes would
+// come back from outside relay without its labels.
+func TestEditIsHeldOnceContaminated(t *testing.T) {
+	api := newFakeAPI(t,
+		toolReply("toolu_1", "read_mail", `{}`),
+		toolReply("toolu_2", "broken", `{"text":"injected"}`),
+		textReply("done"),
+	)
+	f, calls := trifectaFixture(t, api)
+	f.req["policy"].(map[string]any)["tools"].(map[string]any)["broken"] = map[string]any{"class": "edit"}
+	res := f.run()
+	out := res.outcome(t)
+	held, _ := out["held"].([]any)
+	if out["reason"] != "held" || len(held) != 1 || held[0].(map[string]any)["id"] != "toolu_2" {
+		t.Fatalf("outcome %v stderr %s", out, res.stderr)
+	}
+	if strings.Contains(readCalls(t, calls), "broken") {
+		t.Fatal("the held edit call ran")
+	}
+}
+
+func TestConsentRequestsAreChecked(t *testing.T) {
+	for _, c := range []struct {
+		entry map[string]any
+		want  string
+	}{
+		{map[string]any{"class": "egress", "consent": []map[string]any{{"group": "x"}}}, "only a tool of class act"},
+		{map[string]any{"class": "act", "always_hold": true, "consent": []map[string]any{{"group": "x"}}}, "both consent and always_hold"},
+		{map[string]any{"class": "act", "consent": []map[string]any{{}}}, "rule 0 is empty"},
+	} {
+		f, _ := trifectaFixture(t, newFakeAPI(t))
+		f.req["policy"].(map[string]any)["tools"].(map[string]any)["web_post"] = c.entry
+		res := f.run()
+		if res.code != 2 || !strings.Contains(res.stderr, c.want) {
+			t.Errorf("%v: exit %d stderr %s", c.entry, res.code, res.stderr)
+		}
+	}
+}

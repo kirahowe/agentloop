@@ -217,17 +217,41 @@ operator's private data) and `contaminated` (it has seen something an
 outsider could have written). Any other name is an error wherever a
 label is read, so a typo cannot drop one. A tool has a class: `read`
 (returns content, changes nothing, sends nothing out), `write` (changes
-the operator's own state), `egress` (can put data the model chose where
-an outsider sees it) or `act` (does something in the operator's name).
+the operator's own state), `edit` (changes the operator's own things
+outside relay: nobody else sees the change, and the earlier state
+survives, so it can be undone, as with their own reminders), `egress`
+(can put data the model chose where an outsider sees it) or `act`
+(others see it, it spends money, or it cannot be undone, which includes
+overwriting or deleting with no history kept). An edit call is held once
+the session is contaminated because labels do not follow text outside
+relay: injected text written into the operator's reminders would be read
+back later labelled only private, and a clean session would take it in
+clean. Only `write` keeps its labels, so only `write` runs whatever the
+labels.
 
-`trifecta.Decide(labels, tool)` is the rule, a pure function of the
-session's labels when the call is decided and the tool's entry:
+`trifecta.Decide(labels, tool)` is the rule for a call no consent rule
+covers, a pure function of the session's labels when the call is decided
+and the tool's entry:
 
 - `always_hold`: hold
+- `act`: hold, whatever the labels
+- `edit`, and the session holds `contaminated`: hold
 - `egress`, and the session holds both labels: hold
-- `act`, and the session holds `contaminated`: hold
 - an unknown class: hold
-- otherwise: allow
+- otherwise (`read`, `write`): allow, whatever the labels
+
+An `act` entry may carry `consent`, the operator's standing consent: a
+list of rules, each a map from input argument names to the exact JSON
+values a call must have. `trifecta.DecideCall(labels, tool, input)` is
+the whole rule. It allows an act call without `always_hold` whose input
+matches every pair of some rule, and records the rule's index in the
+decision (`consent` on the decision entry). Matching is exact after JSON
+normalisation: key order, spacing and string escapes do not matter, but a
+number matches only one written the same way and a string only the same
+characters. Input that is not one object, or that names a key twice
+anywhere, matches nothing, and so does an empty rule. A request refuses
+`consent` on any other class, beside `always_hold`, or with an empty
+rule. Arguments a rule does not name are free.
 
 It never denies; a person does. `trifecta.Policy` applies it to a map of
 tool entries. Each decision carries the tool's static labels, which the
@@ -756,7 +780,8 @@ The request:
     "tools": {                        // an entry for every tool, and no others
       "memo_send": {"class": "write"},
       "web_fetch": {"class": "egress", "labels": ["contaminated"]},
-      "rem":       {"class": "act", "labels": ["private"], "always_hold": false}
+      "rem":       {"class": "edit", "labels": ["private"], "always_hold": false},
+      "send":      {"class": "act", "consent": [{"group": "Kira only"}]}
     }
   },
   "resolve": [                        // run only: decisions on held calls
@@ -1164,8 +1189,8 @@ to the session and not passed on: tools get only `tool_env`.
   an accepted destination: everything a session sees is sent to it.
 - A quarantined reader can be fooled. An injection in the inner content
   can make it pick the wrong enum value or boolean, and with
-  `contaminated` dropped, the session's later `act` calls are no longer
-  held on that answer's account. A caller should treat an answer as a
+  `contaminated` dropped, the session's later `edit` and `egress` calls
+  are no longer held on that answer's account. A caller should treat an answer as a
   claim from outside content and prefer questions whose wrong answer is
   harmless, such as classification and routing. A closed answer still
   carries a few bits (a boolean, an array's length, a number's digits),

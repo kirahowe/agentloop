@@ -15,9 +15,11 @@ One such rule comes built in, in `agentloop/trifecta`. It keeps an agent
 from holding the three legs of the lethal trifecta at once: private data,
 content an outsider could have written, and a way to send data out. A
 session is labelled `private` or `contaminated` by what it has seen, and
-each tool has a class (`read`, `write`, `egress` or `act`). Once a session
-holds both labels, an egress call waits for a person; once it is
-contaminated, so does an act call. A policy can also forbid a label outright: a session that
+each tool has a class (`read`, `write`, `edit`, `egress` or `act`). Once a
+session holds both labels, an egress call waits for a person; once it is
+contaminated, so does an edit call. Every act call waits for one,
+whatever the labels, unless its input matches a standing consent rule
+the operator wrote. A policy can also forbid a label outright: a session that
 may not hold `private` never starts holding it, and a tool result that
 carries it is refused before the model sees it.
 

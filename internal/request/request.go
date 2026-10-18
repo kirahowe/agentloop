@@ -366,6 +366,19 @@ func (r *Request) validatePolicy() error {
 		if err := trifecta.CheckLabels(e.Labels); err != nil {
 			return usage.Errorf("policy.tools %q: %v", name, err)
 		}
+		if e.Consent != nil {
+			switch {
+			case e.Class != trifecta.Act:
+				return usage.Errorf("policy.tools gives %q consent, which only a tool of class act takes (its class is %q)", name, e.Class)
+			case e.AlwaysHold:
+				return usage.Errorf("policy.tools gives %q both consent and always_hold, which holds every call whatever the consent", name)
+			}
+			for i, rule := range e.Consent {
+				if len(rule) == 0 {
+					return usage.Errorf("policy.tools %q: consent rule %d is empty; a rule names at least one argument and its value", name, i)
+				}
+			}
+		}
 		if bad := agentloop.Forbidden(e.Labels, p.ForbidLabels); len(bad) > 0 {
 			return usage.Errorf("policy.tools gives %q the labels %v, which policy.forbid_labels forbids", name, bad)
 		}
