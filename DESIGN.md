@@ -349,14 +349,48 @@ JSON object for the operator, with digests and sizes only:
 ```
 
 The inner content, the inner tool's own log and the reader's text are
-not kept anywhere. A `tool_result` whose labels no longer say
-`contaminated` must not carry outsider text in any field. The entry's
+not kept anywhere, except as below. A `tool_result` whose labels no
+longer say `contaminated` must not carry outsider text in any field but
+its `display`, which carries labels of its own.
+
+A call may also set `show_operator: true`. The reader is then told to add
+`"operator": <text>` to its reply: a short answer in Markdown, in its own
+words, with links, for the operator alone. The answer is read and
+validated as before, and the caller gets only that. The text becomes the
+result's display (see Displays): the question as its title, the text as
+its body, the reader labels as its labels (so a closed answer leaves the
+caller clean while the display stays `contaminated`), and the inner
+result's display sources, if it had a display. A reply with `operator`
+from a call without `show_operator` is not a valid reply. A blank
+`operator` gives no display. The entry's
 `quarantine` field holds `{"tool", "free_text", "dropped"}` for clients.
 
 Crash safety is as for any tool. The deferred labels are not on the
 session until the result is, and until then the caller has seen nothing
 of the inner call. A reader killed mid-call leaves the usual "may or may
 not have taken effect" result, and its usage so far is not recorded.
+
+### Displays
+
+A `Result` may carry a `Display`: a title, a Markdown body, labels and
+sources (each a title and a ref such as `web:https://...`), for the
+operator and never the model. The loop keeps it in the `tool_result`
+entry's `display`, and the conversation never holds any of it:
+`Messages` is built from the result alone. Its labels become the union of
+its own, the result's, the deferred ones and the session's as the call
+ran, so a display is never labelled less than the call that made it. The
+session does not take a display's labels. A display that would carry a
+label the agent forbids is dropped, and the entry's log says so. A
+refused result keeps no display.
+
+With `Agent.DisplayRefPrefix` set (the request's `display_ref_prefix`),
+the display gets a ref, the prefix and `DisplayID(call id)`: the call id
+in lower case when it is a short run of letters, digits, `_` and `-`, and
+otherwise `call-` and 16 hex digits of its sha256. The model's content
+gains one line, `The operator was also shown [[<ref>]].` (without a
+prefix, `The operator was also shown more than this.`), which holds
+nothing the display said. relay keeps each display as a doc under that
+ref, and an ACP client gets it as tool call content (see the command).
 
 ### Sessions and stores
 
@@ -741,7 +775,8 @@ The request:
     "max_output_tokens": 2048,        // 0 or left out: the adapter's default
     "retries": 1,                     // re-asks after an invalid answer, 0 to 5
     "tools": ["mail_read"]            // the inner tools it may read through
-  }
+  },
+  "display_ref_prefix": "shown:2026-10-18/" // where displays are kept; see Displays
 }
 ```
 
@@ -862,7 +897,19 @@ whitespace:
 ```
 
 `content` and `labels` are required and `is_error` defaults to false. The
-result's labels are added to the session. If the program exits non-zero,
+result's labels are added to the session. An envelope may also carry
+`display`, something for the operator alone (see Displays):
+
+```json
+{"content": "...", "labels": [], "display": {"title": "Venues", "body": "markdown",
+  "labels": ["contaminated"], "sources": [{"title": "List", "ref": "web:https://..."}]}}
+```
+
+`title`, `body` and `labels` are required, and `sources` may be left out.
+A display that breaks the bounds of `agentloop.CheckDisplay` (a title of 1
+to 200 characters, a body of at most 200,000 bytes, at most 50 sources,
+each with a title and a one-line ref) fails the call like any other bad
+envelope. If the program exits non-zero,
 writes more than the output cap (1 MiB) to stdout, or writes anything
 (a field spelled otherwise or given twice included)
 but one such envelope with known labels, the model gets only "The tool
@@ -1029,7 +1076,11 @@ also follows `session/new` and `session/resume` of a labelled session,
 and ends the replay of a labelled one. `_meta["agentloop/quarantine"]`
 on a reader call's result holds `{"tool", "free_text", "dropped"}`, so
 a client can show that a reader answered and what the session did not
-take. And `_meta["agentloop/retry"]` on a notice for a
+take. A result with a display has one more content item after its text:
+a text block holding the display's title and body, with the whole
+display, `{"title", "body", "labels", "sources", "ref"}`, in its
+`_meta["relay/display"]`, so a client can show it apart from the
+result. And `_meta["agentloop/retry"]` on a notice for a
 model call that will be retried holds `kind`, `wait_ms`, `retry_at`,
 `attempt` and, when there was one, the HTTP `status`, so a client can
 count down to the retry.

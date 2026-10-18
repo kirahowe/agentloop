@@ -107,7 +107,14 @@ against a JSON Schema the agent gave. If the schema admits no free text
 (booleans, numbers, enums, dates, objects with fixed keys, arrays of at
 most 100 items), the answer does not make the session `contaminated`.
 `private` always passes through. The reader's calls count toward the
-run's limits and its cost.
+run's limits and its cost. With `show_operator`, the reader also writes a
+fuller answer that only the operator sees, as a display.
+
+A tool result can carry a display: a title, a Markdown body, labels and
+sources for the operator. agentloop keeps it in the session file and
+sends it to an ACP client, and never gives the model any of it. The
+model is told only that the operator was shown something, under the ref
+`display_ref_prefix` gives it.
 
 An inner tool may also be `egress`, such as a web search that fetches
 the pages it finds. The agent writes that tool's input, so the call is
