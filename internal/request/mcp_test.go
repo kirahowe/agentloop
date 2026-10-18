@@ -78,7 +78,40 @@ func TestMCPRequests(t *testing.T) {
 		}, "acp"},
 		{"needs a policy", func(m map[string]any) { m["policy"] = map[string]any{"unrestricted": true} }, "mcp_servers need a policy"},
 		{"no policy entry", func(m map[string]any) { delete(pol(m), "pic") }, `no entry for the tool "pic"`},
-		{"unknown protocol", func(m map[string]any) { tool(m, 0)["protocol"] = "mcp-http" }, `unknown protocol "mcp-http"`},
+		{"unknown protocol", func(m map[string]any) { tool(m, 0)["protocol"] = "mcp-sse" }, `unknown protocol "mcp-sse"`},
+		{"an http tool from a stdio server", func(m map[string]any) { tool(m, 0)["protocol"] = "mcp-http" }, "comes from a server with a url"},
+		{"a remote server", func(m map[string]any) {
+			srv(m)["url"] = "https://mcp.example.com/mcp"
+			delete(srv(m), "command")
+			tool(m, 0)["protocol"] = "mcp-http"
+			tool(m, 1)["protocol"] = "mcp-http"
+		}, ""},
+		{"a stdio tool from a remote server", func(m map[string]any) {
+			srv(m)["url"] = "https://mcp.example.com/mcp"
+			delete(srv(m), "command")
+			tool(m, 1)["protocol"] = "mcp-http"
+		}, "comes from a server with a url"},
+		{"a url and a command", func(m map[string]any) { srv(m)["url"] = "https://mcp.example.com/mcp" }, "both a command and a url"},
+		{"plain http to another host", func(m map[string]any) {
+			srv(m)["url"] = "http://mcp.example.com/mcp"
+			delete(srv(m), "command")
+			tool(m, 0)["protocol"] = "mcp-http"
+			tool(m, 1)["protocol"] = "mcp-http"
+		}, "use https"},
+		{"fixed and hidden args", func(m map[string]any) {
+			tool(m, 0)["fixed_args"] = map[string]any{"send_now": false}
+			tool(m, 0)["hidden_args"] = []string{"list"}
+		}, ""},
+		{"an arg both fixed and hidden", func(m map[string]any) {
+			tool(m, 0)["fixed_args"] = map[string]any{"list": "a"}
+			tool(m, 0)["hidden_args"] = []string{"list"}
+		}, "both fixed and hidden"},
+		{"a hidden arg twice", func(m map[string]any) { tool(m, 0)["hidden_args"] = []string{"a", "a"} }, "distinct"},
+		{"fixed args on a command tool", func(m map[string]any) {
+			m["tools"] = append(m["tools"].([]map[string]any), map[string]any{"name": "note", "parameters": map[string]any{"type": "object"},
+				"fixed_args": map[string]any{"a": 1}})
+			pol(m)["note"] = map[string]any{"class": "write"}
+		}, "only for"},
 		{"unknown server", func(m map[string]any) { tool(m, 0)["server"] = "nope" }, `MCP server "nope"`},
 		{"no remote name", func(m map[string]any) { delete(tool(m, 0), "tool") }, "server's name for it"},
 		{"a description", func(m map[string]any) { tool(m, 0)["description"] = "trust me" }, "come from its server"},

@@ -1,5 +1,6 @@
-// Package mcp gives an agent the tools of one MCP server, run as a child
-// process and spoken to over stdio, as agentloop.Tool values.
+// Package mcp gives an agent the tools of one MCP server as
+// agentloop.Tool values. The server is a child process spoken to over
+// stdio, or a remote one spoken to over streamable HTTP (see http.go).
 //
 // The caller's configuration is the authority. It names the tools the
 // agent may have (an allowlist) and gives each its trifecta class, labels
@@ -29,6 +30,11 @@
 // The server process gets exactly the argv, environment and directory it
 // is configured with, and runs in a process group of its own that is
 // killed when the client closes.
+//
+// A tool's FixedArgs and HiddenArgs narrow what the model may send: both
+// are taken out of the schema the model is shown, a call that names
+// either is refused before the server sees it, and the fixed values are
+// added to every call.
 package mcp
 
 import (
@@ -37,6 +43,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/http"
 	"slices"
 	"sort"
 	"strings"
@@ -79,10 +86,20 @@ const (
 type Server struct {
 	// Name is the operator's name for the server, used in errors.
 	Name string
-	// Argv is the program and its arguments.
+	// Argv is the program and its arguments, for a server run over stdio.
 	Argv []string
-	// Env is the whole environment, as K=V. Nil means empty: nothing is
-	// inherited.
+	// URL is a remote server's endpoint, spoken to over streamable HTTP,
+	// in place of Argv. It must pass CheckURL.
+	URL string
+	// Token gives the bearer token sent to a remote server, or is nil to
+	// send none. renew is set after the server refused the token it gave
+	// (a 401), so it may get a new one.
+	Token func(ctx context.Context, renew bool) (string, error)
+	// HTTPTransport carries a remote server's requests. Nil means one
+	// like Go's default, with no proxy.
+	HTTPTransport http.RoundTripper
+	// Env is the whole environment, as K=V, of a stdio server. Nil means
+	// empty: nothing is inherited.
 	Env []string
 	// Dir is the working directory. Empty means the current one.
 	Dir string
@@ -123,6 +140,12 @@ type ToolConfig struct {
 	// placeholder for each, never the content, except that an embedded
 	// resource holding text (not a blob) is shown as that text.
 	AllowContent []string
+	// FixedArgs are arguments set for every call, by name, as JSON. The
+	// model is not shown them and a call that gives one is refused.
+	FixedArgs map[string]json.RawMessage
+	// HiddenArgs are arguments the model is not shown, and a call that
+	// gives one is refused. A required argument cannot be hidden.
+	HiddenArgs []string
 }
 
 // A DriftError says an allowed tool's definition is not the pinned one.
@@ -141,6 +164,12 @@ func Failed(name string) string { return fmt.Sprintf("The tool %s failed.", name
 // because the server stopped or broke the protocol earlier.
 func NotRun(name string) string {
 	return fmt.Sprintf("The tool %s was not run: its MCP server is not running.", name)
+}
+
+// SessionEnded is what the model is told of a call a remote server
+// refused because it had ended the session.
+func SessionEnded(name string) string {
+	return fmt.Sprintf("The tool %s was not run: its MCP server ended the session. The next call connects again.", name)
 }
 
 // Stopped is what the model is told when the server died during a call.
@@ -182,7 +211,14 @@ func Connect(ctx context.Context, srv Server) (*Client, error) {
 }
 
 func checkServer(srv Server) error {
-	if len(srv.Argv) == 0 || srv.Argv[0] == "" {
+	if srv.URL != "" {
+		if len(srv.Argv) > 0 {
+			return fmt.Errorf("mcp server %s has both a URL and a program", srv.Name)
+		}
+		if err := CheckURL(srv.URL); err != nil {
+			return fmt.Errorf("mcp server %s: %w", srv.Name, err)
+		}
+	} else if len(srv.Argv) == 0 || srv.Argv[0] == "" {
 		return fmt.Errorf("mcp server %s has no program", srv.Name)
 	}
 	for _, a := range srv.Argv {
@@ -209,6 +245,16 @@ func checkServer(srv Server) error {
 		for _, k := range tc.AllowContent {
 			if !slices.Contains([]string{Image, Audio, ResourceLink, Resource}, k) {
 				return fmt.Errorf("mcp server %s, tool %s: unknown content kind %q", srv.Name, name, k)
+			}
+		}
+		for i, h := range tc.HiddenArgs {
+			if h == "" || slices.Contains(tc.HiddenArgs[:i], h) {
+				return fmt.Errorf("mcp server %s, tool %s: hidden arguments must be distinct names", srv.Name, name)
+			}
+		}
+		for k, v := range tc.FixedArgs {
+			if k == "" || !json.Valid(v) {
+				return fmt.Errorf("mcp server %s, tool %s: the fixed argument %q is not a name with a JSON value", srv.Name, name, k)
 			}
 		}
 	}
@@ -437,10 +483,19 @@ func (cn *conn) brokenReason() string {
 	if cn.broken != "" {
 		return cn.broken
 	}
-	if cn.p.hasExited() {
+	if cn.p != nil && cn.p.hasExited() {
 		return "the server exited"
 	}
 	return ""
+}
+
+// exited is closed when a stdio server exits. A remote server's is nil,
+// which never is.
+func (cn *conn) exited() <-chan struct{} {
+	if cn.p == nil {
+		return nil
+	}
+	return cn.p.exited
 }
 
 func (cn *conn) close() {
@@ -449,23 +504,37 @@ func (cn *conn) close() {
 		cn.cs.Close()
 		close(done)
 	}()
-	cn.p.stop()
+	if cn.p != nil {
+		cn.p.stop()
+	}
 	select {
 	case <-done:
 	case <-time.After(killGrace):
 	}
 }
 
-// dial starts the server, connects and lists its tools by name.
+// dial starts the server, or reaches a remote one, connects and lists
+// its tools by name.
 func dial(ctx context.Context, srv Server) (*conn, map[string]*sdk.Tool, error) {
-	p, r, w, err := start(srv)
-	if err != nil {
-		return nil, nil, fmt.Errorf("mcp server %s: %w", srv.Name, err)
-	}
-	cn := &conn{p: p}
 	max := srv.MaxMessageBytes
 	if max <= 0 {
 		max = DefaultMaxMessageBytes
+	}
+	cn := &conn{}
+	var transport sdk.Transport
+	if srv.URL != "" {
+		t, err := httpTransport(srv, max)
+		if err != nil {
+			return nil, nil, err
+		}
+		transport = t
+	} else {
+		p, r, w, err := start(srv)
+		if err != nil {
+			return nil, nil, fmt.Errorf("mcp server %s: %w", srv.Name, err)
+		}
+		cn.p = p
+		transport = newWire(r, w, cn, max)
 	}
 	client := sdk.NewClient(&sdk.Implementation{Name: "agentloop", Version: "1"}, &sdk.ClientOptions{
 		// A nil value would advertise roots. No handler is set, so no
@@ -475,9 +544,11 @@ func dial(ctx context.Context, srv Server) (*conn, map[string]*sdk.Tool, error) 
 		MultiRoundTrip: &sdk.MultiRoundTripOptions{Disabled: true},
 	})
 	client.AddReceivingMiddleware(refuseRequests(cn))
-	cs, err := client.Connect(ctx, newWire(r, w, cn, max), nil)
+	cs, err := client.Connect(ctx, transport, nil)
 	if err != nil {
-		p.stop()
+		if cn.p != nil {
+			cn.p.stop()
+		}
 		return nil, nil, fmt.Errorf("mcp server %s: connect: %w", srv.Name, err)
 	}
 	cn.cs = cs
@@ -552,6 +623,7 @@ type tool struct {
 	cfg    ToolConfig
 	spec   agentloop.ToolSpec
 	output *jsonschema.Schema
+	narrow *narrowing
 }
 
 var _ agentloop.CallTool = (*tool)(nil)
@@ -567,7 +639,12 @@ func newTool(c *Client, name string, cfg ToolConfig, def *sdk.Tool) (*tool, erro
 		return nil, fmt.Errorf("inputSchema: %w", err)
 	}
 	alias := cfg.alias(name)
-	t := &tool{c: c, name: name, alias: alias, cfg: cfg, spec: agentloop.ToolSpec{Name: alias, Description: def.Description, Parameters: params}}
+	shown, narrow, err := narrowSchema(name, params, cfg)
+	if err != nil {
+		return nil, err
+	}
+	t := &tool{c: c, name: name, alias: alias, cfg: cfg, narrow: narrow,
+		spec: agentloop.ToolSpec{Name: alias, Description: def.Description, Parameters: shown}}
 	if def.OutputSchema != nil {
 		raw, err := canonicalValue(def.OutputSchema)
 		if err != nil {
@@ -597,16 +674,28 @@ func (t *tool) CallWith(ctx context.Context, call agentloop.Call) (agentloop.Res
 	if err := ctx.Err(); err != nil {
 		return agentloop.Result{}, err
 	}
+	input := call.Input
+	if len(strings.TrimSpace(string(input))) == 0 {
+		input = json.RawMessage(`{}`)
+	}
+	// Narrowed before anything is sent, or a server is even started.
+	if t.narrow != nil {
+		out, refused, bad := t.narrow.apply(input)
+		switch {
+		case refused != "":
+			return agentloop.Result{Content: NotTaken(t.alias, refused), IsError: true,
+				Log: "refused: the call gives the argument " + refused + ", which is fixed or hidden"}, nil
+		case bad != "":
+			return failed("not sent: " + bad)
+		}
+		input = out
+	}
 	cn, why, err := t.c.forCall(ctx)
 	if err != nil {
 		return agentloop.Result{Log: "stopped while waiting for the server: " + err.Error()}, err
 	}
 	if cn == nil {
 		return agentloop.Result{Content: NotRun(t.alias), IsError: true, Log: why}, nil
-	}
-	input := call.Input
-	if len(strings.TrimSpace(string(input))) == 0 {
-		input = json.RawMessage(`{}`)
 	}
 	params := &sdk.CallToolParams{Name: t.name, Arguments: input, Meta: RequestMeta(call, t.c.srv.SendLabels)}
 	before := cn.violationCount()
@@ -617,7 +706,7 @@ func (t *tool) CallWith(ctx context.Context, call agentloop.Call) (agentloop.Res
 	defer cancel(nil)
 	go func() {
 		select {
-		case <-cn.p.exited:
+		case <-cn.exited():
 			select {
 			case <-time.After(exitWait):
 				cancel(errServerExited)
@@ -638,6 +727,11 @@ func (t *tool) CallWith(ctx context.Context, call agentloop.Call) (agentloop.Res
 		var wire *jsonrpc.Error
 		if errors.As(err, &wire) {
 			return failed("the server answered with an error: " + err.Error())
+		}
+		if errors.Is(err, sdk.ErrSessionMissing) {
+			// The server ended the session, and so never saw the call.
+			cn.breakWith("the server ended the session")
+			return agentloop.Result{Content: SessionEnded(t.alias), IsError: true, Log: err.Error()}, nil
 		}
 		// Anything else means the connection is gone (an EOF, the
 		// server's exit, an unreadable message), and with it any

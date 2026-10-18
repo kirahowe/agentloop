@@ -71,7 +71,7 @@ The packages:
 | `agentloop/trifecta` | The trifecta rule and a policy built on it |
 | `agentloop/quarantine` | The quarantined reader tool and its answer schema checks |
 | `agentloop/command` | A tool that runs a program, with exactly the environment you give it |
-| `agentloop/mcp` | The tools of one MCP server, run as a child process over stdio |
+| `agentloop/mcp` | The tools of one MCP server, run as a child process over stdio or reached over streamable HTTP |
 | `agentloop/fake` | A scripted model for tests |
 
 ## The command
@@ -153,6 +153,35 @@ tool allows them.
 "tools": [{"name": "file_read", "protocol": "mcp-stdio", "server": "files", "tool": "read"}],
 "policy": {"tools": {"file_read": {"class": "read", "labels": ["private"]}}}
 ```
+
+A server can also be remote, reached over MCP's streamable HTTP transport.
+It gives a `url` in place of `command`, and its tools have protocol
+`mcp-http`. The URL must be https, or http to this machine for tests. What
+the `credentials_command` prints is the bearer token, kept in memory only,
+and sent only to the server's origin. When the server answers 401, the
+command is run again and the request sent once more, so a command that
+refreshes an OAuth token keeps a long session going. A redirect to another
+origin fails the request. No proxy is used.
+
+A tool's entry can narrow its arguments. `fixed_args` sets arguments to
+the given values on every call, and `hidden_args` names arguments the
+model may not give. Both are taken out of the schema the model sees, and a
+call that names one is refused before the server is sent anything.
+
+```json
+"mcp_servers": {"mail": {
+  "url": "https://mcp.example.com/mcp",
+  "credentials_command": ["relay", "mcp-token", "mail"]
+}},
+"tools": [{"name": "mail_send", "protocol": "mcp-http", "server": "mail", "tool": "send_campaign",
+           "fixed_args": {"send_now": false}, "hidden_args": ["reply_to"]}]
+```
+
+`agentloop mcp-tools` lists every tool of a remote server, with the
+digest each definition would be pinned at. It reads `{"url": ..., "token":
+...}` on stdin, so the token never shows in a process list, and prints
+`{"tools": [...]}`, each with its name, title, description, annotations,
+schemas and digest. It is for an operator choosing which tools to allow.
 
 The API key is fetched by a command named in the request, such as a
 keychain lookup, and reaches only the model.

@@ -77,9 +77,9 @@ type Request struct {
 
 // Tool is one tool of the request. A command tool (no protocol) gives its
 // name, description and parameters, and runs tool_command. An MCP tool
-// ("protocol": "mcp-stdio") gives its name, the server it comes from and
-// the server's name for it; the server gives its description and
-// parameters.
+// ("protocol": "mcp-stdio", or "mcp-http" for a remote server) gives its
+// name, the server it comes from and the server's name for it; the server
+// gives its description and parameters.
 type Tool struct {
 	agentloop.ToolSpec
 	Protocol string `json:"protocol"`
@@ -91,27 +91,44 @@ type Tool struct {
 	// Digest, when given, pins an MCP tool's definition (see mcp.Digest):
 	// a server that lists another fails the start.
 	Digest string `json:"digest"`
+	// FixedArgs and HiddenArgs narrow an MCP tool's arguments (see
+	// mcp.ToolConfig).
+	FixedArgs  map[string]json.RawMessage `json:"fixed_args"`
+	HiddenArgs []string                   `json:"hidden_args"`
 }
 
 // MCP reports whether the tool comes from an MCP server.
-func (t Tool) MCP() bool { return t.Protocol == ToolProtocolMCPStdio }
+func (t Tool) MCP() bool {
+	return t.Protocol == ToolProtocolMCPStdio || t.Protocol == ToolProtocolMCPHTTP
+}
 
-// MCPServer is an MCP server run over stdio for the length of the run.
+// MCPServer is an MCP server run over stdio for the length of the run, or
+// a remote one reached over streamable HTTP.
 type MCPServer struct {
 	// Command is the server's argv. An argument may hold
 	// CredentialsPlaceholder.
 	Command []string `json:"command"`
-	// CredentialsCommand, when given, is run once at start. What it
-	// prints is written to a file only this user can read, which is
-	// removed when agentloop exits, and CredentialsPlaceholder in Command
-	// is replaced by that file's path.
+	// URL is a remote server's endpoint, in place of Command: https, or
+	// http to a loopback address.
+	URL string `json:"url"`
+	// CredentialsCommand, when given, is run once at start. For a stdio
+	// server, what it prints is written to a file only this user can
+	// read, which is removed when agentloop exits, and
+	// CredentialsPlaceholder in Command is replaced by that file's path.
+	// For a remote server what it prints, trimmed, is the bearer token,
+	// kept only in memory; it is run again when the server refuses the
+	// token.
 	CredentialsCommand []string `json:"credentials_command"`
 	// SendLabels sends the session's labels with each call.
 	SendLabels bool `json:"send_labels"`
 }
 
-// ToolProtocolMCPStdio is the protocol of a tool from an MCP server.
-const ToolProtocolMCPStdio = "mcp-stdio"
+// ToolProtocolMCPStdio is the protocol of a tool from an MCP server run
+// over stdio, and ToolProtocolMCPHTTP of one from a remote server.
+const (
+	ToolProtocolMCPStdio = "mcp-stdio"
+	ToolProtocolMCPHTTP  = "mcp-http"
+)
 
 // CredentialsPlaceholder in an MCP server's command is replaced by the
 // path of the file holding what its credentials_command printed.

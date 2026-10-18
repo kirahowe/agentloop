@@ -876,6 +876,48 @@ argument of `command` but the first is replaced by that file's path. A
 a failing command is reported with its exit status and the end of its
 stderr only.
 
+**Remote MCP servers.** A server with a `url` in place of `command` is
+reached over MCP's streamable HTTP transport, with the Go SDK's client,
+and its tools have `"protocol": "mcp-http"` (an `mcp-stdio` tool must
+name a server with a command, and an `mcp-http` tool one with a url). The
+URL is https, or http to a loopback host (`localhost`, `127.0.0.0/8`,
+`::1`), with no user name, password or fragment. Its
+`credentials_command` needs no placeholder: what it prints, trimmed of
+white space, is the bearer token, which stays in memory and goes in the
+`Authorization` header of requests to the server's origin and nowhere
+else. A token with a space, a control character or a character outside
+ASCII fails the start. When the server answers 401, the command is run
+again (at most once every 10 seconds) and the request, which the server
+did not act on, is sent once more with the new token. A redirect is
+followed only within the server's origin. No proxy is used, whatever the
+environment says. agentloop opens no standalone event stream and never
+resumes a broken one, and a response body that is not an event stream,
+like each event of one, is cut at the message cap (1 MiB). The SDK keeps
+`Mcp-Session-Id` and sends `MCP-Protocol-Version`. A call the server
+refuses because it ended the session was not run, and the model is told
+so; the next call connects again, with every definition as pinned. The
+checks a stdio frame gets for duplicate keys and for sharing a line do
+not apply: the SDK reads each HTTP message once, and what it read is what
+agentloop acts on. A request from the server still breaks the connection.
+
+**Narrowed arguments.** An MCP tool may give `fixed_args`, an object of
+argument names and the JSON values each call gets, and `hidden_args`, a
+list of names. Each must be a property of the tool's input schema, and a
+hidden argument cannot be required (fix it instead) or fixed as well; a
+server that lists a schema breaking these fails the start. The model is
+shown the schema without them. A call that names a fixed or hidden
+argument is refused with a message saying so, and the server is sent
+nothing. Otherwise the fixed values are added and the whole is checked
+against the server's own schema before it is sent. The pinned digest is
+the server's definition's, not the narrowed one's.
+
+`agentloop mcp-tools` reads `{"url": "...", "token": "..."}` (token
+optional) on stdin, lists every tool the remote server has, and prints
+`{"tools": [...]}`: each tool's `name`, `title`, `description`,
+`annotations`, `input_schema`, `output_schema` and `digest`, sorted by
+name. It is how an operator sees what a server offers before allowing
+any of it.
+
 **Tool protocols.** A call runs `tool_command` with the tool's name
 appended, in `tool_dir`, with exactly `tool_env`. With the plain
 protocol, stdin is the call's input and stdout is the result (stderr when

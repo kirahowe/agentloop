@@ -72,19 +72,27 @@ func (r *Request) validateMCP() error {
 	for _, t := range r.Tools {
 		switch t.Protocol {
 		case "":
-			if t.Server != "" || t.Tool != "" || t.AllowContent != nil || t.Digest != "" {
-				return usage.Errorf("tool %q: server, tool, allow_content and digest are only for %q tools", t.Name, ToolProtocolMCPStdio)
+			if t.Server != "" || t.Tool != "" || t.AllowContent != nil || t.Digest != "" || t.FixedArgs != nil || t.HiddenArgs != nil {
+				return usage.Errorf("tool %q: server, tool, allow_content, digest, fixed_args and hidden_args are only for %q and %q tools", t.Name, ToolProtocolMCPStdio, ToolProtocolMCPHTTP)
 			}
 			continue
-		case ToolProtocolMCPStdio:
+		case ToolProtocolMCPStdio, ToolProtocolMCPHTTP:
 		default:
-			return usage.Errorf("tool %q: unknown protocol %q (want %q or none)", t.Name, t.Protocol, ToolProtocolMCPStdio)
+			return usage.Errorf("tool %q: unknown protocol %q (want %q, %q or none)", t.Name, t.Protocol, ToolProtocolMCPStdio, ToolProtocolMCPHTTP)
 		}
 		if t.Description != "" || t.Parameters != nil {
 			return usage.Errorf("tool %q: an MCP tool's description and parameters come from its server; leave them out", t.Name)
 		}
-		if _, ok := r.MCPServers[t.Server]; !ok {
+		srv, ok := r.MCPServers[t.Server]
+		if !ok {
 			return usage.Errorf("tool %q names the MCP server %q, which mcp_servers does not have", t.Name, t.Server)
+		}
+		// A server with both is refused below, saying so.
+		if both := srv.URL != "" && srv.Command != nil; !both && (t.Protocol == ToolProtocolMCPHTTP) != (srv.URL != "") {
+			return usage.Errorf("tool %q: a %q tool comes from a server with a url, and a %q tool from one with a command", t.Name, ToolProtocolMCPHTTP, ToolProtocolMCPStdio)
+		}
+		if err := checkNarrowing(t); err != nil {
+			return err
 		}
 		if t.Tool == "" || strings.ContainsRune(t.Tool, 0) {
 			return usage.Errorf("tool %q: give the server's name for it as tool", t.Name)
@@ -120,6 +128,18 @@ func (r *Request) validateMCP() error {
 		if !used[name] {
 			return usage.Errorf("the MCP server %q gives none of the tools", name)
 		}
+		if s.URL != "" {
+			if s.Command != nil {
+				return usage.Errorf("the MCP server %q has both a command and a url", name)
+			}
+			if err := mcp.CheckURL(s.URL); err != nil {
+				return usage.Errorf("mcp_servers.%s.url: %v", name, err)
+			}
+			if err := checkArgv(s.CredentialsCommand, "mcp_servers."+name+".credentials_command"); err != nil {
+				return err
+			}
+			continue
+		}
 		if err := checkArgv(s.Command, "mcp_servers."+name+".command"); err != nil {
 			return err
 		}
@@ -146,6 +166,27 @@ func (r *Request) validateMCP() error {
 		}
 		if !holds {
 			return usage.Errorf("mcp_servers.%s has a credentials_command, but no argument of its command holds %s", name, CredentialsPlaceholder)
+		}
+	}
+	return nil
+}
+
+// checkNarrowing checks an MCP tool's fixed_args and hidden_args. Whether
+// each names an argument of the tool is checked when its server lists it.
+func checkNarrowing(t Tool) error {
+	seen := map[string]bool{}
+	for _, h := range t.HiddenArgs {
+		if h == "" || strings.ContainsRune(h, 0) || seen[h] {
+			return usage.Errorf("tool %q: hidden_args must be distinct, non-empty names", t.Name)
+		}
+		seen[h] = true
+	}
+	for k := range t.FixedArgs {
+		if k == "" || strings.ContainsRune(k, 0) {
+			return usage.Errorf("tool %q: fixed_args has an empty name", t.Name)
+		}
+		if seen[k] {
+			return usage.Errorf("tool %q: the argument %q is both fixed and hidden", t.Name, k)
 		}
 	}
 	return nil
@@ -270,6 +311,19 @@ func (r *Request) startServer(ctx context.Context, name string, m *MCP, log io.W
 	ctx, cancel := context.WithTimeout(ctx, MCPStartTimeout)
 	defer cancel()
 	s := r.MCPServers[name]
+	tools := map[string]mcp.ToolConfig{}
+	for _, t := range r.Tools {
+		if t.MCP() && t.Server == name {
+			tools[t.Tool] = mcp.ToolConfig{Alias: t.Name, Policy: r.Policy.Tools[t.Name], AllowContent: slices.Clone(t.AllowContent),
+				Digest: t.Digest, FixedArgs: t.FixedArgs, HiddenArgs: slices.Clone(t.HiddenArgs)}
+		}
+	}
+	if s.URL != "" {
+		return mcp.Connect(ctx, mcp.Server{
+			Name: name, URL: s.URL, Token: tokenSource(name, s.CredentialsCommand),
+			SendLabels: s.SendLabels, Restart: true, StartTimeout: MCPStartTimeout, Tools: tools,
+		})
+	}
 	argv := slices.Clone(s.Command)
 	if s.CredentialsCommand != nil {
 		path, err := m.writeCredentials(ctx, name, s.CredentialsCommand)
@@ -278,12 +332,6 @@ func (r *Request) startServer(ctx context.Context, name string, m *MCP, log io.W
 		}
 		for i := range argv {
 			argv[i] = strings.ReplaceAll(argv[i], CredentialsPlaceholder, path)
-		}
-	}
-	tools := map[string]mcp.ToolConfig{}
-	for _, t := range r.Tools {
-		if t.MCP() && t.Server == name {
-			tools[t.Tool] = mcp.ToolConfig{Alias: t.Name, Policy: r.Policy.Tools[t.Name], AllowContent: slices.Clone(t.AllowContent), Digest: t.Digest}
 		}
 	}
 	c, err := mcp.Connect(ctx, mcp.Server{
@@ -310,6 +358,26 @@ func (r *Request) toolsError(server string, err error) *ToolsError {
 			Message: fmt.Sprintf("The MCP server %s gives a definition of the tool %s that is not the one the request pins (pinned %s, got %s).", server, alias, drift.Pinned, drift.Got)}
 	}
 	return &ToolsError{Server: server, Message: fmt.Sprintf("The MCP server %s did not start: %v", server, err)}
+}
+
+// tokenSource is a remote server's bearer token: what its credentials
+// command prints, trimmed, run again when the server refuses the last
+// one. No command means no token.
+func tokenSource(name string, argv []string) func(context.Context, bool) (string, error) {
+	if argv == nil {
+		return nil
+	}
+	return func(ctx context.Context, _ bool) (string, error) {
+		out, err := secretCommand(ctx, "credentials_command of the MCP server "+name, argv, MCPStartTimeout)
+		if err != nil {
+			return "", err
+		}
+		tok := strings.TrimSpace(string(out))
+		if tok == "" {
+			return "", fmt.Errorf("the credentials_command of the MCP server %s printed nothing", name)
+		}
+		return tok, nil
+	}
 }
 
 // writeCredentials runs a server's credentials command and writes what
