@@ -466,7 +466,8 @@ func addQuarantineMeta(meta map[string]json.RawMessage, r agentloop.ToolResultEn
 }
 
 // resultFields is how a result shows on a call: failed when it is an
-// error, the content as text, and the raw result. The operator's log
+// error, the content as text, then the display if there is one (see
+// DisplayContent), and the raw result. The operator's log
 // (a tool's stderr) is not shown.
 func resultFields(r agentloop.ToolResultEntry) (acp.ToolCallStatus, []acp.ToolCallContent, any) {
 	status := acp.ToolCallStatusCompleted
@@ -474,8 +475,32 @@ func resultFields(r agentloop.ToolResultEntry) (acp.ToolCallStatus, []acp.ToolCa
 		status = acp.ToolCallStatusFailed
 	}
 	content := []acp.ToolCallContent{acp.ToolContent(acp.TextBlock(r.Result.Content))}
+	if r.Display != nil {
+		content = append(content, DisplayContent(*r.Display))
+	}
 	raw := map[string]any{"content": r.Result.Content, "is_error": r.Result.IsError}
 	return status, content, raw
+}
+
+// DisplayMeta is the _meta key of a display's content block.
+const DisplayMeta = "relay/display"
+
+// DisplayContent is a result's display as a client is sent it: one more
+// text block in the call's content, the title and body for a client
+// that knows nothing of displays, and the whole display under
+// _meta["relay/display"] for one that shows them apart. Labels and
+// sources are always arrays.
+func DisplayContent(d agentloop.Display) acp.ToolCallContent {
+	if d.Labels == nil {
+		d.Labels = []string{}
+	}
+	if d.Sources == nil {
+		d.Sources = []agentloop.Source{}
+	}
+	b, _ := json.Marshal(d)
+	block := acp.TextBlock(d.Title + "\n\n" + d.Body)
+	block.Text.Meta = map[string]json.RawMessage{DisplayMeta: b}
+	return acp.ToolContent(block)
 }
 
 // usage is the usage_update as of the last assistant message, with the

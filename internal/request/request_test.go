@@ -412,3 +412,30 @@ func TestAgentReportsAReaderError(t *testing.T) {
 		t.Fatalf("agent %v, err %v", a, err)
 	}
 }
+
+func TestDisplayRefPrefix(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "r.json")
+	load := func(prefix string) (*Request, error) {
+		b, _ := json.Marshal(map[string]any{"provider": "anthropic", "model": "m", "session": "s", "prompt": "p",
+			"api_key_command": []string{"k"}, "display_ref_prefix": prefix})
+		os.WriteFile(path, b, 0o644)
+		return Load(path, Run)
+	}
+	for _, good := range []string{"shown:2026-10-18/", "shown:"} {
+		r, err := load(good)
+		if err != nil {
+			t.Errorf("%q: %v", good, err)
+			continue
+		}
+		a, err := r.Agent("key", nil)
+		if err != nil || a.DisplayRefPrefix != good {
+			t.Errorf("%q: agent %v %v", good, a, err)
+		}
+	}
+	for _, bad := range []string{"shown", "Shown:x/", "shown:../x]]", "shown:a b", "shown:" + strings.Repeat("a", 81)} {
+		if _, err := load(bad); err == nil {
+			t.Errorf("accepted %q", bad)
+		}
+	}
+}

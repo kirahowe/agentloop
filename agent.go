@@ -44,6 +44,10 @@ type Agent struct {
 	// Run returns a *PinError and records nothing. The digests are opaque
 	// here; the mcp package makes them.
 	Pins map[string]string
+	// DisplayRefPrefix, when set, names where a result's display is kept:
+	// its ref is the prefix and DisplayID of the call, such as
+	// "shown:2026-10-18/" and "toolu_01abc". The model is told the ref.
+	DisplayRefPrefix string
 	// Observe sees every entry as it is appended and every streamed delta.
 	// It runs on the loop's goroutine; keep it quick.
 	Observe func(Event)
@@ -737,7 +741,9 @@ func (r *runner) execute(ctx context.Context, call ToolCall, deferred []string) 
 	for _, u := range out.Usage {
 		r.usage.add(u.Usage)
 	}
+	shown := out.Display
 	if bad := Forbidden(out.Labels, r.a.Forbid); len(bad) > 0 {
+		shown = nil
 		// The model never sees the result and the session never takes its
 		// labels. Nothing of what the tool said is kept, not even in the
 		// log: it is what the session may not hold.
@@ -746,11 +752,38 @@ func (r *runner) execute(ctx context.Context, call ToolCall, deferred []string) 
 		log = fmt.Sprintf("agentloop refused this result: it carried %v, which this session may not hold.", bad)
 		r.refused = append(r.refused, Refusal{CallID: call.ID, Tool: call.Name, Labels: bad})
 	}
-	e := ToolResultEntry{Result: res, Labels: labels, Log: log, Usage: out.Usage, Quarantine: report}
+	var display *Display
+	if shown != nil && callErr == nil {
+		display, res.Content, log = r.display(call, *shown, out.Labels, deferred, res.Content, log)
+	}
+	e := ToolResultEntry{Result: res, Labels: labels, Log: log, Usage: out.Usage, Quarantine: report, Display: display}
 	if err := r.finishEntry(call.ID, e); err != nil {
 		return false, err
 	}
 	return ctx.Err() != nil, nil
+}
+
+// display is what is kept of a result's display, the content the model
+// is given with it, and the operator's log. The display is labelled with
+// the result's labels, the labels deferred to it and the session's, as
+// anything the call made would be. One that would carry a label the
+// session may not hold is dropped, and only the log says so. The content
+// gains a note naming the display's ref, and nothing of the display.
+func (r *runner) display(call ToolCall, d Display, result, deferred []string, content, log string) (*Display, string, string) {
+	d.Labels = unionLabels(d.Labels, result, deferred, r.s.Labels())
+	d.Sources = append([]Source{}, d.Sources...)
+	d.Ref = ""
+	if bad := Forbidden(d.Labels, r.a.Forbid); len(bad) > 0 {
+		why := fmt.Sprintf("agentloop dropped this result's display: it carried %v, which this session may not hold.", bad)
+		if log != "" {
+			why = log + "\n" + why
+		}
+		return nil, content, why
+	}
+	if r.a.DisplayRefPrefix != "" {
+		d.Ref = r.a.DisplayRefPrefix + DisplayID(call.ID)
+	}
+	return &d, withDisplayNote(content, d.Ref), log
 }
 
 // keepable returns the assistant message in a form the log can hold. A

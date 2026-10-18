@@ -32,6 +32,11 @@ import (
 	"github.com/kirahowe/agentloop/trifecta"
 )
 
+// displayRefPrefix is what a display_ref_prefix may be: a kind, a colon
+// and a path of plain segments, so the ref the model is told is one
+// relay can read back.
+var displayRefPrefix = regexp.MustCompile(`^[a-z]{1,20}:[a-z0-9._/-]{0,80}$`)
+
 // KeyTimeout is how long api_key_command may run.
 const KeyTimeout = 30 * time.Second
 
@@ -62,6 +67,7 @@ type Request struct {
 	ToolProtocol       string                 `json:"tool_protocol"`
 	Resolve            []agentloop.Resolution `json:"resolve"`
 	Quarantine         *Quarantine            `json:"quarantine"`
+	DisplayRefPrefix   string                 `json:"display_ref_prefix"`
 	Retry              *struct {
 		Retries        int     `json:"retries"`
 		BackoffSeconds float64 `json:"backoff_seconds"`
@@ -216,6 +222,9 @@ func (r *Request) validate(mode Mode) error {
 	}
 	if len(r.APIKeyCommand) == 0 {
 		return usage.Errorf("request has no api_key_command")
+	}
+	if r.DisplayRefPrefix != "" && !displayRefPrefix.MatchString(r.DisplayRefPrefix) {
+		return usage.Errorf("display_ref_prefix must be a kind and a path, such as shown:2026-10-18/, of at most 100 characters")
 	}
 	seen := map[string]bool{}
 	for _, t := range r.Tools {
@@ -703,6 +712,8 @@ func (r *Request) Agent(key string, m *MCP) (*agentloop.Agent, error) {
 		Effort:      agentloop.Effort(r.Effort),
 		Limits:      r.Limits,
 		ToolTimeout: Seconds(r.ToolTimeoutSeconds),
+		// Where displays are kept, so the model can be told the ref.
+		DisplayRefPrefix: r.DisplayRefPrefix,
 	}
 	if a.ToolTimeout == 0 && len(r.MCPServers) > 0 {
 		a.ToolTimeout = DefaultMCPToolTimeout

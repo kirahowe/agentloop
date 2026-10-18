@@ -123,6 +123,9 @@ type ToolResultEntry struct {
 	// Quarantine says how a quarantined reader's answer was labelled
 	// (see Result.Quarantine).
 	Quarantine *QuarantineReport `json:"quarantine,omitempty"`
+	// Display is what the operator was shown and the model was not (see
+	// Display). It is never part of the conversation.
+	Display *Display `json:"display,omitempty"`
 }
 
 // ModelErrorEntry records one failed model call.

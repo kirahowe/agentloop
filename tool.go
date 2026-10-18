@@ -40,6 +40,9 @@ type Result struct {
 	// Quarantine is set by a quarantined reader, to say how its answer
 	// was labelled. A client can show it.
 	Quarantine *QuarantineReport
+	// Display is what the result shows the operator and never the
+	// model (see Display).
+	Display *Display
 }
 
 // A ModelUsage is what one model call cost, and the model that served it.

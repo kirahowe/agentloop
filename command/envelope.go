@@ -23,11 +23,37 @@ type stdinEnvelope struct {
 }
 
 // stdoutEnvelope is what an envelope tool must write. Content and labels
-// are required; is_error defaults to false.
+// are required; is_error defaults to false. display is optional: what
+// the operator is shown and the model is not (agentloop.Display).
 type stdoutEnvelope struct {
-	Content *string   `json:"content"`
-	IsError bool      `json:"is_error"`
-	Labels  *[]string `json:"labels"`
+	Content *string          `json:"content"`
+	IsError bool             `json:"is_error"`
+	Labels  *[]string        `json:"labels"`
+	Display *displayEnvelope `json:"display"`
+}
+
+// displayEnvelope is a display as a tool writes it: title, body and
+// labels are required, sources optional. It has no ref; agentloop gives
+// it one.
+type displayEnvelope struct {
+	Title   *string            `json:"title"`
+	Body    *string            `json:"body"`
+	Labels  *[]string          `json:"labels"`
+	Sources []agentloop.Source `json:"sources"`
+}
+
+func (d *displayEnvelope) display(known func(string) bool) (*agentloop.Display, string) {
+	if d.Title == nil || d.Body == nil || d.Labels == nil {
+		return nil, "the display must have title, body and labels"
+	}
+	out := agentloop.Display{Title: *d.Title, Body: *d.Body, Labels: *d.Labels, Sources: d.Sources}
+	if out.Sources == nil {
+		out.Sources = []agentloop.Source{}
+	}
+	if err := agentloop.CheckDisplay(out, known); err != nil {
+		return nil, err.Error()
+	}
+	return &out, ""
 }
 
 // Failed is all the model is told of an envelope tool that did not give a
@@ -87,7 +113,8 @@ func StdinEnvelope(call agentloop.Call) []byte {
 // or why stdout is not exactly one valid envelope: unknown, missing,
 // repeated or differently spelled fields (so "Labels" or a second
 // "labels" cannot replace the labels), any label known does not accept,
-// or anything after the object but whitespace.
+// a display that agentloop.CheckDisplay refuses, or anything after the
+// object but whitespace.
 func ParseEnvelope(stdout []byte, known func(string) bool) (agentloop.Result, string) {
 	if err := strictjson.Check(stdout, reflect.TypeFor[stdoutEnvelope]()); err != nil {
 		return agentloop.Result{}, "stdout is not an envelope: " + err.Error()
@@ -116,7 +143,15 @@ func ParseEnvelope(stdout []byte, known func(string) bool) (agentloop.Result, st
 	if len(labels) == 0 {
 		labels = nil
 	}
-	return agentloop.Result{Content: *env.Content, IsError: env.IsError, Labels: labels}, ""
+	res := agentloop.Result{Content: *env.Content, IsError: env.IsError, Labels: labels}
+	if env.Display != nil {
+		d, why := env.Display.display(known)
+		if why != "" {
+			return agentloop.Result{}, why
+		}
+		res.Display = d
+	}
+	return res, ""
 }
 
 // operatorLog is why a call failed, if it did, and what the program wrote
