@@ -153,7 +153,15 @@ func (p Policy) Decide(_ context.Context, call agentloop.ToolCall, view agentloo
 // so they are deferred to the result, where the reader decides what
 // passes through. A forbidden label among either set denies the call.
 // An inner tool that is not on the reader's list, has no entry, or is
-// not class read is denied.
+// not class read or egress is denied.
+//
+// An egress inner tool is the one exception to reading only through
+// read tools, made for a web search that fetches its results: the
+// caller writes the inner input (the query), so the inner call is
+// decided under the caller's labels, as if the caller made it. A caller
+// that is private and contaminated is held. The reader model sees only
+// the inner tool's output and never writes an input. Write and act
+// tools change things, so the reader never runs them.
 func (p Policy) decideReader(call agentloop.ToolCall, outer Tool, allowed []string, view agentloop.View) agentloop.Decision {
 	deny := func(reason string) agentloop.Decision {
 		return agentloop.Decision{Verdict: agentloop.Deny, Reason: reason}
@@ -171,8 +179,8 @@ func (p Policy) decideReader(call agentloop.ToolCall, outer Tool, allowed []stri
 	if !ok {
 		return deny(fmt.Sprintf("The tool %s has no policy.", in.Tool))
 	}
-	if inner.Class != Read {
-		return deny(fmt.Sprintf("%s reads only through tools of class read, and %s is %q.", call.Name, in.Tool, inner.Class))
+	if inner.Class != Read && inner.Class != Egress {
+		return deny(fmt.Sprintf("%s reads only through tools of class read or egress, and %s is %q.", call.Name, in.Tool, inner.Class))
 	}
 	if len(agentloop.Forbidden(append(slices.Clone(outer.Labels), inner.Labels...), p.Forbid)) > 0 {
 		return deny(ForbiddenReason)

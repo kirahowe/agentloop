@@ -24,10 +24,12 @@ func readerPolicy() Policy {
 			"mail_read":        {Class: Read, Labels: []string{Contaminated, Private}},
 			"web_fetch":        {Class: Read, Labels: []string{Contaminated}},
 			"held_read":        {Class: Read, AlwaysHold: true, Labels: []string{Contaminated}},
-			"web_post":         {Class: Egress},
+			"web_ask":          {Class: Egress, Labels: []string{Contaminated}},
+			"notes_write":      {Class: Write},
+			"web_post":         {Class: Act},
 			"elsewhere":        {Class: Read},
 		},
-		Readers: map[string][]string{"read_quarantined": {"mail_read", "web_fetch", "held_read", "web_post", "missing"}},
+		Readers: map[string][]string{"read_quarantined": {"mail_read", "web_fetch", "held_read", "web_ask", "notes_write", "web_post", "missing"}},
 	}
 }
 
@@ -58,8 +60,18 @@ func TestDecideReader(t *testing.T) {
 			verdict: agentloop.Deny, reason: "cannot read through elsewhere"},
 		{name: "an inner tool with no entry", call: readerCall("missing"),
 			verdict: agentloop.Deny, reason: "has no policy"},
-		{name: "an inner tool that is not class read", call: readerCall("web_post"),
-			verdict: agentloop.Deny, reason: "of class read"},
+		{name: "an act inner tool is denied", call: readerCall("web_post"),
+			verdict: agentloop.Deny, reason: "of class read or egress"},
+		{name: "a write inner tool is denied", call: readerCall("notes_write"),
+			verdict: agentloop.Deny, reason: "of class read or egress"},
+		{name: "a clean caller reads through egress", call: readerCall("web_ask"),
+			verdict: agentloop.Allow, labels: []string{}, deferred: []string{Contaminated}},
+		{name: "a private caller reads through egress", call: readerCall("web_ask"), session: []string{Private},
+			verdict: agentloop.Allow, labels: []string{}, deferred: []string{Contaminated}},
+		{name: "a contaminated caller reads through egress", call: readerCall("web_ask"), session: []string{Contaminated},
+			verdict: agentloop.Allow, labels: []string{}, deferred: []string{Contaminated}},
+		{name: "a private, contaminated caller is held on egress", call: readerCall("web_ask"), session: []string{Contaminated, Private},
+			verdict: agentloop.Hold, reason: "cannot send data out"},
 		{name: "input naming no inner tool", call: agentloop.ToolCall{Name: "read_quarantined", Input: json.RawMessage(`{"tool":7}`)},
 			verdict: agentloop.Deny, reason: "does not name an inner tool"},
 		{name: "a forbidden inner label denies", policy: func(p *Policy) { p.Forbid = []string{Private} },
@@ -92,8 +104,9 @@ func TestDecideReader(t *testing.T) {
 
 // For any policy and session: a reader call never adds the inner tool's
 // labels at decision time, it is held exactly when the reader's entry or
-// the inner one would be held, and a forbidden label in either set
-// always denies it.
+// the inner one would be held under the caller's labels, an inner tool
+// that is not read or egress is denied, and a forbidden label in either
+// set always denies it.
 func TestPropertyDecideReader(t *testing.T) {
 	rapid.Check(t, func(t *rapid.T) {
 		outer := genTool().Draw(t, "outer")
@@ -109,7 +122,7 @@ func TestPropertyDecideReader(t *testing.T) {
 		d := p.Decide(context.Background(), call, agentloop.View{Labels: session})
 		forbidden := len(agentloop.Forbidden(append(slices.Clone(outer.Labels), inner.Labels...), forbid)) > 0
 		switch {
-		case inner.Class != Read || forbidden:
+		case (inner.Class != Read && inner.Class != Egress) || forbidden:
 			if d.Verdict != agentloop.Deny {
 				t.Fatalf("decision %+v, want deny", d)
 			}
@@ -121,6 +134,31 @@ func TestPropertyDecideReader(t *testing.T) {
 			if d.Verdict != agentloop.Allow || !slices.Equal(d.Labels, outer.Labels) || !slices.Equal(d.Deferred, inner.Labels) {
 				t.Fatalf("decision %+v for outer %+v inner %+v", d, outer, inner)
 			}
+		}
+	})
+}
+
+// An egress inner call is decided exactly as the same call made by the
+// caller directly would be: the reader adds no way around the trifecta,
+// and no stricter than calling the tool directly. It is held exactly
+// when the caller holds both labels or the tool always holds.
+func TestPropertyReaderEgressIsTheCallersCall(t *testing.T) {
+	rapid.Check(t, func(t *rapid.T) {
+		inner := genTool().Draw(t, "inner")
+		inner.Class = Egress
+		session := genLabels().Draw(t, "session")
+		p := Policy{
+			Tools:   map[string]Tool{"r": {Class: Read}, "i": inner},
+			Readers: map[string][]string{"r": {"i"}},
+		}
+		viaReader := p.Decide(context.Background(), agentloop.ToolCall{Name: "r", Input: json.RawMessage(`{"tool":"i"}`)}, agentloop.View{Labels: session})
+		direct := p.Decide(context.Background(), agentloop.ToolCall{Name: "i", Input: json.RawMessage(`{}`)}, agentloop.View{Labels: session})
+		if viaReader.Verdict != direct.Verdict {
+			t.Fatalf("via the reader %+v, directly %+v", viaReader, direct)
+		}
+		held := inner.AlwaysHold || (slices.Contains(session, Private) && slices.Contains(session, Contaminated))
+		if held != (viaReader.Verdict == agentloop.Hold) {
+			t.Fatalf("session %v: %+v", session, viaReader)
 		}
 	})
 }

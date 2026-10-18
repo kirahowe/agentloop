@@ -373,8 +373,9 @@ func (r *Request) toolNames() []string {
 
 // validateQuarantine checks the quarantine block. The reader needs a
 // real policy, since its whole purpose is the labels; it reads only
-// through tools of class read, which bring content in and do nothing
-// else; and it cannot read through itself.
+// through tools of class read or egress, which bring content in and
+// change nothing (an egress call is decided under the caller's labels,
+// see trifecta's decideReader); and it cannot read through itself.
 func (r *Request) validateQuarantine() error {
 	q := r.Quarantine
 	if q == nil {
@@ -416,8 +417,8 @@ func (r *Request) validateQuarantine() error {
 			return usage.Errorf("quarantine.tools names %q twice", name)
 		case !given[name]:
 			return usage.Errorf("quarantine.tools names %q, which is not one of the tools", name)
-		case r.Policy.Tools[name].Class != trifecta.Read:
-			return usage.Errorf("quarantine.tools names %q, whose class is %q; the reader reads only through tools of class read", name, r.Policy.Tools[name].Class)
+		case r.Policy.Tools[name].Class != trifecta.Read && r.Policy.Tools[name].Class != trifecta.Egress:
+			return usage.Errorf("quarantine.tools names %q, whose class is %q; the reader reads only through tools of class read or egress", name, r.Policy.Tools[name].Class)
 		}
 		seen[name] = true
 	}

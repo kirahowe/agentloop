@@ -56,7 +56,7 @@ type Reader struct {
 	// Retry is how a failed model call is retried.
 	Retry agentloop.RetryPolicy
 	// Inner is the tools the reader may read through. Each must be class
-	// read in the policy.
+	// read or egress in the policy.
 	Inner []agentloop.Tool
 	// Labels are each inner tool's static labels, by name, as the policy
 	// gives them. The policy defers the same labels to the call, and the

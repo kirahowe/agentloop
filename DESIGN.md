@@ -239,11 +239,16 @@ a tool whose static labels include one of `Policy.Forbid`.
 tools it may read through. A reader call's input names its inner tool,
 and the call is decided as the inner call would be: held when the
 reader's own entry or the inner tool's would hold it, with that entry's
-reason. Since inner tools are `read`, the trifecta itself never holds
-them, so the hold that matters is `always_hold`. The decision's labels
+reason. For a `read` inner tool the trifecta itself never holds the
+call, so the hold that matters is `always_hold`. An inner tool may also
+be `egress`, for a web search that fetches its results: the caller
+wrote the inner input (the query), so the inner call is decided under
+the caller's labels as if the caller made it, and a caller that holds
+both labels is held. The reader model only reads the inner output; it
+never writes an input. The decision's labels
 are the reader's own static labels (normally none); the inner tool's
 static labels are deferred. An inner tool off the reader's list, with no
-entry, or of a class other than `read` is denied, and so is a call whose
+entry, or of a class other than `read` or `egress` is denied, and so is a call whose
 reader or inner static labels include a forbidden one. A person
 resolving a held reader call sees its whole input (the inner tool, its
 input, the question and the schema), never the inner content, which does
@@ -748,7 +753,8 @@ request's `retry` for failed model calls, and the inner tools as their
 command tools. A tool in `tools` named `read_quarantined` is refused.
 The block needs a real policy, and the policy an entry for
 `read_quarantined` of class `read`. Each of `quarantine.tools` must be
-one of `tools`, of class `read`, named once, and not `read_quarantined`.
+one of `tools`, of class `read` or `egress`, named once, and not
+`read_quarantined`.
 An inner tool stays callable on its own, where it takes its labels the
 ordinary way. `tool_kinds` may name `read_quarantined`. The reader's
 calls are in the `tool_result`'s usage, so they count toward

@@ -316,7 +316,15 @@ func TestQuarantineRequests(t *testing.T) {
 		{"too many retries", Run, func(m map[string]any) { q(m)["retries"] = MaxQuarantineRetries + 1 }, "quarantine.retries"},
 		{"no inner tools", Run, func(m map[string]any) { q(m)["tools"] = []string{} }, "names no tool"},
 		{"inner tool not among the tools", Run, func(m map[string]any) { q(m)["tools"] = []string{"ghost"} }, `"ghost", which is not one of the tools`},
-		{"inner tool not read", Run, func(m map[string]any) { q(m)["tools"] = []string{"web_post"} }, `whose class is "egress"`},
+		{"an egress inner tool", Run, func(m map[string]any) { q(m)["tools"] = []string{"mail_read", "web_post"} }, ""},
+		{"a write inner tool", Run, func(m map[string]any) {
+			pol(m)["web_post"] = map[string]any{"class": "write"}
+			q(m)["tools"] = []string{"web_post"}
+		}, `whose class is "write"`},
+		{"an act inner tool", Run, func(m map[string]any) {
+			pol(m)["web_post"] = map[string]any{"class": "act"}
+			q(m)["tools"] = []string{"web_post"}
+		}, `whose class is "act"`},
 		{"inner tool twice", Run, func(m map[string]any) { q(m)["tools"] = []string{"mail_read", "mail_read"} }, "twice"},
 		{"the reader itself", Run, func(m map[string]any) { q(m)["tools"] = []string{"read_quarantined"} }, "cannot name read_quarantined itself"},
 		{"no policy entry for the reader", Run, func(m map[string]any) { delete(pol(m), "read_quarantined") }, `no entry for the tool "read_quarantined"`},

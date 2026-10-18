@@ -109,6 +109,12 @@ most 100 items), the answer does not make the session `contaminated`.
 `private` always passes through. The reader's calls count toward the
 run's limits and its cost.
 
+An inner tool may also be `egress`, such as a web search that fetches
+the pages it finds. The agent writes that tool's input, so the call is
+decided as if the agent made it directly: a session that holds both
+`private` and `contaminated` waits for a person. The reader only reads
+the result.
+
 ```json
 "quarantine": {"model": "claude-haiku-5-5", "effort": "low", "retries": 1, "tools": ["mail_read"]},
 "policy": {"tools": {
