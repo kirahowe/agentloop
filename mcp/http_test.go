@@ -215,7 +215,7 @@ func TestCheckURL(t *testing.T) {
 			t.Errorf("%s: %v", ok, err)
 		}
 	}
-	for _, bad := range []string{"http://mcp.example.com/mcp", "ftp://x/", "https://u:p@x/", "https://x/#f", "https:///p", "file:///etc/passwd", "http://127.0.0.1.example.com/"} {
+	for _, bad := range []string{"http://mcp.example.com/mcp", "ftp://x/", "https://u:p@x/", "https://x/#f", "https:///p", "file:///etc/passwd", "http://127.0.0.1.example.com/", "https://x/a/../b", "https://x/a/%2e%2E/b", "https://x/./b"} {
 		if err := CheckURL(bad); err == nil {
 			t.Errorf("%s was accepted", bad)
 		}

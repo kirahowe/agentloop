@@ -23,7 +23,7 @@ import (
 // (MCP-Protocol-Version). agentloop adds these rules:
 //
 //   - The URL is https, or http to a loopback address. It has no user
-//     name, password or fragment.
+//     name, password, fragment, or . or .. path segment.
 //   - A redirect is followed only to the same origin (scheme, host and
 //     port); anything else fails the request. No proxy is used.
 //   - The bearer token from Server.Token goes only to the server's
@@ -52,6 +52,13 @@ func CheckURL(raw string) error {
 	}
 	if u.Host == "" || u.Hostname() == "" {
 		return fmt.Errorf("the URL %q has no host", raw)
+	}
+	// Path is decoded, so %2e counts as a dot. A server would read
+	// /a/../b as /b, which a check of where the URL points could miss.
+	for _, seg := range strings.Split(u.Path, "/") {
+		if seg == "." || seg == ".." {
+			return fmt.Errorf("the URL %q has . or .. segments in its path", raw)
+		}
 	}
 	switch u.Scheme {
 	case "https":
