@@ -626,7 +626,26 @@ type tool struct {
 	narrow *narrowing
 }
 
-var _ agentloop.CallTool = (*tool)(nil)
+var (
+	_ agentloop.CallTool     = (*tool)(nil)
+	_ agentloop.InputChecker = (*tool)(nil)
+)
+
+// CheckInput refuses a call that names a fixed or hidden argument. The
+// agent runs it before the policy, so such a call is never held for the
+// operator only to be refused once approved. CallWith checks again.
+func (t *tool) CheckInput(input json.RawMessage) string {
+	if t.narrow == nil {
+		return ""
+	}
+	if len(strings.TrimSpace(string(input))) == 0 {
+		input = json.RawMessage(`{}`)
+	}
+	if _, refused, _ := t.narrow.apply(input); refused != "" {
+		return NotTaken(t.alias, refused)
+	}
+	return ""
+}
 
 func newTool(c *Client, name string, cfg ToolConfig, def *sdk.Tool) (*tool, error) {
 	params, err := canonicalValue(def.InputSchema)

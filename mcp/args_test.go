@@ -8,6 +8,8 @@ import (
 	"testing"
 
 	"pgregory.net/rapid"
+
+	"github.com/kirahowe/agentloop"
 )
 
 func narrowed() ToolConfig {
@@ -164,4 +166,18 @@ func TestPropertyNarrowing(t *testing.T) {
 			t.Fatalf("sent %v for %v", sent, in)
 		}
 	})
+}
+
+// The agent asks before the policy decides, so a call that names a fixed
+// or hidden argument is denied rather than held for the operator.
+func TestNarrowedToolChecksInputBeforeThePolicy(t *testing.T) {
+	r := newRemote(t, false)
+	c := connect(t, r.server(map[string]ToolConfig{"echo": narrowed()}, staticToken("good")))
+	ic := c.Tools()[0].(agentloop.InputChecker)
+	if why := ic.CheckInput(json.RawMessage(`{"msg":"a","list":"all"}`)); !strings.Contains(why, "does not take the argument list") {
+		t.Fatalf("%q", why)
+	}
+	if why := ic.CheckInput(json.RawMessage(`{"msg":"a"}`)); why != "" {
+		t.Fatalf("%q", why)
+	}
 }
