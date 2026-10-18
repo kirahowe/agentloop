@@ -49,7 +49,8 @@ func TestNarrowedToolHidesItsArgumentsFromTheModel(t *testing.T) {
 func TestNarrowedToolRefusesAndFixesBeforeTheServerSeesTheCall(t *testing.T) {
 	r := newRemote(t, false)
 	c := connect(t, r.server(map[string]ToolConfig{"echo": narrowed()}, staticToken("good")))
-	for _, in := range []string{`{"msg":"a","list":"everyone"}`, `{"msg":"a","send_now":true}`, `{"msg":"a","send_now":false}`} {
+	for _, in := range []string{`{"msg":"a","list":"everyone"}`, `{"msg":"a","send_now":true}`, `{"msg":"a","send_now":false}`,
+		`{"msg":"a","LIST":"everyone"}`, `{"msg":"a","Send_Now":true}`, "{\"msg\":\"a\",\"li\u017ft\":\"x\"}"} {
 		res := callTool(t, c, "echo", in)
 		if !res.IsError || !strings.Contains(res.Content, "does not take the argument") {
 			t.Errorf("%s: %+v", in, res)

@@ -7,6 +7,7 @@ import (
 	"maps"
 	"slices"
 	"sort"
+	"strings"
 
 	"github.com/santhosh-tekuri/jsonschema/v6"
 
@@ -110,10 +111,16 @@ func (n *narrowing) apply(input json.RawMessage) (out json.RawMessage, refused, 
 	if err := dec.Decode(&args); err != nil || args == nil {
 		return nil, "", "the arguments are not a JSON object"
 	}
+	// A key that differs from a fixed or hidden name only in case is
+	// refused too: Go's encoding/json, among other decoders, matches
+	// field names without regard to case (Unicode simple folding, so
+	// U+212A KELVIN SIGN is a k), and would read it as that argument.
 	given := slices.Sorted(maps.Keys(args))
 	for _, k := range given {
-		if _, ok := n.fixed[k]; ok || slices.Contains(n.hidden, k) {
-			return nil, k, ""
+		for _, name := range n.names() {
+			if strings.EqualFold(k, name) {
+				return nil, k, ""
+			}
 		}
 	}
 	for k, v := range n.fixed {
@@ -131,6 +138,11 @@ func (n *narrowing) apply(input json.RawMessage) (out json.RawMessage, refused, 
 		return nil, "", "with the fixed arguments, the call does not match the server's input schema: " + err.Error()
 	}
 	return raw, "", ""
+}
+
+// names are the fixed and hidden argument names.
+func (n *narrowing) names() []string {
+	return slices.Concat(slices.Collect(maps.Keys(n.fixed)), n.hidden)
 }
 
 // NotTaken is what the model is told of a call that gave an argument the

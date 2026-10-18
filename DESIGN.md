@@ -906,7 +906,9 @@ list of names. Each must be a property of the tool's input schema, and a
 hidden argument cannot be required (fix it instead) or fixed as well; a
 server that lists a schema breaking these fails the start. The model is
 shown the schema without them. A call that names a fixed or hidden
-argument is refused with a message saying so, and the server is sent
+argument, or a key that differs from one only in case (Go's
+encoding/json, for one, matches field names that way), is refused with a
+message saying so, before the policy decides, and the server is sent
 nothing. Otherwise the fixed values are added and the whole is checked
 against the server's own schema before it is sent. The pinned digest is
 the server's definition's, not the narrowed one's.
