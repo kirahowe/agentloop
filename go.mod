@@ -8,6 +8,7 @@ require (
 	github.com/modelcontextprotocol/go-sdk v1.8.0
 	github.com/openai/openai-go/v3 v3.78.0
 	github.com/santhosh-tekuri/jsonschema/v6 v6.0.3
+	golang.org/x/sys v0.49.0
 	golang.org/x/text v0.42.0
 	pgregory.net/rapid v1.3.0
 )
@@ -36,6 +37,5 @@ require (
 	go.yaml.in/yaml/v4 v4.0.0-rc.2 // indirect
 	golang.org/x/oauth2 v0.35.0 // indirect
 	golang.org/x/sync v0.23.0 // indirect
-	golang.org/x/sys v0.49.0 // indirect
 	golang.org/x/time v0.15.0 // indirect
 )
