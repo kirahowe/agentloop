@@ -1070,7 +1070,11 @@ fixed values under `_meta["agentloop/fixed_args"]`. If the operator
 changes a fixed value after the call was held, the effective input no
 longer has the approved digest: a resolution that allows it becomes a
 deny, and a person's allow recorded before the change does not run. The
-model is told why (`SettingsChanged`).
+model is told why (`SettingsChanged`). A call through the quarantined
+reader is bound the same way to its inner tool's fixed values. A hold
+shown again in a later run keeps the digest it was held with, so a
+resolution can still name it: a deny goes through, and an allow after a
+settings change becomes a deny.
 
 `agentloop mcp-tools` reads `{"url": "...", "token": "..."}` (token
 optional) on stdin, lists every tool the remote server has, and prints

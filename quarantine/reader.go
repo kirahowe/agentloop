@@ -75,6 +75,39 @@ type Reader struct {
 
 var _ agentloop.CallTool = (*Reader)(nil)
 var _ agentloop.InputChecker = (*Reader)(nil)
+var _ agentloop.Narrowed = (*Reader)(nil)
+
+// EffectiveInput is the reader's input with the inner input as the inner
+// tool would run on it: an MCP tool's fixed arguments added. The inner
+// call is decided, held and approved with them, as it would be called
+// directly.
+func (r *Reader) EffectiveInput(raw json.RawMessage) (json.RawMessage, map[string]json.RawMessage, bool) {
+	in, err := parseInput(raw)
+	if err != nil {
+		return nil, nil, false
+	}
+	n, ok := r.tools[in.Tool].(agentloop.Narrowed)
+	if !ok {
+		return raw, nil, true
+	}
+	inner, fixed, ok := n.EffectiveInput(in.Input)
+	if !ok {
+		return nil, nil, false
+	}
+	if len(fixed) == 0 {
+		return raw, nil, true
+	}
+	var outer map[string]json.RawMessage
+	if json.Unmarshal(raw, &outer) != nil || outer == nil {
+		return nil, nil, false
+	}
+	outer["input"] = inner
+	out, err := json.Marshal(outer)
+	if err != nil {
+		return nil, nil, false
+	}
+	return out, fixed, true
+}
 
 // NewReader checks r's inner tools and compiles their schemas.
 func NewReader(r Reader) (*Reader, error) {

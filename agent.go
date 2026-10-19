@@ -551,7 +551,15 @@ func (r *runner) settleAndCheck(ctx context.Context) (*Outcome, error) {
 	case len(res.held) > 0:
 		out := r.outcome(ReasonHeld)
 		for _, c := range res.held {
-			out.Held = append(out.Held, HeldCallOf(r.a.Tools, c))
+			h := HeldCallOf(r.a.Tools, c)
+			// A call held in an earlier run keeps the digest its hold
+			// recorded: a resolution must name it. If the operator's
+			// settings changed since, an allow becomes a deny
+			// (ErrSettingsChanged), and a deny still goes through.
+			if info, ok := r.s.Call(c.ID); ok && info.HoldSHA256 != "" {
+				h.InputSHA256 = info.HoldSHA256
+			}
+			out.Held = append(out.Held, h)
 		}
 		out.LabelSources = r.s.LabelSources()
 		return out, nil

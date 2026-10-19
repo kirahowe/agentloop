@@ -155,3 +155,40 @@ func TestPropertyApprovalIsBoundToFixedArguments(t *testing.T) {
 		}
 	})
 }
+
+// Regression (Codex review): a hold shown again after the operator's
+// settings changed took a new digest, which no resolution could name, so
+// the session was stuck. It keeps its hold's digest: a deny goes
+// through, and an allow is refused as a settings change.
+func TestAHoldShownAgainKeepsItsDigest(t *testing.T) {
+	for _, verdict := range []agentloop.Verdict{agentloop.Allow, agentloop.Deny} {
+		s, store := newSession(t)
+		tool := &fixedTool{fixed: group("Kira only")}
+		a := &agentloop.Agent{Model: fake.Script(fake.ToolUse("", fake.Call("c1", "send", `{"subject":"hi"}`)), fake.Text("done")),
+			Tools: []agentloop.Tool{tool}, Policy: agentloop.PolicyFunc(func(context.Context, agentloop.ToolCall, agentloop.View) agentloop.Decision {
+				return agentloop.Decision{Verdict: agentloop.Hold}
+			})}
+		first := run(t, a, s, "go")
+		tool.fixed = group("Public list")
+		s = reopen(t, store)
+		again := run(t, a, s, "")
+		if len(again.Held) != 1 || again.Held[0].InputSHA256 != first.Held[0].InputSHA256 {
+			t.Fatalf("held again %+v, first %+v", again.Held, first.Held)
+		}
+		r := agentloop.Resolution{CallID: "c1", Verdict: verdict, InputSHA256: again.Held[0].InputSHA256}
+		err := a.Resolve(context.Background(), s, r)
+		if verdict == agentloop.Allow {
+			if !errors.Is(err, agentloop.ErrSettingsChanged) {
+				t.Fatalf("allow: %v", err)
+			}
+			continue
+		}
+		if err != nil {
+			t.Fatalf("deny: %v", err)
+		}
+		run(t, a, s, "")
+		if len(tool.got) != 0 {
+			t.Fatalf("ran %v", tool.got)
+		}
+	}
+}
