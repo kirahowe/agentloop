@@ -158,6 +158,9 @@ type fixture struct {
 	dir     string
 	session string
 	req     map[string]any
+	// env is added to the command's environment, which is otherwise
+	// nearly empty.
+	env []string
 }
 
 func newFixture(t *testing.T, api *fakeAPI, script string) *fixture {
@@ -199,7 +202,7 @@ func (f *fixture) writeReq() string {
 
 func (f *fixture) command(args ...string) *exec.Cmd {
 	cmd := exec.Command(binary, args...)
-	cmd.Env = []string{"PARENT_VAR=leaky", "PATH=/usr/bin:/bin"}
+	cmd.Env = append([]string{"PARENT_VAR=leaky", "PATH=/usr/bin:/bin"}, f.env...)
 	return cmd
 }
 

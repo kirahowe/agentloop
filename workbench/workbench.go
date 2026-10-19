@@ -138,9 +138,12 @@ func New(w Workbench) (*Workbench, error) {
 	if w.ScratchRoot == "" {
 		w.ScratchRoot = os.TempDir()
 	}
+	// Without a home directory the workbench cannot know where this
+	// user's keys and browser data are, so it does not run at all rather
+	// than run with a deny list that misses them.
 	home, err := os.UserHomeDir()
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("the workbench cannot find the home directory, so it cannot deny the paths it must: %w", err)
 	}
 	home = Resolve(home)
 	tmp := Resolve(os.TempDir())

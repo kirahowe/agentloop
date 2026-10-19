@@ -72,6 +72,7 @@ The packages:
 | `agentloop/openai` | OpenAI's Responses API |
 | `agentloop/trifecta` | The trifecta rule and a policy built on it |
 | `agentloop/quarantine` | The quarantined reader tool and its answer schema checks |
+| `agentloop/workbench` | The sandboxed workbench: shell commands under macOS sandbox-exec |
 | `agentloop/command` | A tool that runs a program, with exactly the environment you give it |
 | `agentloop/mcp` | The tools of one MCP server, run as a child process over stdio or reached over streamable HTTP |
 | `agentloop/fake` | A scripted model for tests |
@@ -137,6 +138,35 @@ not offered at all. The reader still reads through them. Use it for a
 tool whose raw output a role should never see, such as a web search
 whose pages would contaminate it. A model that calls one by name gets
 the answer for a tool it does not have.
+
+A request can also turn on the sandboxed workbench with a `workbench`
+block. The agent then has a built-in tool, `workbench`, that hands a task
+and a JSON Schema to a child model session whose only tool runs shell
+commands under macOS `sandbox-exec`. The commands can search and read the
+disk and compute; they have no network of any kind and can write only a
+scratch directory that is removed afterwards. The caller gets only the
+child's answer, checked against the schema and labelled as the reader's
+is: `private` always, and `contaminated` unless the schema admits no free
+text. The child's model is the reader's unless the block names another.
+
+```json
+"workbench": {"deny_read": ["/Users/k/notes/private"], "command_timeout_seconds": 60},
+"policy": {"tools": {"workbench": {"class": "read"}}}
+```
+
+The profile is a pure function of the settings
+(`workbench.Profile`). It denies everything, then allows reading the disk
+except a deny list (this user's keys, passwords, browser profiles,
+coding agents' data and whatever the request adds) and writing the
+scratch directory. It has no `network*` rule, so no socket can be used,
+and no `mach-lookup` rule, so no system service can be reached: `open`,
+`osascript`, the pasteboard, DNS and Spotlight all fail. On macOS 26 the
+commands that do work with no mach service at all are `sh`, the
+coreutils, `find`, `grep`, `rg`, `python3`, `sqlite3`, `jq` and
+`pdftotext`; `mdfind` needs Spotlight and does not. A command has a
+timeout, a CPU limit, a process limit, an output cap and a file size
+limit, and everything it leaves running is killed. agentloop itself stays
+outside the sandbox, since it has to reach the provider.
 
 A request can also take tools from [MCP](https://modelcontextprotocol.io)
 servers it runs over stdio. The request is the allowlist: it names each

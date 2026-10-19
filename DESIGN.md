@@ -48,6 +48,7 @@ leaves a record that can be resumed without repeating an action.
 | `agentloop/trifecta` | The trifecta rule, pure, and a `Policy` built on it |
 | `agentloop/otel` | A pure converter from a session log to OpenTelemetry GenAI traces, as OTLP/JSON |
 | `agentloop/quarantine` | Pure checks for a quarantined reader: whether an answer schema admits free text, and validating an answer |
+| `agentloop/workbench` | The sandboxed workbench: a child session whose shell commands run under macOS sandbox-exec |
 | `agentloop/command` | A `Tool` that runs a program, with the plain or the envelope protocol |
 | `agentloop/mcp` | The tools of one MCP server over stdio, as `Tool` values |
 | `agentloop/fake` | A scripted `Model` for tests |
@@ -417,6 +418,72 @@ gains one line, `The operator was also shown [[<ref>]].` (without a
 prefix, `The operator was also shown more than this.`), which holds
 nothing the display said. relay keeps each display as a doc under that
 ref, and an ACP client gets it as tool call content (see the command).
+
+### The sandboxed workbench
+
+`agentloop/workbench` is the quarantined reader with tools instead of a
+document. A call gives a `task` (at most 4000 characters) and a `schema`,
+and the tool runs a child session on its own model whose only tool is
+`sh`. The child is told the task and the schema and nothing of the
+caller's conversation. The caller gets only the child's final answer,
+validated against the schema by `quarantine.Answer`, written as
+canonical JSON, and labelled by `quarantine.ResultLabels`: `private`
+always, and `contaminated` unless the schema admits no free text. The
+class is `read`. A reply that is not a valid answer is refused with the
+reason, in the same session, up to `retries` times; after that the
+caller is told only that there was no answer. The child's turns, tool
+calls and tokens are bounded, and its model calls are the run's usage
+and cost.
+
+Every `sh` command runs as `/usr/bin/sandbox-exec -p <profile> /bin/sh
+-c <command>`, in a scratch directory made for the session, with an
+environment of only `PATH`, `HOME`, `TMPDIR` (the scratch directory) and
+`LANG`, and an empty stdin. `workbench.Profile` is a pure function from
+the settings to the profile text, so what the sandbox allows is read and
+tested without running anything. It denies everything, then allows
+forking, running programs, signals and process info within the same
+sandbox, reading sysctl values, reading every file except a deny list,
+reading and writing the scratch directory, and writing `/dev/null` and
+the process's own output. Later rules win, so the deny list comes after
+the broad read rule and the scratch directory after the deny list.
+
+There is no `network*` rule, so no socket of any kind can be used, unix
+sockets included, and no `mach-lookup` rule, so no system service can be
+reached: not LaunchServices (`open`), AppleEvents (`osascript`), the
+pasteboard, DNS, Spotlight or launchd. That is what makes going out
+impossible rather than forbidden. The deny list covers this user's keys,
+passwords, tokens, browser profiles, coding agents' settings and other
+workbench sessions, plus whatever the request adds, and the sandbox
+matches resolved paths, so each entry is resolved before the profile is
+written.
+
+The agentloop process stays outside the sandbox: it has to reach the
+model provider. Only the commands are sandboxed, and a sandbox cannot be
+loosened from inside, so `sandbox-exec` run again within it is still
+bound by the first profile.
+
+Limits: one command may run for `command_timeout_seconds` (which is also
+its CPU limit per process), write a file of at most `file_bytes`, add
+`processes` processes to this user's, and return `output_bytes` of
+output, cut with a note. A session's scratch directory may grow to
+`scratch_bytes`; past that no further command runs. The limits are set
+by a shell outside the sandbox just before it becomes `sandbox-exec`, so
+they cover everything the command starts and cannot be raised from
+inside.
+
+What a command leaves running is killed. The sandbox's processes are
+found by asking `sandbox_check` which processes are sandboxed, may write
+this session's scratch directory, and may not write a probe directory
+beside it: no other profile allows exactly that, since both directories
+are new and only this profile names them. Processes are stopped before
+they are killed, since a stopped process cannot fork, and the passes go
+on until none is left. One pass that stops and kills together is not
+enough: a fork bomb forks faster than its processes can be listed.
+
+The log holds the task's digest, the model, the attempts, the turns, how
+many commands ran, how many timed out, how many processes were swept,
+and the reply's digest. It never holds the task, a command, its output
+or the child's text, for the same reason the reader's log does not.
 
 ### Sessions and stores
 
@@ -803,6 +870,20 @@ The request:
     "retries": 1,                     // re-asks after an invalid answer, 0 to 5
     "tools": ["mail_read"]            // the inner tools it may read through
   },
+  "workbench": {                      // turns on the sandboxed workbench
+    "model": "claude-haiku-5-5",      // quarantine.model when left out
+    "effort": "low",
+    "max_output_tokens": 2048,
+    "max_turns": 40,                  // 0: the default
+    "max_tokens": 400000,             // 0: the default
+    "retries": 1,
+    "deny_read": ["/Users/k/notes/private", "/Users/k/.secret*"],
+    "scratch_root": "/path/for/scratch",
+    "command_timeout_seconds": 60,
+    "output_bytes": 32768,
+    "processes": 64,
+    "scratch_bytes": 1073741824
+  },
   "display_ref_prefix": "shown:2026-10-18/" // where displays are kept; see Displays
 }
 ```
@@ -822,6 +903,23 @@ ordinary way. `tool_kinds` may name `read_quarantined`. The reader's
 calls are in the `tool_result`'s usage, so they count toward
 `limits.max_tokens` and `cost_usd` prices each at the reader model's
 price.
+
+**The workbench.** With a `workbench` block, agentloop adds the
+`workbench` tool itself and builds it from the request: the child model
+on the request's provider, `base_url` and key, the request's `retry` for
+failed model calls, and the limits above. Its model is `workbench.model`,
+else `quarantine.model`; a request with neither is refused, as is a tool
+in `tools` named `workbench`. The block needs a real policy, and the
+policy an entry for `workbench` of class `read`. `deny_read` takes
+absolute paths, or a path ending in `*` to deny every path with that
+prefix; each is added to the ones the workbench always denies. A path
+that is relative, unclean or holds a character the profile's strings
+cannot carry is refused, so nothing can end a rule early. `tool_kinds`
+may name `workbench`. A request with a `workbench` block is refused on a
+system with no `sandbox-exec`, and the quarantined reader cannot read
+through the workbench, since `quarantine.tools` names only the request's
+own tools. The child's calls are in the `tool_result`'s usage, like the
+reader's.
 
 `policy` is required whenever `tools` is not empty. `{"unrestricted":
 true}` turns the trifecta off, for examples and tests, and nothing else

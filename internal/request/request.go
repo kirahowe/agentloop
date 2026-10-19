@@ -30,6 +30,7 @@ import (
 	"github.com/kirahowe/agentloop/openai"
 	"github.com/kirahowe/agentloop/quarantine"
 	"github.com/kirahowe/agentloop/trifecta"
+	"github.com/kirahowe/agentloop/workbench"
 )
 
 // displayRefPrefix is what a display_ref_prefix may be: a kind, a colon
@@ -68,6 +69,7 @@ type Request struct {
 	Resolve            []agentloop.Resolution `json:"resolve"`
 	Quarantine         *Quarantine            `json:"quarantine"`
 	DisplayRefPrefix   string                 `json:"display_ref_prefix"`
+	Workbench          *WorkbenchConfig       `json:"workbench"`
 	Retry              *struct {
 		Retries        int     `json:"retries"`
 		BackoffSeconds float64 `json:"backoff_seconds"`
@@ -162,6 +164,44 @@ type Quarantine struct {
 	ReaderOnly []string `json:"reader_only"`
 }
 
+// WorkbenchConfig turns on the sandboxed workbench, which runs shell
+// commands under macOS sandbox-exec in a child session of its own. The
+// reader's model (quarantine.model) runs it unless this names another.
+type WorkbenchConfig struct {
+	Model           string `json:"model"`
+	Effort          string `json:"effort"`
+	MaxOutputTokens int    `json:"max_output_tokens"`
+	// MaxTurns and MaxTokens bound the child session. Zero means the
+	// defaults.
+	MaxTurns  int   `json:"max_turns"`
+	MaxTokens int64 `json:"max_tokens"`
+	// Retries is how many times the child is asked again after a reply
+	// that is not a valid answer. Nil means DefaultQuarantineRetries.
+	Retries *int `json:"retries"`
+	// DenyRead are paths the commands may not read, added to the ones
+	// the workbench always denies. Each is an absolute path, or one
+	// ending in "*" to deny every path with that prefix.
+	DenyRead []string `json:"deny_read"`
+	// ScratchRoot is where each session's scratch directory is made.
+	// Empty means the temporary directory.
+	ScratchRoot string `json:"scratch_root"`
+	// CommandTimeoutSeconds bounds one command, OutputBytes how much of
+	// its output the child sees, Processes how many processes it may add,
+	// and ScratchBytes how large the scratch directory may grow. Zero
+	// means the defaults.
+	CommandTimeoutSeconds float64 `json:"command_timeout_seconds"`
+	OutputBytes           int     `json:"output_bytes"`
+	Processes             int     `json:"processes"`
+	ScratchBytes          int64   `json:"scratch_bytes"`
+}
+
+// WorkbenchLimits bounds the child session when the request gives no
+// numbers of its own.
+var WorkbenchLimits = struct {
+	MaxTurns  int
+	MaxTokens int64
+}{MaxTurns: 40, MaxTokens: 400000}
+
 // DefaultQuarantineRetries is the reader's retries when the request
 // gives none.
 const DefaultQuarantineRetries = 1
@@ -255,6 +295,9 @@ func (r *Request) validate(mode Mode) error {
 		if t.Name == quarantine.ToolName {
 			return usage.Errorf("%s is built in; give a quarantine block instead of a tool by that name", quarantine.ToolName)
 		}
+		if t.Name == workbench.ToolName {
+			return usage.Errorf("%s is built in; give a workbench block instead of a tool by that name", workbench.ToolName)
+		}
 		if !toolName.MatchString(t.Name) {
 			return usage.Errorf("tool name %q is not 1 to 64 letters, digits, - or _", t.Name)
 		}
@@ -276,6 +319,9 @@ func (r *Request) validate(mode Mode) error {
 		return err
 	}
 	if err := r.validateQuarantine(); err != nil {
+		return err
+	}
+	if err := r.validateWorkbench(); err != nil {
 		return err
 	}
 	if r.ToolTimeoutSeconds < 0 || r.TimeoutSeconds < 0 {
@@ -411,6 +457,9 @@ func (r *Request) toolNames() []string {
 	if r.Quarantine != nil {
 		names = append(names, quarantine.ToolName)
 	}
+	if r.Workbench != nil {
+		names = append(names, workbench.ToolName)
+	}
 	return names
 }
 
@@ -474,6 +523,42 @@ func (r *Request) validateQuarantine() error {
 			return usage.Errorf("quarantine.reader_only names %q, which is not in quarantine.tools", name)
 		}
 		only[name] = true
+	}
+	return nil
+}
+
+// validateWorkbench checks the workbench block. It needs a real policy,
+// since its answers' labels are the point, and a model, from its own
+// block or the quarantine block. Its class is read: it brings content in
+// and sends nothing out.
+func (r *Request) validateWorkbench() error {
+	w := r.Workbench
+	if w == nil {
+		return nil
+	}
+	if !r.Restricted() {
+		return usage.Errorf("workbench needs a policy: it exists to keep labels off the session")
+	}
+	if w.Model == "" && (r.Quarantine == nil || r.Quarantine.Model == "") {
+		return usage.Errorf("workbench has no model, and there is no quarantine block to take one from")
+	}
+	switch agentloop.Effort(w.Effort) {
+	case "", agentloop.EffortLow, agentloop.EffortMedium, agentloop.EffortHigh, agentloop.EffortXHigh, agentloop.EffortMax:
+	default:
+		return usage.Errorf("unknown workbench.effort %q", w.Effort)
+	}
+	if w.MaxOutputTokens < 0 || w.MaxTurns < 0 || w.MaxTokens < 0 || w.CommandTimeoutSeconds < 0 ||
+		w.OutputBytes < 0 || w.Processes < 0 || w.ScratchBytes < 0 {
+		return usage.Errorf("workbench numbers cannot be negative")
+	}
+	if w.Retries != nil && (*w.Retries < 0 || *w.Retries > MaxQuarantineRetries) {
+		return usage.Errorf("workbench.retries must be from 0 to %d", MaxQuarantineRetries)
+	}
+	if e := r.Policy.Tools[workbench.ToolName]; e.Class != trifecta.Read {
+		return usage.Errorf("policy.tools must give %s the class read", workbench.ToolName)
+	}
+	if err := workbench.Available(); err != nil {
+		return usage.Errorf("workbench: %v", err)
 	}
 	return nil
 }
@@ -740,6 +825,13 @@ func (r *Request) Agent(key string, m *MCP) (*agentloop.Agent, error) {
 		}
 	}
 	var readers map[string][]string
+	bench, err := r.workbench(key, retry)
+	if err != nil {
+		return nil, err
+	}
+	if bench != nil {
+		tools = append(tools, bench)
+	}
 	reader, err := r.reader(key, tools, retry)
 	if err != nil {
 		return nil, err
@@ -809,6 +901,53 @@ func (r *Request) reader(key string, tools []agentloop.Tool, retry agentloop.Ret
 		Retry:           retry,
 		Inner:           inner,
 		Labels:          labels,
+	})
+}
+
+// workbench is the workbench tool, or nil when the request has no
+// workbench block. Its model is its own, else the reader's.
+func (r *Request) workbench(key string, retry agentloop.RetryPolicy) (*workbench.Workbench, error) {
+	w := r.Workbench
+	if w == nil {
+		return nil, nil
+	}
+	model := w.Model
+	if model == "" {
+		model = r.Quarantine.Model
+	}
+	effort := w.Effort
+	if effort == "" && r.Quarantine != nil {
+		effort = r.Quarantine.Effort
+	}
+	retries := DefaultQuarantineRetries
+	if w.Retries != nil {
+		retries = *w.Retries
+	}
+	limits := workbench.Limits{
+		Timeout:      Seconds(w.CommandTimeoutSeconds),
+		OutputBytes:  w.OutputBytes,
+		Processes:    w.Processes,
+		ScratchBytes: w.ScratchBytes,
+	}
+	turns, tokens := w.MaxTurns, w.MaxTokens
+	if turns == 0 {
+		turns = WorkbenchLimits.MaxTurns
+	}
+	if tokens == 0 {
+		tokens = WorkbenchLimits.MaxTokens
+	}
+	return workbench.New(workbench.Workbench{
+		Model:           r.newModelFor(key, model),
+		ModelID:         model,
+		Effort:          agentloop.Effort(effort),
+		MaxOutputTokens: w.MaxOutputTokens,
+		MaxTurns:        turns,
+		MaxTokens:       tokens,
+		Retries:         retries,
+		Retry:           retry,
+		Limits:          limits,
+		ScratchRoot:     w.ScratchRoot,
+		DenyRead:        w.DenyRead,
 	})
 }
 
