@@ -101,8 +101,10 @@ type DecisionEntry struct {
 	Consent *int `json:"consent,omitempty"`
 	// Resolved marks the decision of a person on a held call.
 	Resolved bool `json:"resolved,omitempty"`
-	// InputSHA256 is set on a hold: the digest of the call's input (see
-	// InputDigest) that a resolution must name.
+	// InputSHA256 is set on a hold: the digest of the call's effective
+	// input (see InputDigest and Narrowed) that a resolution must name.
+	// A person's allow records the digest it was given for, and the call
+	// runs only while its effective input still has it.
 	InputSHA256 string `json:"input_sha256,omitempty"`
 }
 

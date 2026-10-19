@@ -80,6 +80,41 @@ type InputChecker interface {
 	CheckInput(input json.RawMessage) string
 }
 
+// A Narrowed tool runs on more than the input the model wrote: the
+// operator fixed some of its arguments, which are added before the call
+// is sent (an MCP tool's fixed_args). EffectiveInput is the input the
+// tool would run on for input the model wrote, and the arguments the
+// operator set in it. ok is false when the tool would refuse the input,
+// as CheckInput does.
+//
+// The agent decides, holds and approves a call on its effective input,
+// so a consent rule can name a fixed argument, a preview sees the whole
+// call, and an approval no longer matches once the operator's settings
+// change.
+type Narrowed interface {
+	Tool
+	EffectiveInput(input json.RawMessage) (out json.RawMessage, fixed map[string]json.RawMessage, ok bool)
+}
+
+// EffectiveInput is the input call would run on with tools: what the
+// model wrote, with the arguments a Narrowed tool fixes added. fixed is
+// those arguments, nil when there are none. A tool that is not Narrowed,
+// or that would refuse the input, runs on the input as written.
+func EffectiveInput(tools []Tool, call ToolCall) (json.RawMessage, map[string]json.RawMessage) {
+	for _, t := range tools {
+		if t.Spec().Name != call.Name {
+			continue
+		}
+		if n, ok := t.(Narrowed); ok {
+			if out, fixed, ok := n.EffectiveInput(call.Input); ok && len(fixed) > 0 {
+				return out, fixed
+			}
+		}
+		break
+	}
+	return call.Input, nil
+}
+
 // A CallTool is a Tool that is told which call it serves and what the
 // session holds. The agent uses CallWith instead of Call.
 type CallTool interface {

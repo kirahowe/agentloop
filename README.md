@@ -210,7 +210,10 @@ origin fails the request. No proxy is used.
 A tool's entry can narrow its arguments. `fixed_args` sets arguments to
 the given values on every call, and `hidden_args` names arguments the
 model may not give. Both are taken out of the schema the model sees, and a
-call that names one is refused before the server is sent anything.
+call that names one is refused before the server is sent anything. The
+policy, a consent rule and a person's approval all see the call with the
+fixed values in. An approval given before the operator changed a fixed
+value does not run the call.
 
 ```json
 "mcp_servers": {"mail": {

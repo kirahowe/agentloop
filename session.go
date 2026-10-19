@@ -49,8 +49,14 @@ type CallInfo struct {
 	Decision *Decision
 	// Resolved says the latest decision is a person's, on a held call.
 	Resolved bool
-	Started  bool
-	Finished bool
+	// HoldSHA256 is the digest the call's hold recorded, which a
+	// resolution must name, and ApprovedSHA256 the digest a person's
+	// allow was bound to. The call runs only while its effective input
+	// still has it (see Narrowed).
+	HoldSHA256     string
+	ApprovedSHA256 string
+	Started        bool
+	Finished       bool
 	// Result is set once Finished.
 	Result *ToolResult
 }
@@ -190,6 +196,12 @@ func (s *Session) Pending() []ToolCall {
 // carries it out. The verdict must be allow or deny, and the call must be
 // held.
 func (s *Session) Resolve(callID string, d Decision) error {
+	return s.resolve(callID, d, "")
+}
+
+// resolve is Resolve, recording on an allow the digest of the input it
+// was given for (see CallInfo.ApprovedSHA256).
+func (s *Session) resolve(callID string, d Decision, digest string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	st, ok := s.calls[callID]
@@ -202,14 +214,19 @@ func (s *Session) Resolve(callID string, d Decision) error {
 	if d.Verdict != Allow && d.Verdict != Deny {
 		return fmt.Errorf("a held call is resolved with allow or deny, not %q", d.Verdict)
 	}
+	// Only an allow is bound to an input.
+	if d.Verdict != Allow {
+		digest = ""
+	}
 	_, err := s.appendLocked(Entry{Type: EntryDecision, Decision: &DecisionEntry{
-		CallID:   callID,
-		Tool:     st.info.Call.Name,
-		Verdict:  d.Verdict,
-		Reason:   d.Reason,
-		Labels:   d.Labels,
-		Deferred: d.Deferred,
-		Resolved: true,
+		CallID:      callID,
+		Tool:        st.info.Call.Name,
+		Verdict:     d.Verdict,
+		Reason:      d.Reason,
+		Labels:      d.Labels,
+		Deferred:    d.Deferred,
+		Resolved:    true,
+		InputSHA256: digest,
 	}})
 	return err
 }
@@ -527,6 +544,12 @@ func (s *Session) mutate(e Entry) {
 		}
 		st.info.Decision = &Decision{Verdict: d.Verdict, Reason: d.Reason, Labels: d.Labels, Deferred: d.Deferred}
 		st.info.Resolved = d.Resolved
+		switch {
+		case d.Verdict == Hold:
+			st.info.HoldSHA256 = d.InputSHA256
+		case d.Resolved && d.Verdict == Allow:
+			st.info.ApprovedSHA256 = d.InputSHA256
+		}
 		if d.Verdict == Allow {
 			s.addLabels(d.Labels, LabelSource{Kind: LabelTool, Tool: d.Tool, CallID: d.CallID, Seq: e.Seq})
 		}

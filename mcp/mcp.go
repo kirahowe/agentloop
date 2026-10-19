@@ -43,6 +43,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"net/http"
 	"slices"
 	"sort"
@@ -629,7 +630,26 @@ type tool struct {
 var (
 	_ agentloop.CallTool     = (*tool)(nil)
 	_ agentloop.InputChecker = (*tool)(nil)
+	_ agentloop.Narrowed     = (*tool)(nil)
 )
+
+// EffectiveInput is the input CallWith would send the server for input
+// the model wrote: with the fixed arguments added. The agent decides,
+// holds and binds an approval to it. ok is false when the call would not
+// be sent at all.
+func (t *tool) EffectiveInput(input json.RawMessage) (json.RawMessage, map[string]json.RawMessage, bool) {
+	if t.narrow == nil || len(t.narrow.fixed) == 0 {
+		return input, nil, true
+	}
+	if len(strings.TrimSpace(string(input))) == 0 {
+		input = json.RawMessage(`{}`)
+	}
+	out, refused, bad := t.narrow.apply(input)
+	if refused != "" || bad != "" {
+		return nil, nil, false
+	}
+	return out, maps.Clone(t.narrow.fixed), true
+}
 
 // CheckInput refuses a call that names a fixed or hidden argument. The
 // agent runs it before the policy, so such a call is never held for the

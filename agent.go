@@ -148,10 +148,25 @@ type Outcome struct {
 }
 
 // A HeldCall is a call waiting for a person, with the digest of its input
-// that a resolution must name (see Agent.Resolve).
+// that a resolution must name (see Agent.Resolve). For a tool whose
+// arguments the operator narrowed (Narrowed), EffectiveInput is the input
+// the call would run on, the model's with FixedArgs added, FixedArgs is
+// the arguments the operator set, and the digest is of EffectiveInput.
 type HeldCall struct {
 	ToolCall
-	InputSHA256 string `json:"input_sha256"`
+	InputSHA256    string                     `json:"input_sha256"`
+	EffectiveInput json.RawMessage            `json:"effective_input,omitempty"`
+	FixedArgs      map[string]json.RawMessage `json:"fixed_args,omitempty"`
+}
+
+// HeldCallOf is call as a person is asked about it.
+func HeldCallOf(tools []Tool, call ToolCall) HeldCall {
+	in, fixed := EffectiveInput(tools, call)
+	h := HeldCall{ToolCall: call, InputSHA256: InputDigest(in), FixedArgs: fixed}
+	if len(fixed) > 0 {
+		h.EffectiveInput = in
+	}
+	return h
 }
 
 // A Refusal is one tool result the session was not given, because it
@@ -536,7 +551,7 @@ func (r *runner) settleAndCheck(ctx context.Context) (*Outcome, error) {
 	case len(res.held) > 0:
 		out := r.outcome(ReasonHeld)
 		for _, c := range res.held {
-			out.Held = append(out.Held, HeldCall{ToolCall: c, InputSHA256: InputDigest(c.Input)})
+			out.Held = append(out.Held, HeldCallOf(r.a.Tools, c))
 		}
 		out.LabelSources = r.s.LabelSources()
 		return out, nil
@@ -607,6 +622,15 @@ func (r *runner) settle(ctx context.Context) (settled, error) {
 		case Hold:
 			res.held = append(res.held, info.Call)
 		case Allow:
+			// A person's allow is bound to the input the call would run
+			// on then. If the operator's settings for the tool changed
+			// since, it would run on other input, so it does not run.
+			if info.Resolved && info.ApprovedSHA256 != "" && HeldCallOf(r.a.Tools, info.Call).InputSHA256 != info.ApprovedSHA256 {
+				if err := r.finish(id, ToolResult{Content: SettingsChanged, IsError: true}, nil, ""); err != nil {
+					return res, err
+				}
+				continue
+			}
 			if max := r.a.Limits.MaxToolCalls; max > 0 && r.toolCalls >= max {
 				msg := "This call was not run: the limit on tool calls was reached."
 				if err := r.finish(id, ToolResult{Content: msg, IsError: true}, nil, ""); err != nil {
@@ -655,6 +679,10 @@ func (r *runner) decide(ctx context.Context, call ToolCall) Decision {
 	if r.a.Policy == nil {
 		return Decision{Verdict: Allow}
 	}
+	// The policy sees the input the call would run on, so a consent rule
+	// on an argument the operator fixed applies, and a call cannot dodge
+	// one by leaving that argument out.
+	call.Input, _ = EffectiveInput(r.a.Tools, call)
 	d := r.a.Policy.Decide(ctx, call, r.s.View())
 	switch d.Verdict {
 	case Allow:
@@ -681,7 +709,7 @@ func (r *runner) recordDecision(call ToolCall, d Decision) error {
 		// A hold adds nothing: its labels are asked for again when a
 		// person allows the call.
 		e.Labels = nil
-		e.InputSHA256 = InputDigest(call.Input)
+		e.InputSHA256 = HeldCallOf(r.a.Tools, call).InputSHA256
 	}
 	return r.record(Entry{Type: EntryDecision, Decision: e})
 }

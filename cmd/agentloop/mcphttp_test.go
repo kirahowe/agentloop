@@ -9,6 +9,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/kirahowe/agentloop"
 	"github.com/kirahowe/agentloop/internal/fakeremote"
 )
 
@@ -128,5 +129,151 @@ func TestMCPToolsListsARemoteServer(t *testing.T) {
 		if code := realMain([]string{"mcp-tools"}, strings.NewReader(bad), &out, &errb); code == 0 {
 			t.Errorf("%s: listed %s", bad, out.String())
 		}
+	}
+}
+
+// fixedGroupFixture is a request whose act tool send has its group fixed
+// by the operator to group.
+func fixedGroupFixture(t *testing.T, api *fakeAPI, url, group string, consent []map[string]any) *fixture {
+	f := remoteFixture(t, api, url)
+	f.req["tools"] = []map[string]any{
+		{"name": "send", "protocol": "mcp-http", "server": "remote", "tool": "send_campaign",
+			"fixed_args": map[string]any{"group": group, "send_now": false}},
+	}
+	entry := map[string]any{"class": "act"}
+	if consent != nil {
+		entry["consent"] = consent
+	}
+	f.req["policy"].(map[string]any)["tools"] = map[string]any{"send": entry}
+	return f
+}
+
+func serverCalls(t *testing.T, path string) []map[string]any {
+	t.Helper()
+	b, err := os.ReadFile(path)
+	if os.IsNotExist(err) {
+		return nil
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	var out []map[string]any
+	for _, l := range strings.Split(strings.TrimSpace(string(b)), "\n") {
+		if l == "" {
+			continue
+		}
+		var call struct {
+			Args map[string]any `json:"args"`
+		}
+		json.Unmarshal([]byte(l), &call)
+		out = append(out, call.Args)
+	}
+	return out
+}
+
+// A consent rule can name an argument the operator fixed: consent sees
+// the input the call runs on, the model's with the fixed arguments.
+func TestConsentSeesFixedArguments(t *testing.T) {
+	url, calls := startRemote(t)
+	api := newFakeAPI(t, toolReply("toolu_1", "send", `{"subject":"Hi"}`), textReply("done"))
+	f := fixedGroupFixture(t, api, url, "Kira only", []map[string]any{{"group": "Kira only"}})
+	res := f.run()
+	if out := res.outcome(t); res.code != 0 || out["reason"] != "completed" {
+		t.Fatalf("exit %d %v\n%s", res.code, out, res.stderr)
+	}
+	got := serverCalls(t, calls)
+	if len(got) != 1 || got[0]["group"] != "Kira only" {
+		t.Fatalf("the server saw %v", got)
+	}
+	// With another group fixed, the same rule does not cover the call.
+	url, calls = startRemote(t)
+	api = newFakeAPI(t, toolReply("toolu_1", "send", `{"subject":"Hi"}`), textReply("done"))
+	f = fixedGroupFixture(t, api, url, "Public list", []map[string]any{{"group": "Kira only"}})
+	if out := f.run().outcome(t); out["reason"] != "held" {
+		t.Fatalf("outcome %v", out)
+	}
+	if got := serverCalls(t, calls); len(got) != 0 {
+		t.Fatalf("the server saw %v", got)
+	}
+}
+
+// A held call shows, and its approval is bound to, the input it would
+// run on. When the operator changes a fixed argument before the approved
+// call resumes, it is not run, and the model is told why.
+func TestApprovalIsBoundToFixedArguments(t *testing.T) {
+	url, calls := startRemote(t)
+	api := newFakeAPI(t, toolReply("toolu_1", "send", `{"subject":"Hi"}`), textReply("done"), textReply("done"))
+	f := fixedGroupFixture(t, api, url, "Kira only", nil)
+	out := f.run().outcome(t)
+	held, _ := out["held"].([]any)
+	if out["reason"] != "held" || len(held) != 1 {
+		t.Fatalf("outcome %v", out)
+	}
+	h := held[0].(map[string]any)
+	want := json.RawMessage(`{"group":"Kira only","send_now":false,"subject":"Hi"}`)
+	if h["input_sha256"] != agentloop.InputDigest(want) {
+		t.Fatalf("the digest is not of the effective input: %v", h)
+	}
+	if b, _ := json.Marshal(h["effective_input"]); agentloop.InputDigest(b) != agentloop.InputDigest(want) {
+		t.Fatalf("effective input %s", b)
+	}
+	if fx, _ := h["fixed_args"].(map[string]any); fx["group"] != "Kira only" || fx["send_now"] != false || len(fx) != 2 {
+		t.Fatalf("fixed args %v", h["fixed_args"])
+	}
+	// The operator changes the group, then the approval is carried back.
+	f.req["tools"].([]map[string]any)[0]["fixed_args"] = map[string]any{"group": "Public list", "send_now": false}
+	f.req["prompt"] = ""
+	f.req["resolve"] = []map[string]any{{"call_id": "toolu_1", "verdict": "allow", "input_sha256": h["input_sha256"]}}
+	res := f.run()
+	if out := res.outcome(t); res.code != 0 || out["reason"] != "completed" {
+		t.Fatalf("exit %d %v\n%s", res.code, out, res.stderr)
+	}
+	if got := serverCalls(t, calls); len(got) != 0 {
+		t.Fatalf("the call ran with changed settings: %v", got)
+	}
+	var reason any
+	for _, l := range res.lines {
+		if d, ok := l["decision"].(map[string]any); ok && d["call_id"] == "toolu_1" {
+			reason = d["reason"]
+		}
+	}
+	if reason != agentloop.SettingsChanged {
+		t.Fatalf("the deny says %v", reason)
+	}
+	// The same resolution again is the same deny, not an error.
+	if res := f.run(); res.code != 0 {
+		t.Fatalf("exit %d %s", res.code, res.stderr)
+	}
+	if got := serverCalls(t, calls); len(got) != 0 {
+		t.Fatalf("the server saw %v", got)
+	}
+}
+
+// With the settings unchanged, the approved call runs on what was shown.
+func TestApprovedCallRunsWithItsFixedArguments(t *testing.T) {
+	url, calls := startRemote(t)
+	api := newFakeAPI(t, toolReply("toolu_1", "send", `{"subject":"Hi"}`), textReply("done"))
+	f := fixedGroupFixture(t, api, url, "Kira only", nil)
+	out := f.run().outcome(t)
+	h := out["held"].([]any)[0].(map[string]any)
+	f.req["prompt"] = ""
+	f.req["resolve"] = []map[string]any{{"call_id": "toolu_1", "verdict": "allow", "input_sha256": h["input_sha256"]}}
+	res := f.run()
+	if out := res.outcome(t); res.code != 0 || out["reason"] != "completed" {
+		t.Fatalf("exit %d %v\n%s", res.code, out, res.stderr)
+	}
+	got := serverCalls(t, calls)
+	if len(got) != 1 || got[0]["group"] != "Kira only" || got[0]["subject"] != "Hi" {
+		t.Fatalf("the server saw %v", got)
+	}
+	// The digest of the model's input alone does not approve it.
+	url, _ = startRemote(t)
+	api = newFakeAPI(t, toolReply("toolu_1", "send", `{"subject":"Hi"}`), textReply("done"))
+	f = fixedGroupFixture(t, api, url, "Kira only", nil)
+	f.run()
+	f.req["prompt"] = ""
+	f.req["resolve"] = []map[string]any{{"call_id": "toolu_1", "verdict": "allow", "input_sha256": agentloop.InputDigest(json.RawMessage(`{"subject":"Hi"}`))}}
+	if res := f.run(); res.code != 2 {
+		t.Fatalf("exit %d", res.code)
 	}
 }

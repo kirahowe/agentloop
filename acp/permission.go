@@ -32,6 +32,14 @@ func PermissionRequest(id acp.SessionId, held agentloop.HeldCall, kinds map[stri
 		sources = map[string]agentloop.LabelSource{}
 	}
 	meta["agentloop/label_sources"], _ = json.Marshal(sources)
+	// The input shown is what the call would run on. The arguments the
+	// operator fixed are in it, and named here, so a client can mark
+	// them as the operator's settings.
+	input := c.Input
+	if len(held.FixedArgs) > 0 {
+		meta["agentloop/fixed_args"], _ = json.Marshal(held.FixedArgs)
+		input = held.EffectiveInput
+	}
 	return acp.RequestPermissionRequest{
 		SessionId: id,
 		Options: []acp.PermissionOption{
@@ -44,7 +52,7 @@ func PermissionRequest(id acp.SessionId, held agentloop.HeldCall, kinds map[stri
 			Name:       acp.Ptr(c.Name),
 			Kind:       &kind,
 			Status:     &status,
-			RawInput:   rawJSON(c.Input),
+			RawInput:   rawJSON(input),
 			Meta:       meta,
 		},
 	}

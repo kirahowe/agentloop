@@ -1059,6 +1059,19 @@ nothing. Otherwise the fixed values are added and the whole is checked
 against the server's own schema before it is sent. The pinned digest is
 the server's definition's, not the narrowed one's.
 
+A call is decided, held and approved on its effective input: what the
+model wrote with the fixed values added (`Narrowed`, `EffectiveInput`).
+The policy sees the effective input, so a consent rule can name a fixed
+argument, and a call cannot leave one out to dodge a rule. A held call
+lists `effective_input` and `fixed_args`, and its `input_sha256` is of
+the effective input, so a person approves the whole call. A permission
+request over ACP shows the effective input as `rawInput` and names the
+fixed values under `_meta["agentloop/fixed_args"]`. If the operator
+changes a fixed value after the call was held, the effective input no
+longer has the approved digest: a resolution that allows it becomes a
+deny, and a person's allow recorded before the change does not run. The
+model is told why (`SettingsChanged`).
+
 `agentloop mcp-tools` reads `{"url": "...", "token": "..."}` (token
 optional) on stdin, lists every tool the remote server has, and prints
 `{"tools": [...]}`: each tool's `name`, `title`, `description`,
@@ -1116,7 +1129,8 @@ dollars, each call at the price of the model that served it. `cost_usd` is
 left out, never 0, when the run made no call, a call's model has no price,
 or the provider is not Anthropic. It is on this line only, not in the
 `run_ended` entry. Nothing else goes to stdout. For a held run the outcome's `held` lists each call as
-`{"id", "name", "input", "input_sha256"}`. A run with a refused result
+`{"id", "name", "input", "input_sha256"}`, with `effective_input` and
+`fixed_args` for a call whose tool fixes arguments. A run with a refused result
 lists it in `refused`, and one that did not start for holding a
 forbidden label ends with reason `forbidden` and the labels in
 `forbidden`.

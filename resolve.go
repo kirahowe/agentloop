@@ -68,7 +68,11 @@ func (a *Agent) Resolve(ctx context.Context, s *Session, r Resolution) error {
 	if err != nil || noop {
 		return err
 	}
-	if err := s.Resolve(r.CallID, d); err != nil {
+	bound := ""
+	if d.Verdict == Allow {
+		bound = r.InputSHA256
+	}
+	if err := s.resolve(r.CallID, d, bound); err != nil {
 		return err
 	}
 	if a.Observe != nil {
@@ -81,6 +85,16 @@ func (a *Agent) Resolve(ctx context.Context, s *Session, r Resolution) error {
 // ErrPolicyDenies is why Resolve refuses an allow the agent's policy now
 // denies outright, such as a call to a tool the agent no longer has.
 var ErrPolicyDenies = errors.New("the policy denies the call")
+
+// ErrSettingsChanged is why Resolve refuses an allow of a call whose
+// effective input changed since it was held: the operator changed the
+// arguments they fixed for its tool.
+var ErrSettingsChanged = errors.New("the settings for the tool changed since the call was held")
+
+// SettingsChanged is the result of a call a person allowed that did not
+// run because the operator's settings for its tool changed after it was
+// held, and so is the reason recorded when such an allow becomes a deny.
+const SettingsChanged = "This call was not run: the operator's settings for this tool changed after it was held, so the approval no longer covers it. Ask again if it is still needed."
 
 // CheckResolve says whether Resolve would accept r, without writing
 // anything, so a list of resolutions can be checked whole first.
@@ -96,7 +110,11 @@ func (a *Agent) resolution(ctx context.Context, s *Session, r Resolution) (d Dec
 	if !ok {
 		return d, false, fmt.Errorf("there is no call %q", r.CallID)
 	}
-	if r.InputSHA256 != InputDigest(info.Call.Input) {
+	held := info.HoldSHA256
+	if held == "" {
+		held = InputDigest(info.Call.Input)
+	}
+	if r.InputSHA256 != held {
 		return d, false, fmt.Errorf("the input of call %q does not have the digest %q", r.CallID, r.InputSHA256)
 	}
 	if r.Verdict != Allow && r.Verdict != Deny {
@@ -113,7 +131,17 @@ func (a *Agent) resolution(ctx context.Context, s *Session, r Resolution) (d Dec
 		if a.Policy == nil {
 			return d, false, fmt.Errorf("call %q cannot be allowed by an agent with no policy", r.CallID)
 		}
-		pd := a.Policy.Decide(ctx, info.Call, s.View())
+		// The approval names the input the call would run on when it was
+		// held. The operator's settings for the tool may have changed
+		// since (a fixed recipient, say), and then it would run on input
+		// nobody approved.
+		eff := HeldCallOf(a.Tools, info.Call)
+		if eff.InputSHA256 != r.InputSHA256 {
+			return d, false, fmt.Errorf("%w: call %q", ErrSettingsChanged, r.CallID)
+		}
+		call := info.Call
+		call.Input, _ = EffectiveInput(a.Tools, call)
+		pd := a.Policy.Decide(ctx, call, s.View())
 		if pd.Verdict == Deny {
 			return d, false, fmt.Errorf("%w: call %q: %s", ErrPolicyDenies, r.CallID, pd.Reason)
 		}

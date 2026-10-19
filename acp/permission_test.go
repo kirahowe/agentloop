@@ -377,3 +377,23 @@ func TestLabelChangesAreShown(t *testing.T) {
 		t.Fatalf("labels shown %v, want %v", shown, want)
 	}
 }
+
+// A call to a narrowed tool is shown as it would run, with the arguments
+// the operator fixed named, so a client can mark them.
+func TestPermissionRequestShowsFixedArguments(t *testing.T) {
+	held := agentloop.HeldCall{ToolCall: agentloop.ToolCall{ID: "c1", Name: "send", Input: json.RawMessage(`{"subject":"Hi"}`)},
+		EffectiveInput: json.RawMessage(`{"group":"Kira only","subject":"Hi"}`),
+		FixedArgs:      map[string]json.RawMessage{"group": json.RawMessage(`"Kira only"`)}}
+	req := PermissionRequest("s1", held, nil, nil, nil)
+	raw, _ := json.Marshal(req.ToolCall.RawInput)
+	if !jsonEqual(raw, held.EffectiveInput) {
+		t.Fatalf("rawInput %s", raw)
+	}
+	if got := string(req.ToolCall.Meta["agentloop/fixed_args"]); got != `{"group":"Kira only"}` {
+		t.Fatalf("fixed_args %s", got)
+	}
+	plain := PermissionRequest("s1", agentloop.HeldCall{ToolCall: held.ToolCall}, nil, nil, nil)
+	if _, ok := plain.ToolCall.Meta["agentloop/fixed_args"]; ok {
+		t.Fatal("a call with nothing fixed names fixed arguments")
+	}
+}

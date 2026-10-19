@@ -251,12 +251,19 @@ func resolve(ctx context.Context, agent *agentloop.Agent, sess *agentloop.Sessio
 	list = slices.Clone(list)
 	for i, r := range list {
 		err := agent.CheckResolve(ctx, sess, r)
-		if r.Verdict == agentloop.Allow && (errors.Is(err, agentloop.ErrPolicyDenies) || err != nil && deniedAsGone(sess, r)) {
+		if r.Verdict == agentloop.Allow && (errors.Is(err, agentloop.ErrPolicyDenies) || err != nil && deniedAsGone(sess, r, noLongerAllowed)) {
 			// The person allowed a call the policy no longer allows at all
 			// (its tool is gone, say). The run carries on with a deny, as
 			// acp does, rather than failing, and the same resolution sent
 			// again is the same deny.
 			list[i].Verdict, list[i].Reason = agentloop.Deny, noLongerAllowed
+			err = agent.CheckResolve(ctx, sess, list[i])
+		} else if r.Verdict == agentloop.Allow && (errors.Is(err, agentloop.ErrSettingsChanged) || err != nil && deniedAsGone(sess, r, agentloop.SettingsChanged)) {
+			// The person allowed the call as it was held, and the
+			// operator's settings for its tool have changed since, so it
+			// would run on input nobody approved. It is denied, and the
+			// model is told why.
+			list[i].Verdict, list[i].Reason = agentloop.Deny, agentloop.SettingsChanged
 			err = agent.CheckResolve(ctx, sess, list[i])
 		}
 		if err != nil {
@@ -292,11 +299,11 @@ func ptr[T any](v T) *T { return &v }
 // noLongerAllowed is the reason recorded for an allow the policy refuses.
 const noLongerAllowed = "The tool is no longer allowed."
 
-// deniedAsGone reports whether r's call was already resolved deny because
-// an allow for it was refused by the policy.
-func deniedAsGone(sess *agentloop.Session, r agentloop.Resolution) bool {
+// deniedAsGone reports whether r's call was already resolved deny, with
+// reason, because an allow for it was refused.
+func deniedAsGone(sess *agentloop.Session, r agentloop.Resolution, reason string) bool {
 	info, ok := sess.Call(r.CallID)
-	return ok && info.Resolved && info.Decision.Verdict == agentloop.Deny && info.Decision.Reason == noLongerAllowed
+	return ok && info.Resolved && info.Decision.Verdict == agentloop.Deny && info.Decision.Reason == reason
 }
 
 func writeJSON(w io.Writer, v any) error {

@@ -705,12 +705,19 @@ func (s *Server) ask(ctx context.Context, ss *session, agent *agentloop.Agent, h
 			verdict = PermissionVerdict(resp, err, ctx.Err() != nil)
 		}
 		r := agentloop.Resolution{CallID: h.ID, Verdict: verdict, InputSHA256: h.InputSHA256}
-		if verdict == agentloop.Allow && agent.CheckResolve(ctx, ss.sess, r) != nil {
-			// The policy no longer lets anyone allow it.
-			r.Verdict = agentloop.Deny
+		reason := NotApproved
+		if verdict == agentloop.Allow {
+			if err := agent.CheckResolve(ctx, ss.sess, r); err != nil {
+				// The policy no longer lets anyone allow it, or the call
+				// would no longer run on the input shown.
+				r.Verdict = agentloop.Deny
+				if errors.Is(err, agentloop.ErrSettingsChanged) {
+					reason = agentloop.SettingsChanged
+				}
+			}
 		}
 		if r.Verdict == agentloop.Deny {
-			r.Reason = NotApproved
+			r.Reason = reason
 		}
 		if err := agent.Resolve(ctx, ss.sess, r); err != nil {
 			return err
