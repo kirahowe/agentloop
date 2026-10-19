@@ -445,16 +445,22 @@ func (c *checker) closed(node any, path string, depth int) *Result {
 			tried = append(tried, r)
 		}
 	}
-	if th, ok := obj["then"]; ok {
-		if el, ok := obj["else"]; ok {
-			r := c.closed(th, path+"/then", depth)
-			if r == nil {
-				r = c.closed(el, path+"/else", depth)
+	// then and else say what holds when if matches and when it does not,
+	// so together they cover every instance. Without an if beside them
+	// they say nothing at all: the validator ignores both, and the node
+	// is as open as the rest of it makes it.
+	if _, hasIf := obj["if"]; hasIf {
+		if th, ok := obj["then"]; ok {
+			if el, ok := obj["else"]; ok {
+				r := c.closed(th, path+"/then", depth)
+				if r == nil {
+					r = c.closed(el, path+"/else", depth)
+				}
+				if r == nil {
+					return nil
+				}
+				tried = append(tried, r)
 			}
-			if r == nil {
-				return nil
-			}
-			tried = append(tried, r)
 		}
 	}
 	r := c.own(obj, path, depth)

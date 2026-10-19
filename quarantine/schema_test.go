@@ -105,6 +105,10 @@ func TestCheckExamples(t *testing.T) {
 		{"if then without else", `{"if":{"type":"integer"},"then":{"type":"integer"}}`, true, ""},
 		{"if then else both closed", `{"if":{"type":"integer"},"then":{"type":"integer"},"else":{"type":"boolean"}}`, false, ""},
 		{"if then else, else open", `{"if":{"type":"integer"},"then":{"type":"integer"},"else":{"type":"string"}}`, true, "/else"},
+		// Without an if, the validator ignores then and else, so a
+		// schema that looks closed through them admits anything.
+		{"then else with no if", `{"then":{"type":"boolean"},"else":{"type":"boolean"}}`, true, ""},
+		{"then else with an if elsewhere", `{"allOf":[{"if":{"type":"integer"}}],"then":{"type":"boolean"},"else":{"type":"boolean"}}`, true, ""},
 
 		// References.
 		{"ref to defs", `{"$defs":{"b":{"type":"boolean"}},"$ref":"#/$defs/b"}`, false, ""},
