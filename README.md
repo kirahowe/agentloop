@@ -160,7 +160,11 @@ except a deny list (this user's keys, passwords, browser profiles,
 coding agents' data and whatever the request adds) and writing the
 scratch directory. It has no `network*` rule, so no socket can be used,
 and no `mach-lookup` rule, so no system service can be reached: `open`,
-`osascript`, the pasteboard, DNS and Spotlight all fail. On macOS 26 the
+`osascript`, the pasteboard, DNS and Spotlight all fail. The sysctl
+values it allows are a list: reading sysctl at large would hand over
+every other process's command line. The scratch directory is always in
+the temporary directory, since one inside a synced folder would be
+uploaded by a process outside the sandbox. On macOS 26 the
 commands that do work with no mach service at all are `sh`, the
 coreutils, `find`, `grep`, `rg`, `python3`, `sqlite3`, `jq` and
 `pdftotext`; `mdfind` needs Spotlight and does not. A command has a

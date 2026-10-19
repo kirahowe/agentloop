@@ -93,15 +93,19 @@ type Workbench struct {
 	Retries int
 	Retry   agentloop.RetryPolicy
 	Limits  Limits
-	// ScratchRoot is where each session's directory is made. Empty means
-	// the temporary directory.
-	ScratchRoot string
 	// DenyRead is added to DefaultDenyRead. Each is an absolute path, or
 	// a prefix ending in "*". New resolves symlinks.
 	DenyRead []string
 
 	deny []string
+	// testRoot replaces the temporary directory in this package's own
+	// tests. Nothing outside them sets it.
+	testRoot string
 }
+
+// WithTestRoot is for this package's tests: it makes the session
+// directories under root instead of the temporary directory.
+func WithTestRoot(w *Workbench, root string) { w.testRoot = root }
 
 var _ agentloop.CallTool = (*Workbench)(nil)
 var _ agentloop.InputChecker = (*Workbench)(nil)
@@ -135,9 +139,6 @@ func New(w Workbench) (*Workbench, error) {
 	if l.ScratchBytes <= 0 {
 		l.ScratchBytes = d.ScratchBytes
 	}
-	if w.ScratchRoot == "" {
-		w.ScratchRoot = os.TempDir()
-	}
 	// Without a home directory the workbench cannot know where this
 	// user's keys and browser data are, so it does not run at all rather
 	// than run with a deny list that misses them.
@@ -155,7 +156,16 @@ func New(w Workbench) (*Workbench, error) {
 		if prefix {
 			body := strings.TrimSuffix(p, "*")
 			dir, name := filepath.Split(body)
-			w.deny = append(w.deny, filepath.Join(Resolve(filepath.Clean(dir)), name)+"*")
+			dir = Resolve(filepath.Clean(dir))
+			w.deny = append(w.deny, filepath.Join(dir, name)+"*")
+			// A path on the deny list is often a symlink into a
+			// dotfiles directory, and the sandbox matches the resolved
+			// path, so what each existing match points at is denied too.
+			for _, m := range matches(dir, name) {
+				if r := Resolve(m); r != m {
+					w.deny = append(w.deny, r)
+				}
+			}
 			continue
 		}
 		// Both the path as given and as resolved: a symlink on the deny
@@ -169,6 +179,21 @@ func New(w Workbench) (*Workbench, error) {
 		return nil, err
 	}
 	return &w, nil
+}
+
+// matches are the paths in dir whose names start with name.
+func matches(dir, name string) []string {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return nil
+	}
+	var out []string
+	for _, e := range entries {
+		if strings.HasPrefix(e.Name(), name) {
+			out = append(out, filepath.Join(dir, e.Name()))
+		}
+	}
+	return out
 }
 
 // Resolve is p with the symlinks in its longest existing prefix
@@ -185,6 +210,18 @@ func Resolve(p string) string {
 		}
 		rest = filepath.Join(filepath.Base(d), rest)
 	}
+}
+
+// scratchRoot is where a session's directory is made: this user's
+// temporary directory, and nothing else. It is not a setting: a scratch
+// directory inside a synced folder (iCloud Drive, say) would be read by
+// a process outside the sandbox and uploaded, which is exactly the way
+// out the sandbox exists to close. TestScratchRoot keeps it local.
+func (w *Workbench) scratchRoot() string {
+	if w.testRoot != "" {
+		return w.testRoot
+	}
+	return os.TempDir()
 }
 
 // Deny is the resolved deny list, for the record.
@@ -264,7 +301,7 @@ func (w *Workbench) CallWith(ctx context.Context, call agentloop.Call) (agentloo
 		}
 	}
 
-	b, err := newBox(w.ScratchRoot, w.deny, w.Limits)
+	b, err := newBox(w.scratchRoot(), w.deny, w.Limits)
 	if err != nil {
 		rep.Problem = err.Error()
 		return result(Unavailable, true, false), nil

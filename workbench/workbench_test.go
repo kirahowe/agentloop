@@ -24,11 +24,12 @@ func newBench(t *testing.T, m agentloop.Model, deny ...string) *workbench.Workbe
 	}
 	w, err := workbench.New(workbench.Workbench{
 		Model: m, ModelID: fake.ModelID, MaxTurns: 10, MaxTokens: 100000, Retries: 1,
-		ScratchRoot: t.TempDir(), DenyRead: deny,
+		DenyRead: deny,
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
+	workbench.WithTestRoot(w, t.TempDir())
 	return w
 }
 
@@ -155,10 +156,11 @@ func TestUnavailableWhenScratchCannotBeMade(t *testing.T) {
 		t.Skip(err)
 	}
 	m := fake.Script()
-	w, err := workbench.New(workbench.Workbench{Model: m, ModelID: "x", MaxTurns: 1, MaxTokens: 1, ScratchRoot: "/nonexistent/wb"})
+	w, err := workbench.New(workbench.Workbench{Model: m, ModelID: "x", MaxTurns: 1, MaxTokens: 1})
 	if err != nil {
 		t.Fatal(err)
 	}
+	workbench.WithTestRoot(w, "/nonexistent/wb")
 	res := call(t, w, "x", closed)
 	if !res.IsError || res.Content != workbench.Unavailable || !slices.Equal(res.Labels, []string{"private"}) || len(m.Requests()) != 0 {
 		t.Fatalf("result %+v", res)
@@ -178,6 +180,29 @@ func TestNewRefusesBadSettings(t *testing.T) {
 		if _, err := workbench.New(w); err == nil {
 			t.Errorf("accepted %+v", w)
 		}
+	}
+}
+
+// A path on the deny list is often a symlink into a dotfiles
+// directory, and the sandbox matches the resolved path, so the prefix
+// form resolves each existing match too.
+func TestPrefixDenyResolvesWhatItMatches(t *testing.T) {
+	dir := t.TempDir()
+	real := filepath.Join(dir, "dotfiles", "claude")
+	os.MkdirAll(real, 0o700)
+	os.Symlink(real, filepath.Join(dir, ".claude"))
+	os.Mkdir(filepath.Join(dir, ".claude-work"), 0o700)
+	w, err := workbench.New(workbench.Workbench{Model: fake.Script(), MaxTurns: 1, MaxTokens: 1,
+		DenyRead: []string{filepath.Join(dir, ".claude") + "*"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	d := w.Deny()
+	if !slices.Contains(d, filepath.Join(workbench.Resolve(dir), ".claude")+"*") {
+		t.Errorf("deny list %v lacks the prefix", d)
+	}
+	if !slices.Contains(d, workbench.Resolve(real)) {
+		t.Errorf("deny list %v lacks the symlink's target %s", d, real)
 	}
 }
 

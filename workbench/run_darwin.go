@@ -114,7 +114,10 @@ type CommandResult struct {
 // sandbox just before it becomes sandbox-exec, so they cover everything
 // the command starts and cannot be raised from inside: the number of
 // processes this user may have (the current count plus Processes), CPU
-// seconds per process and the size of a file. The command starts in a
+// seconds per process and the size of a file. The scratch directory's
+// size is watched while the command runs, and the command is stopped
+// when it goes over, since a loop writing file after file could fill the
+// disk before a check after the command. The command starts in a
 // session of its own. Its process group is killed when it ends or times
 // out, and then every process left in this sandbox is killed too,
 // whatever group or session it moved to.
@@ -147,7 +150,28 @@ func (b *box) run(ctx context.Context, command string) (CommandResult, error) {
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
 	cmd.Cancel = func() error { return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL) }
 	cmd.WaitDelay = time.Second
+	// The scratch directory is watched while the command runs: a loop
+	// that writes file after file, each inside the file size limit,
+	// would otherwise fill the disk before the check after the command.
+	watching := make(chan struct{})
+	go func() {
+		defer close(watching)
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(500 * time.Millisecond):
+				if size(b.scratch) > b.limits.ScratchBytes {
+					b.full = true
+					cancel()
+					return
+				}
+			}
+		}
+	}()
 	err = cmd.Run()
+	cancel()
+	<-watching
 	res := CommandResult{Exit: cmd.ProcessState.ExitCode()}
 	res.Swept = b.sweep()
 	res.TimedOut = errors.Is(ctx.Err(), context.DeadlineExceeded)
@@ -155,8 +179,11 @@ func (b *box) run(ctx context.Context, command string) (CommandResult, error) {
 		return res, err
 	}
 	res.Output, res.Truncated = out.String(), out.over
-	if size(b.scratch) > b.limits.ScratchBytes {
+	if b.full || size(b.scratch) > b.limits.ScratchBytes {
 		b.full, res.ScratchFull = true, true
+		// A command stopped for filling the scratch directory was not
+		// stopped for running too long.
+		res.TimedOut = false
 	}
 	return res, nil
 }

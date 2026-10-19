@@ -246,6 +246,42 @@ func TestSandboxReachesNoSystemService(t *testing.T) {
 	}
 }
 
+// Another process's command line can hold a password or a token, and
+// sysctl is where it is read from.
+func TestSandboxCannotReadOtherProcessesArguments(t *testing.T) {
+	w := newWorld(t, Limits{})
+	marker := "WB-ARG-CANARY-7731"
+	other := exec.Command("/bin/sleep", "60", marker)
+	if err := other.Start(); err != nil {
+		t.Fatal(err)
+	}
+	defer other.Process.Kill()
+	time.Sleep(200 * time.Millisecond)
+	// Through the kernel directly: KERN_PROCARGS2 is {1, 49, pid}.
+	r := w.run(t, `python3 -c '
+import ctypes, ctypes.util, sys
+libc = ctypes.CDLL(ctypes.util.find_library("c"), use_errno=True)
+mib = (ctypes.c_int * 3)(1, 49, `+strconv.Itoa(other.Process.Pid)+`)
+size = ctypes.c_size_t(1 << 20)
+buf = ctypes.create_string_buffer(size.value)
+if libc.sysctl(mib, 3, buf, ctypes.byref(size), None, 0) != 0:
+    print("refused", ctypes.get_errno())
+else:
+    print("got", buf.raw[:size.value])
+'`)
+	if strings.Contains(r.Output, marker) {
+		t.Errorf("another process's arguments were readable: %q", r.Output)
+	}
+	// And through sysctl(8), which is how anyone would try first.
+	if out := w.run(t, "sysctl kern.procargs2").Output; strings.Contains(out, marker) {
+		t.Errorf("sysctl(8) read them: %q", out)
+	}
+	// What the C library needs still works.
+	if r := w.run(t, "sort -u /etc/shells > sorted; shasum -a 256 /etc/shells | cut -c1-6; python3 -c 'import os; print(os.cpu_count())'; perl -e 'print 42'"); r.Exit != 0 || !strings.Contains(r.Output, "42") {
+		t.Errorf("the sysctl allowlist is too narrow: %+v", r)
+	}
+}
+
 func TestSandboxContainsRunaways(t *testing.T) {
 	w := newWorld(t, Limits{Timeout: 3 * time.Second, OutputBytes: 1000, FileBytes: 64 << 10})
 
@@ -288,11 +324,26 @@ print("parent done")'`)
 	}
 }
 
-func TestSandboxScratchLimit(t *testing.T) {
-	w := newWorld(t, Limits{FileBytes: 64 << 10, ScratchBytes: 100 << 10})
-	r := w.run(t, "for i in 1 2 3; do dd if=/dev/zero of=f$i bs=1024 count=60 2>/dev/null; done")
+// The limit stops a command while it runs, not only afterwards: a loop
+// writing file after file, each inside the file size limit, would
+// otherwise fill the disk.
+func TestSandboxScratchLimitStopsACommandThatKeepsWriting(t *testing.T) {
+	const limit = 4 << 20
+	w := newWorld(t, Limits{Timeout: 30 * time.Second, FileBytes: 1 << 20, ScratchBytes: limit})
+	start := time.Now()
+	r := w.run(t, "i=0; while :; do dd if=/dev/zero of=f$i bs=1024 count=1000 2>/dev/null; i=$((i+1)); done")
 	if !r.ScratchFull {
-		t.Fatalf("scratch over its limit was not noticed: %+v", r)
+		t.Fatalf("the command was not stopped for filling the scratch directory: %+v", r)
+	}
+	if took := time.Since(start); took > 20*time.Second {
+		t.Errorf("it ran for %s", took)
+	}
+	// It is stopped near the limit, not far past it.
+	if n := size(w.box.scratch); n > 4*limit {
+		t.Errorf("the scratch directory grew to %d bytes, limit %d", n, limit)
+	}
+	if n := w.box.left(); n != 0 {
+		t.Errorf("%d processes were left", n)
 	}
 	if r := w.run(t, "echo again"); !r.ScratchFull || strings.Contains(r.Output, "again") {
 		t.Errorf("a command ran after scratch filled: %+v", r)

@@ -442,7 +442,10 @@ environment of only `PATH`, `HOME`, `TMPDIR` (the scratch directory) and
 the settings to the profile text, so what the sandbox allows is read and
 tested without running anything. It denies everything, then allows
 forking, running programs, signals and process info within the same
-sandbox, reading sysctl values, reading every file except a deny list,
+sandbox, reading the sysctl values in an allowlist (what the hardware and system
+are, and the kernel numbers the C library asks for, but not
+`kern.procargs2`, which is every other process's command line), reading
+every file except a deny list,
 reading and writing the scratch directory, and writing `/dev/null` and
 the process's own output. Later rules win, so the deny list comes after
 the broad read rule and the scratch directory after the deny list.
@@ -462,11 +465,18 @@ model provider. Only the commands are sandboxed, and a sandbox cannot be
 loosened from inside, so `sandbox-exec` run again within it is still
 bound by the first profile.
 
+The scratch directory is made in the temporary directory, and where is
+not a setting: a scratch directory inside a synced folder, such as
+iCloud Drive, would be read and uploaded by a process outside the
+sandbox, which is the way out the sandbox exists to close.
+
 Limits: one command may run for `command_timeout_seconds` (which is also
 its CPU limit per process), write a file of at most `file_bytes`, add
 `processes` processes to this user's, and return `output_bytes` of
 output, cut with a note. A session's scratch directory may grow to
-`scratch_bytes`; past that no further command runs. The limits are set
+`scratch_bytes`; its size is watched while a command runs, since a loop
+writing file after file, each inside the file size limit, would
+otherwise fill the disk, and past the limit no further command runs. The limits are set
 by a shell outside the sandbox just before it becomes `sandbox-exec`, so
 they cover everything the command starts and cannot be raised from
 inside.
@@ -878,7 +888,6 @@ The request:
     "max_tokens": 400000,             // 0: the default
     "retries": 1,
     "deny_read": ["/Users/k/notes/private", "/Users/k/.secret*"],
-    "scratch_root": "/path/for/scratch",
     "command_timeout_seconds": 60,
     "output_bytes": 32768,
     "processes": 64,
@@ -912,7 +921,9 @@ else `quarantine.model`; a request with neither is refused, as is a tool
 in `tools` named `workbench`. The block needs a real policy, and the
 policy an entry for `workbench` of class `read`. `deny_read` takes
 absolute paths, or a path ending in `*` to deny every path with that
-prefix; each is added to the ones the workbench always denies. A path
+prefix; each is added to the ones the workbench always denies, and what
+an entry resolves to is denied as well, since a path on the list is
+often a symlink into a dotfiles directory. A path
 that is relative, unclean or holds a character the profile's strings
 cannot carry is refused, so nothing can end a rule early. `tool_kinds`
 may name `workbench`. A request with a `workbench` block is refused on a

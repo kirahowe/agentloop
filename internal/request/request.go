@@ -182,9 +182,6 @@ type WorkbenchConfig struct {
 	// the workbench always denies. Each is an absolute path, or one
 	// ending in "*" to deny every path with that prefix.
 	DenyRead []string `json:"deny_read"`
-	// ScratchRoot is where each session's scratch directory is made.
-	// Empty means the temporary directory.
-	ScratchRoot string `json:"scratch_root"`
 	// CommandTimeoutSeconds bounds one command, OutputBytes how much of
 	// its output the child sees, Processes how many processes it may add,
 	// and ScratchBytes how large the scratch directory may grow. Zero
@@ -946,7 +943,6 @@ func (r *Request) workbench(key string, retry agentloop.RetryPolicy) (*workbench
 		Retries:         retries,
 		Retry:           retry,
 		Limits:          limits,
-		ScratchRoot:     w.ScratchRoot,
 		DenyRead:        w.DenyRead,
 	})
 }

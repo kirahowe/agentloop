@@ -17,6 +17,30 @@ import (
 	"strings"
 )
 
+// sysctlRules are the sysctl values a command may read: what the
+// hardware is, what the system is, and the few kernel numbers the C
+// library asks for. Reading sysctl at large would hand over
+// kern.procargs2, which is every other process's command line, where a
+// password or a token can sit.
+//
+// The tests found that without these, sort, shasum, perl, rg and
+// python3 all fail; with them, nothing a workbench command plausibly
+// runs does.
+var sysctlRules = []string{
+	`(sysctl-name-prefix "hw.")`,
+	`(sysctl-name-prefix "kern.os")`,
+	`(sysctl-name-prefix "machdep.cpu.")`,
+	`(sysctl-name "kern.argmax")`,
+	`(sysctl-name "kern.boottime")`,
+	`(sysctl-name "kern.hostname")`,
+	`(sysctl-name "kern.maxfiles")`,
+	`(sysctl-name "kern.maxproc")`,
+	`(sysctl-name "kern.ostype")`,
+	`(sysctl-name "kern.usrstack64")`,
+	`(sysctl-name "kern.version")`,
+	`(sysctl-name "vm.overcommit")`,
+}
+
 // A Sandbox is what one session's profile allows.
 type Sandbox struct {
 	// Scratch is the only directory the commands may write, and they may
@@ -34,7 +58,7 @@ type Sandbox struct {
 //
 //   - forking and running programs, which stay in the sandbox;
 //   - signals to processes in the same sandbox, and nothing outside it;
-//   - reading sysctl values;
+//   - reading the sysctl values in sysctlRules;
 //   - reading any file, except under DenyRead;
 //   - reading and writing Scratch;
 //   - writing /dev/null and the process's own standard output and error.
@@ -64,7 +88,9 @@ func Profile(s Sandbox) (string, error) {
 	b.WriteString("(allow process-exec)\n")
 	b.WriteString("(allow signal (target same-sandbox))\n")
 	b.WriteString("(allow process-info* (target same-sandbox))\n")
-	b.WriteString("(allow sysctl-read)\n")
+	for _, rule := range sysctlRules {
+		fmt.Fprintf(&b, "(allow sysctl-read %s)\n", rule)
+	}
 	b.WriteString("(allow file-read*)\n")
 	seen := map[string]bool{}
 	for _, p := range deny {
@@ -169,6 +195,15 @@ func DefaultDenyRead(home, tmp string) []string {
 		h(".password-store"),
 		h(".config/gh"),
 		h(".config/op"),
+		h(".config/gcloud"),
+		h(".azure"),
+		h(".gem/credentials"),
+		h(".cargo/credentials"),
+		h(".cargo/credentials.toml"),
+		h(".m2/settings.xml"),
+		h(".terraform.d"),
+		h(".kaggle"),
+		h(".huggingface"),
 		h(".codex") + "*",
 		h(".claude") + "*",
 		h("Library/Cookies"),

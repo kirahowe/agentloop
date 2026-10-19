@@ -28,7 +28,7 @@ func workbenchFixture(t *testing.T, api *fakeAPI, notes string) *fixture {
 	f.req["policy"] = map[string]any{"tools": map[string]any{"workbench": map[string]any{"class": "read"}}}
 	f.req["workbench"] = map[string]any{
 		"model": "claude-haiku-4-5", "effort": "low", "retries": 1,
-		"scratch_root": f.dir, "deny_read": []string{filepath.Join(f.dir, "secret")},
+		"deny_read":               []string{filepath.Join(f.dir, "secret")},
 		"command_timeout_seconds": 20,
 	}
 	os.MkdirAll(filepath.Join(f.dir, "secret"), 0o700)
@@ -56,7 +56,6 @@ func TestWorkbenchAnswersFromTheDisk(t *testing.T) {
 		textReplyFrom("claude-sonnet-4-6", "120 seats"),
 	)
 	f := workbenchFixture(t, api, notes)
-	f.req["workbench"].(map[string]any)["scratch_root"] = f.dir
 	f.req["workbench"].(map[string]any)["deny_read"] = []string{filepath.Join(dir, "secret")}
 	res := f.run()
 	if res.code != 0 {
