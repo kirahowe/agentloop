@@ -336,6 +336,9 @@ func TestQuarantineRequests(t *testing.T) {
 		{"a forbidden inner label", Run, func(m map[string]any) {
 			m["policy"].(map[string]any)["forbid_labels"] = []string{"private"}
 		}, "forbid_labels forbids"},
+		{"a reader-only tool", Run, func(m map[string]any) { q(m)["reader_only"] = []string{"mail_read"} }, ""},
+		{"reader-only twice", Run, func(m map[string]any) { q(m)["reader_only"] = []string{"mail_read", "mail_read"} }, "reader_only names \"mail_read\" twice"},
+		{"reader-only outside the reader's tools", Run, func(m map[string]any) { q(m)["reader_only"] = []string{"web_post"} }, "not in quarantine.tools"},
 		{"unknown quarantine field", Run, func(m map[string]any) { q(m)["max_answer_bytes"] = 10 }, "unknown field"},
 	}
 	dir := t.TempDir()
@@ -392,6 +395,36 @@ func TestQuarantineBuildsTheReader(t *testing.T) {
 	p := a.Policy.(trifecta.Policy)
 	if !reflect.DeepEqual(p.Readers, map[string][]string{"read_quarantined": {"mail_read"}}) {
 		t.Errorf("readers = %v", p.Readers)
+	}
+}
+
+// A reader-only tool is not offered to the model, but the reader still
+// reads through it.
+func TestReaderOnlyToolsReachOnlyTheReader(t *testing.T) {
+	m := quarantineBase()
+	m["quarantine"].(map[string]any)["reader_only"] = []string{"mail_read"}
+	b, _ := json.Marshal(m)
+	path := filepath.Join(t.TempDir(), "r.json")
+	os.WriteFile(path, b, 0o644)
+	req, err := Load(path, Run)
+	if err != nil {
+		t.Fatal(err)
+	}
+	a, err := req.Agent("k", req.stubMCP())
+	if err != nil {
+		t.Fatal(err)
+	}
+	var reader *quarantine.Reader
+	for _, tool := range a.Tools {
+		if tool.Spec().Name == "mail_read" {
+			t.Fatal("mail_read is offered to the model")
+		}
+		if r, ok := tool.(*quarantine.Reader); ok {
+			reader = r
+		}
+	}
+	if reader == nil || len(reader.Inner) != 1 || reader.Inner[0].Spec().Name != "mail_read" {
+		t.Fatalf("reader = %+v", reader)
 	}
 }
 

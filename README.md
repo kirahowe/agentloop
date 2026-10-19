@@ -132,6 +132,12 @@ the result.
 }}
 ```
 
+`reader_only` in the block names tools from its `tools` that the model is
+not offered at all. The reader still reads through them. Use it for a
+tool whose raw output a role should never see, such as a web search
+whose pages would contaminate it. A model that calls one by name gets
+the answer for a tool it does not have.
+
 A request can also take tools from [MCP](https://modelcontextprotocol.io)
 servers it runs over stdio. The request is the allowlist: it names each
 tool it wants from a server, under its own name for it, and the policy

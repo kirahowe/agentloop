@@ -156,6 +156,10 @@ type Quarantine struct {
 	// answer that is not valid. Nil means DefaultQuarantineRetries.
 	Retries *int     `json:"retries"`
 	Tools   []string `json:"tools"`
+	// ReaderOnly names tools among Tools that the model is not offered:
+	// it reaches them only through the reader, so their output never
+	// enters the session's context directly.
+	ReaderOnly []string `json:"reader_only"`
 }
 
 // DefaultQuarantineRetries is the reader's retries when the request
@@ -461,6 +465,16 @@ func (r *Request) validateQuarantine() error {
 		}
 		seen[name] = true
 	}
+	only := map[string]bool{}
+	for _, name := range q.ReaderOnly {
+		switch {
+		case only[name]:
+			return usage.Errorf("quarantine.reader_only names %q twice", name)
+		case !seen[name]:
+			return usage.Errorf("quarantine.reader_only names %q, which is not in quarantine.tools", name)
+		}
+		only[name] = true
+	}
 	return nil
 }
 
@@ -731,6 +745,11 @@ func (r *Request) Agent(key string, m *MCP) (*agentloop.Agent, error) {
 		return nil, err
 	}
 	if reader != nil {
+		// The reader holds its inner tools itself, so a reader-only tool
+		// is left out of what the model is offered.
+		tools = slices.DeleteFunc(tools, func(t agentloop.Tool) bool {
+			return slices.Contains(r.Quarantine.ReaderOnly, t.Spec().Name)
+		})
 		tools = append(tools, reader)
 		readers = map[string][]string{quarantine.ToolName: slices.Clone(r.Quarantine.Tools)}
 	}
