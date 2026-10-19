@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
@@ -61,6 +62,11 @@ type Limits struct {
 	// ScratchBytes is how large the scratch directory may grow. Past it,
 	// no further command runs in that session.
 	ScratchBytes int64
+	// MinFreeBytes is how much free space the scratch directory's
+	// filesystem must keep. A command is stopped when free space falls
+	// below it, which bounds what a command can take even while it holds
+	// its files unlinked, where their size cannot be seen.
+	MinFreeBytes int64
 }
 
 // DefaultLimits are the limits when a setting is zero.
@@ -70,6 +76,7 @@ var DefaultLimits = Limits{
 	Processes:    64,
 	FileBytes:    256 << 20,
 	ScratchBytes: 1 << 30,
+	MinFreeBytes: 5 << 30,
 }
 
 // A Workbench is the workbench tool. A call gives a task and a JSON
@@ -139,6 +146,9 @@ func New(w Workbench) (*Workbench, error) {
 	if l.ScratchBytes <= 0 {
 		l.ScratchBytes = d.ScratchBytes
 	}
+	if l.MinFreeBytes <= 0 {
+		l.MinFreeBytes = d.MinFreeBytes
+	}
 	// Without a home directory the workbench cannot know where this
 	// user's keys and browser data are, so it does not run at all rather
 	// than run with a deny list that misses them.
@@ -165,6 +175,7 @@ func New(w Workbench) (*Workbench, error) {
 				if r := Resolve(m); r != m {
 					w.deny = append(w.deny, r)
 				}
+				w.deny = append(w.deny, targetsUnder(Resolve(m))...)
 			}
 			continue
 		}
@@ -174,11 +185,75 @@ func New(w Workbench) (*Workbench, error) {
 		if r := Resolve(p); r != p {
 			w.deny = append(w.deny, r)
 		}
+		w.deny = append(w.deny, targetsUnder(Resolve(p))...)
 	}
 	if _, err := Profile(Sandbox{Scratch: "/x", DenyRead: w.deny}); err != nil {
 		return nil, err
 	}
 	return &w, nil
+}
+
+// The walk targetsUnder does is bounded, since a denied directory can
+// hold a hundred thousand files (a browser profile does) and New runs
+// before every call. A dotfiles setup links the file itself or the
+// directory above it, so two levels is enough; past these bounds the
+// tree is left unwalked, and the README says so.
+const (
+	linkWalkLimit = 2000
+	linkWalkDepth = 2
+)
+
+// targetsUnder are the paths outside dir that symlinks inside it point
+// at. A dotfiles setup often links each file separately
+// (~/.ssh/id_ed25519 into ~/dotfiles), and the sandbox matches the
+// resolved path, so denying only dir would leave the real file
+// readable.
+func targetsUnder(dir string) []string {
+	var out []string
+	seen := map[string]bool{}
+	steps := 0
+	filepath.WalkDir(dir, func(p string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return nil
+		}
+		if steps++; steps > linkWalkLimit {
+			return filepath.SkipAll
+		}
+		if d.IsDir() && depthUnder(dir, p) >= linkWalkDepth {
+			return filepath.SkipDir
+		}
+		if d.Type()&fs.ModeSymlink == 0 {
+			return nil
+		}
+		t := Resolve(p)
+		if t == p || t == "/" || seen[t] || within(t, dir) {
+			return nil
+		}
+		if err := checkPath(t, false); err != nil {
+			return nil
+		}
+		seen[t] = true
+		out = append(out, t)
+		return nil
+	})
+	return out
+}
+
+// depthUnder is how many path elements p is below dir.
+func depthUnder(dir, p string) int {
+	rel, err := filepath.Rel(dir, p)
+	if err != nil {
+		return linkWalkDepth
+	}
+	if rel == "." {
+		return 0
+	}
+	return strings.Count(rel, string(filepath.Separator)) + 1
+}
+
+// within reports whether p is dir or below it.
+func within(p, dir string) bool {
+	return p == dir || strings.HasPrefix(p, strings.TrimSuffix(dir, "/")+"/")
 }
 
 // matches are the paths in dir whose names start with name.
@@ -426,7 +501,7 @@ func (s *shell) Call(ctx context.Context, raw json.RawMessage) (agentloop.Result
 // CommandContent is what the child is told about a command.
 func CommandContent(r CommandResult, l Limits) string {
 	if r.ScratchFull && r.Output == "" && r.Exit == 0 {
-		return "No command runs any more: the scratch directory is over its size limit."
+		return "No command runs any more: the scratch directory is over its size limit, or the disk is nearly full."
 	}
 	var b strings.Builder
 	switch {
@@ -440,7 +515,7 @@ func CommandContent(r CommandResult, l Limits) string {
 		fmt.Fprintf(&b, "\n[output cut at %d bytes]", l.OutputBytes)
 	}
 	if r.ScratchFull {
-		b.WriteString("\n[the scratch directory is over its size limit; no further command will run]")
+		b.WriteString("\n[the scratch directory is over its size limit, or the disk is nearly full; no further command will run]")
 	}
 	return b.String()
 }

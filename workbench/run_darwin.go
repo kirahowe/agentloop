@@ -115,9 +115,10 @@ type CommandResult struct {
 // the command starts and cannot be raised from inside: the number of
 // processes this user may have (the current count plus Processes), CPU
 // seconds per process and the size of a file. The scratch directory's
-// size is watched while the command runs, and the command is stopped
-// when it goes over, since a loop writing file after file could fill the
-// disk before a check after the command. The command starts in a
+// size and the free space on its filesystem are watched while the
+// command runs, and the command is stopped when either goes past its
+// limit, since a loop writing file after file could fill the disk before
+// a check after the command. The command starts in a
 // session of its own. Its process group is killed when it ends or times
 // out, and then every process left in this sandbox is killed too,
 // whatever group or session it moved to.
@@ -160,8 +161,8 @@ func (b *box) run(ctx context.Context, command string) (CommandResult, error) {
 			select {
 			case <-ctx.Done():
 				return
-			case <-time.After(500 * time.Millisecond):
-				if size(b.scratch) > b.limits.ScratchBytes {
+			case <-time.After(100 * time.Millisecond):
+				if b.overFull() {
 					b.full = true
 					cancel()
 					return
@@ -179,7 +180,7 @@ func (b *box) run(ctx context.Context, command string) (CommandResult, error) {
 		return res, err
 	}
 	res.Output, res.Truncated = out.String(), out.over
-	if b.full || size(b.scratch) > b.limits.ScratchBytes {
+	if b.full || b.overFull() {
 		b.full, res.ScratchFull = true, true
 		// A command stopped for filling the scratch directory was not
 		// stopped for running too long.
@@ -332,6 +333,22 @@ func homeDir() string {
 		return "/"
 	}
 	return h
+}
+
+// overFull reports whether the scratch directory has grown past its
+// limit, or its filesystem is nearly full. The free-space floor is what
+// bounds a command that holds its files unlinked, where no walk can see
+// their size, and it is what the limit is really for: the operator's
+// disk must not fill up.
+func (b *box) overFull() bool {
+	if size(b.scratch) > b.limits.ScratchBytes {
+		return true
+	}
+	var st unix.Statfs_t
+	if err := unix.Statfs(b.scratch, &st); err != nil {
+		return false
+	}
+	return int64(st.Bavail)*int64(st.Bsize) < b.limits.MinFreeBytes
 }
 
 // size is the bytes of the files under dir.

@@ -474,9 +474,12 @@ Limits: one command may run for `command_timeout_seconds` (which is also
 its CPU limit per process), write a file of at most `file_bytes`, add
 `processes` processes to this user's, and return `output_bytes` of
 output, cut with a note. A session's scratch directory may grow to
-`scratch_bytes`; its size is watched while a command runs, since a loop
-writing file after file, each inside the file size limit, would
-otherwise fill the disk, and past the limit no further command runs. The limits are set
+`scratch_bytes`, and the filesystem it is on must keep `min_free_bytes`
+free. Both are watched while a command runs, since a loop writing file
+after file, each inside the file size limit, would otherwise fill the
+disk before the command ended; the free-space floor is what bounds a
+command that holds its files unlinked, where a walk sees nothing. Past
+either limit no further command runs in that session. The limits are set
 by a shell outside the sandbox just before it becomes `sandbox-exec`, so
 they cover everything the command starts and cannot be raised from
 inside.
@@ -891,7 +894,8 @@ The request:
     "command_timeout_seconds": 60,
     "output_bytes": 32768,
     "processes": 64,
-    "scratch_bytes": 1073741824
+    "scratch_bytes": 1073741824,
+    "min_free_bytes": 5368709120
   },
   "display_ref_prefix": "shown:2026-10-18/" // where displays are kept; see Displays
 }
@@ -921,9 +925,10 @@ else `quarantine.model`; a request with neither is refused, as is a tool
 in `tools` named `workbench`. The block needs a real policy, and the
 policy an entry for `workbench` of class `read`. `deny_read` takes
 absolute paths, or a path ending in `*` to deny every path with that
-prefix; each is added to the ones the workbench always denies, and what
-an entry resolves to is denied as well, since a path on the list is
-often a symlink into a dotfiles directory. A path
+prefix; each is added to the ones the workbench always denies. What an
+entry resolves to is denied as well, and so is what the symlinks inside
+it point at, down two levels and up to 2000 entries, since a dotfiles
+setup links such paths elsewhere. A path
 that is relative, unclean or holds a character the profile's strings
 cannot carry is refused, so nothing can end a rule early. `tool_kinds`
 may name `workbench`. A request with a `workbench` block is refused on a

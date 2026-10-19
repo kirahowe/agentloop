@@ -14,6 +14,8 @@ import (
 	"syscall"
 	"testing"
 	"time"
+
+	"golang.org/x/sys/unix"
 )
 
 // These run real commands under real sandbox-exec, on files made here.
@@ -338,8 +340,8 @@ func TestSandboxScratchLimitStopsACommandThatKeepsWriting(t *testing.T) {
 	if took := time.Since(start); took > 20*time.Second {
 		t.Errorf("it ran for %s", took)
 	}
-	// It is stopped near the limit, not far past it.
-	if n := size(w.box.scratch); n > 4*limit {
+	// It is stopped soon after the limit, not left running.
+	if n := size(w.box.scratch); n > limit+200<<20 {
 		t.Errorf("the scratch directory grew to %d bytes, limit %d", n, limit)
 	}
 	if n := w.box.left(); n != 0 {
@@ -347,6 +349,39 @@ func TestSandboxScratchLimitStopsACommandThatKeepsWriting(t *testing.T) {
 	}
 	if r := w.run(t, "echo again"); !r.ScratchFull || strings.Contains(r.Output, "again") {
 		t.Errorf("a command ran after scratch filled: %+v", r)
+	}
+}
+
+// A command can unlink a file it is still writing, so no walk of the
+// scratch directory sees its size. The floor under the filesystem's free
+// space is what stops that.
+func TestSandboxStopsACommandWritingUnlinkedFiles(t *testing.T) {
+	w := newWorld(t, Limits{Timeout: 30 * time.Second, FileBytes: 1 << 30, ScratchBytes: 1 << 30})
+	var st unix.Statfs_t
+	if err := unix.Statfs(w.box.scratch, &st); err != nil {
+		t.Fatal(err)
+	}
+	free := int64(st.Bavail) * int64(st.Bsize)
+	// A floor just under what is free now: the next few megabytes cross it.
+	w.box.limits.MinFreeBytes = free - 8<<20
+	start := time.Now()
+	r := w.run(t, `python3 -c '
+import os
+f = open("gone", "wb")
+os.unlink("gone")
+block = b"x" * (1 << 20)
+while True:
+    f.write(block)
+    f.flush()
+'`)
+	if !r.ScratchFull {
+		t.Fatalf("the command was not stopped as the disk filled: %+v", r)
+	}
+	if took := time.Since(start); took > 20*time.Second {
+		t.Errorf("it ran for %s", took)
+	}
+	if n := w.box.left(); n != 0 {
+		t.Errorf("%d processes were left", n)
 	}
 }
 

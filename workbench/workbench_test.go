@@ -206,6 +206,34 @@ func TestPrefixDenyResolvesWhatItMatches(t *testing.T) {
 	}
 }
 
+// A dotfiles setup links each file separately, so a symlink inside a
+// denied directory would otherwise leave the real file readable.
+func TestDenyCoversWhatLinksInsideItPointAt(t *testing.T) {
+	dir := t.TempDir()
+	denied := filepath.Join(dir, "secrets")
+	os.MkdirAll(filepath.Join(denied, "deep"), 0o700)
+	target := filepath.Join(dir, "dotfiles", "id_ed25519")
+	os.MkdirAll(filepath.Dir(target), 0o700)
+	os.WriteFile(target, []byte("KEY"), 0o600)
+	os.Symlink(target, filepath.Join(denied, "deep", "id_ed25519"))
+	// A link that stays inside the denied tree adds nothing.
+	os.Symlink(filepath.Join(denied, "deep"), filepath.Join(denied, "inside"))
+	w, err := workbench.New(workbench.Workbench{Model: fake.Script(), MaxTurns: 1, MaxTokens: 1,
+		DenyRead: []string{denied}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	d := w.Deny()
+	if !slices.Contains(d, workbench.Resolve(target)) {
+		t.Errorf("deny list %v lacks the link's target %s", d, target)
+	}
+	for _, p := range d {
+		if p == filepath.Join(denied, "deep") {
+			t.Errorf("deny list repeats a path inside the denied tree: %v", d)
+		}
+	}
+}
+
 func TestDenyListResolvesSymlinks(t *testing.T) {
 	dir := t.TempDir()
 	real := filepath.Join(dir, "real")

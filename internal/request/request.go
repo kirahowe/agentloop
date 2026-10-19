@@ -184,12 +184,14 @@ type WorkbenchConfig struct {
 	DenyRead []string `json:"deny_read"`
 	// CommandTimeoutSeconds bounds one command, OutputBytes how much of
 	// its output the child sees, Processes how many processes it may add,
-	// and ScratchBytes how large the scratch directory may grow. Zero
+	// ScratchBytes how large the scratch directory may grow, and
+	// MinFreeBytes how much free space its filesystem must keep. Zero
 	// means the defaults.
 	CommandTimeoutSeconds float64 `json:"command_timeout_seconds"`
 	OutputBytes           int     `json:"output_bytes"`
 	Processes             int     `json:"processes"`
 	ScratchBytes          int64   `json:"scratch_bytes"`
+	MinFreeBytes          int64   `json:"min_free_bytes"`
 }
 
 // WorkbenchLimits bounds the child session when the request gives no
@@ -545,7 +547,7 @@ func (r *Request) validateWorkbench() error {
 		return usage.Errorf("unknown workbench.effort %q", w.Effort)
 	}
 	if w.MaxOutputTokens < 0 || w.MaxTurns < 0 || w.MaxTokens < 0 || w.CommandTimeoutSeconds < 0 ||
-		w.OutputBytes < 0 || w.Processes < 0 || w.ScratchBytes < 0 {
+		w.OutputBytes < 0 || w.Processes < 0 || w.ScratchBytes < 0 || w.MinFreeBytes < 0 {
 		return usage.Errorf("workbench numbers cannot be negative")
 	}
 	if w.Retries != nil && (*w.Retries < 0 || *w.Retries > MaxQuarantineRetries) {
@@ -925,6 +927,7 @@ func (r *Request) workbench(key string, retry agentloop.RetryPolicy) (*workbench
 		OutputBytes:  w.OutputBytes,
 		Processes:    w.Processes,
 		ScratchBytes: w.ScratchBytes,
+		MinFreeBytes: w.MinFreeBytes,
 	}
 	turns, tokens := w.MaxTurns, w.MaxTokens
 	if turns == 0 {

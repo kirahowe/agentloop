@@ -169,7 +169,9 @@ commands that do work with no mach service at all are `sh`, the
 coreutils, `find`, `grep`, `rg`, `python3`, `sqlite3`, `jq` and
 `pdftotext`; `mdfind` needs Spotlight and does not. A command has a
 timeout, a CPU limit, a process limit, an output cap and a file size
-limit, and everything it leaves running is killed. agentloop itself stays
+limit; it is stopped when the scratch directory grows past its limit or
+the disk runs low, which also bounds a command holding its files
+unlinked; and everything it leaves running is killed. agentloop itself stays
 outside the sandbox, since it has to reach the provider.
 
 A request can also take tools from [MCP](https://modelcontextprotocol.io)
