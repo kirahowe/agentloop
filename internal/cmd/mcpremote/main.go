@@ -11,6 +11,7 @@
 //	-ttl SECONDS       how long an access token lasts
 //	-rotate            a new refresh token at each refresh
 //	-token TOKEN       a token the MCP server also takes
+//	-iss               name the issuer in every authorization answer
 package main
 
 import (
@@ -34,6 +35,7 @@ func main() {
 	ttl := flag.Int("ttl", 3600, "")
 	flag.BoolVar(&o.Rotate, "rotate", false, "")
 	flag.StringVar(&o.StaticToken, "token", "", "")
+	flag.BoolVar(&o.Iss, "iss", false, "")
 	flag.Parse()
 	o.TTL = time.Duration(*ttl) * time.Second
 	f := fakeremote.New(o)

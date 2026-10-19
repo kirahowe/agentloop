@@ -59,6 +59,9 @@ type Options struct {
 	Rotate bool
 	// StaticToken, when given, is also accepted by the MCP server.
 	StaticToken string
+	// Iss makes the authorization server say it names itself in its
+	// answers (RFC 9207), and do so.
+	Iss bool
 }
 
 // DefaultTools is what the server lists without a ToolsFile: one tool of
@@ -160,6 +163,9 @@ func (s *Server) asm(w http.ResponseWriter, _ *http.Request) {
 	if !s.opts.NoRegistration {
 		m["registration_endpoint"] = s.issuer() + "/register"
 	}
+	if s.opts.Iss {
+		m["authorization_response_iss_parameter_supported"] = true
+	}
 	writeJSON(w, 200, m)
 }
 
@@ -223,6 +229,9 @@ func (s *Server) authorize(w http.ResponseWriter, r *http.Request) {
 	v := url.Values{}
 	if st := q.Get("state"); st != "" {
 		v.Set("state", st)
+	}
+	if s.opts.Iss {
+		v.Set("iss", s.issuer())
 	}
 	switch {
 	case s.opts.Deny:
