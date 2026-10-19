@@ -478,8 +478,13 @@ output, cut with a note. A session's scratch directory may grow to
 free. Both are watched while a command runs, since a loop writing file
 after file, each inside the file size limit, would otherwise fill the
 disk before the command ended; the free-space floor is what bounds a
-command that holds its files unlinked, where a walk sees nothing. Past
-either limit no further command runs in that session. The limits are set
+command that holds its files unlinked, where a walk sees nothing. The
+floor is read from the session directory, not the scratch directory,
+since a command may delete its own scratch directory, and a walk that
+cannot see everything counts as over the limit, since a command can take
+the permissions off a directory it made. Past either limit no further
+command runs in that session. Closing a session puts those permissions
+back before it removes the directory. The limits are set
 by a shell outside the sandbox just before it becomes `sandbox-exec`, so
 they cover everything the command starts and cannot be raised from
 inside.

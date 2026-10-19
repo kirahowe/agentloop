@@ -341,7 +341,7 @@ func TestSandboxScratchLimitStopsACommandThatKeepsWriting(t *testing.T) {
 		t.Errorf("it ran for %s", took)
 	}
 	// It is stopped soon after the limit, not left running.
-	if n := size(w.box.scratch); n > limit+200<<20 {
+	if n, _ := size(w.box.scratch); n > limit+200<<20 {
 		t.Errorf("the scratch directory grew to %d bytes, limit %d", n, limit)
 	}
 	if n := w.box.left(); n != 0 {
@@ -349,6 +349,39 @@ func TestSandboxScratchLimitStopsACommandThatKeepsWriting(t *testing.T) {
 	}
 	if r := w.run(t, "echo again"); !r.ScratchFull || strings.Contains(r.Output, "again") {
 		t.Errorf("a command ran after scratch filled: %+v", r)
+	}
+}
+
+// A command can delete its own scratch directory, and then there is
+// nothing left to ask how full the disk is; and it can take the
+// permissions off a directory it made, so that neither the size walk nor
+// the cleanup can see inside.
+func TestSandboxScratchCannotBeHiddenFromTheLimit(t *testing.T) {
+	w := newWorld(t, Limits{Timeout: 10 * time.Second})
+	if r := w.run(t, "mkdir -p sub && echo x > sub/f && chmod 000 sub"); r.Exit != 0 {
+		t.Fatalf("setup: %+v", r)
+	}
+	if !w.box.overFull() {
+		t.Error("a scratch directory that cannot be walked was taken as within its limit")
+	}
+	// close puts the permissions back and removes everything.
+	root := w.box.root
+	w.box.close()
+	if w.box.leftover != nil {
+		t.Errorf("the session directory was left behind: %v", w.box.leftover)
+	}
+	if _, err := os.Stat(root); !os.IsNotExist(err) {
+		t.Errorf("stat %s = %v, want not exist", root, err)
+	}
+
+	// And with the scratch directory gone, the next command is refused
+	// rather than left unbounded.
+	w2 := newWorld(t, Limits{Timeout: 10 * time.Second})
+	if r := w2.run(t, "cd / && rm -rf "+w2.box.scratch); r.Exit != 0 {
+		t.Fatalf("the scratch directory could not be removed by its own command: %+v", r)
+	}
+	if !w2.box.overFull() {
+		t.Error("a missing scratch directory was taken as within its limit")
 	}
 }
 

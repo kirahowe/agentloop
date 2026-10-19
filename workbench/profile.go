@@ -204,6 +204,7 @@ func DefaultDenyRead(home, tmp string) []string {
 		h(".terraform.d"),
 		h(".kaggle"),
 		h(".huggingface"),
+		h(".cache/huggingface"),
 		h(".codex") + "*",
 		h(".claude") + "*",
 		h("Library/Cookies"),

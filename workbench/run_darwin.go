@@ -53,10 +53,13 @@ const commandPath = "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/s
 type box struct {
 	root, scratch, probe string
 	profile              string
-	limits               Limits
-	started              time.Time
-	mu                   sync.Mutex
-	full                 bool
+	// leftover is why the session directory could not be removed, if it
+	// could not.
+	leftover error
+	limits   Limits
+	started  time.Time
+	mu       sync.Mutex
+	full     bool
 }
 
 // newBox makes a session directory under base and the profile for it.
@@ -195,7 +198,27 @@ func (b *box) close() {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	b.sweep()
-	os.RemoveAll(b.root)
+	// A command can take the permissions off a directory it made, and
+	// then nothing can be listed or removed inside it. The directories
+	// are this user's own, so they can be opened again.
+	filepath.WalkDir(b.scratch, func(p string, d fs.DirEntry, err error) error {
+		if err != nil {
+			if d != nil && d.IsDir() {
+				os.Chmod(p, 0o700)
+			}
+			return nil
+		}
+		if d.IsDir() {
+			os.Chmod(p, 0o700)
+		}
+		return nil
+	})
+	if err := os.RemoveAll(b.root); err != nil {
+		// Nothing of the operator's is in here, and the next session
+		// makes its own directory, so a leftover is reported rather than
+		// retried for ever.
+		b.leftover = err
+	}
 }
 
 // sweep kills every process left from this sandbox's commands, and
@@ -341,28 +364,45 @@ func homeDir() string {
 // their size, and it is what the limit is really for: the operator's
 // disk must not fill up.
 func (b *box) overFull() bool {
-	if size(b.scratch) > b.limits.ScratchBytes {
+	n, ok := size(b.scratch)
+	if !ok || n > b.limits.ScratchBytes {
+		// A walk that could not see everything is taken as over the
+		// limit: a command can chmod a directory of its own to nothing,
+		// and what cannot be measured cannot be bounded.
 		return true
 	}
+	// The session directory, not the scratch directory: a command may
+	// delete its own scratch directory, and then there would be nothing
+	// to ask about. The session directory is the parent, which no
+	// command can touch.
 	var st unix.Statfs_t
-	if err := unix.Statfs(b.scratch, &st); err != nil {
-		return false
+	if err := unix.Statfs(b.root, &st); err != nil {
+		return true
 	}
 	return int64(st.Bavail)*int64(st.Bsize) < b.limits.MinFreeBytes
 }
 
-// size is the bytes of the files under dir.
-func size(dir string) int64 {
+// size is the bytes of the files under dir, and whether the walk saw
+// all of it.
+func size(dir string) (int64, bool) {
 	var n int64
+	ok := true
 	filepath.WalkDir(dir, func(_ string, d fs.DirEntry, err error) error {
-		if err == nil && d.Type().IsRegular() {
-			if info, err := d.Info(); err == nil {
-				n += info.Size()
+		if err != nil {
+			ok = false
+			return nil
+		}
+		if d.Type().IsRegular() {
+			info, err := d.Info()
+			if err != nil {
+				ok = false
+				return nil
 			}
+			n += info.Size()
 		}
 		return nil
 	})
-	return n
+	return n, ok
 }
 
 // capped keeps the first max bytes written to it and counts the rest.
