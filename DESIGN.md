@@ -1288,7 +1288,10 @@ take. A result with a display has one more content item after its text:
 a text block holding the display's title and body, with the whole
 display, `{"title", "body", "labels", "sources", "ref"}`, in its
 `_meta["relay/display"]`, so a client can show it apart from the
-result. And `_meta["agentloop/retry"]` on a notice for a
+result. The block's own text is inert (`Inert`): characters that draw as
+nothing show as `\u{XXXX}`, links are defanged, and the whole is in a
+code fence nothing in it can close. A client that renders it as
+markdown fetches no image and shows no live link. And `_meta["agentloop/retry"]` on a notice for a
 model call that will be retried holds `kind`, `wait_ms`, `retry_at`,
 `attempt` and, when there was one, the HTTP `status`, so a client can
 count down to the retry.

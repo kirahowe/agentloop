@@ -490,6 +490,11 @@ const DisplayMeta = "relay/display"
 // that knows nothing of displays, and the whole display under
 // _meta["relay/display"] for one that shows them apart. Labels and
 // sources are always arrays.
+//
+// The display can hold an outsider's words, and a client that knows
+// nothing of displays renders the block as markdown, so the block's text
+// is inert (Inert): a remote image in it is never fetched, and no link
+// in it is live. The display itself, under _meta, is unchanged.
 func DisplayContent(d agentloop.Display) acp.ToolCallContent {
 	if d.Labels == nil {
 		d.Labels = []string{}
@@ -498,7 +503,7 @@ func DisplayContent(d agentloop.Display) acp.ToolCallContent {
 		d.Sources = []agentloop.Source{}
 	}
 	b, _ := json.Marshal(d)
-	block := acp.TextBlock(d.Title + "\n\n" + d.Body)
+	block := acp.TextBlock(Inert(d.Title + "\n\n" + d.Body))
 	block.Text.Meta = map[string]json.RawMessage{DisplayMeta: b}
 	return acp.ToolContent(block)
 }

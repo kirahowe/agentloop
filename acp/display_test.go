@@ -49,7 +49,7 @@ func TestDisplayGoesToTheClientAsToolContent(t *testing.T) {
 			if got.Title != "Venues" || got.Ref != d.Ref || len(got.Sources) != 1 || got.Labels[0] != "contaminated" {
 				t.Errorf("display %+v", got)
 			}
-			if text != "Venues\n\nbody" {
+			if text != "```text\nVenues\n\nbody\n```" {
 				t.Errorf("text %q", text)
 			}
 			if tu.Content[0].Content.Content.Text.Text != "closed" {
