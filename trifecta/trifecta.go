@@ -22,6 +22,8 @@ import (
 	"io"
 	"slices"
 	"sort"
+	"strings"
+	"unicode"
 
 	"github.com/kirahowe/agentloop"
 	"github.com/kirahowe/agentloop/internal/strictjson"
@@ -148,13 +150,17 @@ func DecideCall(labels []string, t Tool, input json.RawMessage) (agentloop.Verdi
 // only one written the same way (1 is not 1.0), and a string only the
 // same characters, with no Unicode folding. An empty rule matches
 // nothing, and so does input that is not one object, or that names a key
-// twice anywhere, since a tool could read either value.
+// twice anywhere, since a tool could read either value. Two keys that
+// differ only in case (group and Group) count as the same key twice:
+// many decoders, Go's encoding/json among them, read either into one
+// field.
 func Consented(rules []map[string]json.RawMessage, input json.RawMessage) int {
 	if len(rules) == 0 || strictjson.DuplicateKeys(input) != nil {
 		return -1
 	}
-	obj, ok := normal(input).(map[string]any)
-	if !ok {
+	v := normal(input)
+	obj, ok := v.(map[string]any)
+	if !ok || foldCollides(v) {
 		return -1
 	}
 	for i, rule := range rules {
@@ -177,6 +183,43 @@ func matches(rule map[string]json.RawMessage, obj map[string]any) bool {
 		}
 	}
 	return true
+}
+
+// foldCollides reports whether any object in v has two keys that are
+// equal under Unicode case folding.
+func foldCollides(v any) bool {
+	switch x := v.(type) {
+	case map[string]any:
+		seen := map[string]bool{}
+		for k, e := range x {
+			f := fold(k)
+			if seen[f] || foldCollides(e) {
+				return true
+			}
+			seen[f] = true
+		}
+	case []any:
+		for _, e := range x {
+			if foldCollides(e) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// fold maps each rune of s to the least rune of its case-folding orbit,
+// so strings equal under folding (K, k and the Kelvin sign) fold alike.
+func fold(s string) string {
+	var b strings.Builder
+	for _, r := range s {
+		least := r
+		for f := unicode.SimpleFold(r); f != r; f = unicode.SimpleFold(f) {
+			least = min(least, f)
+		}
+		b.WriteRune(least)
+	}
+	return b.String()
 }
 
 // errValue stands for JSON that does not parse as one value; it equals

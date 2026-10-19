@@ -105,7 +105,7 @@ func TestConsentMatchIsExact(t *testing.T) {
 	rapid.Check(t, func(t *rapid.T) {
 		rule := genRule().Draw(t, "rule")
 		in := toAny(rule)
-		for k, v := range rapid.MapOfN(rapid.StringMatching(`X[a-z]{0,3}`), genValue(), 0, 3).Draw(t, "extra") {
+		for k, v := range rapid.MapOfN(rapid.StringMatching(`_[a-z]{0,3}`), genValue(), 0, 3).Draw(t, "extra") {
 			in[k] = v
 		}
 		rules := []map[string]json.RawMessage{rule}
@@ -126,6 +126,20 @@ func TestConsentMatchIsExact(t *testing.T) {
 	})
 }
 
+// A matching input with a case variant of one of its keys added never
+// matches: a decoder could read the variant in place of the key.
+func TestConsentRefusesCaseVariantKeys(t *testing.T) {
+	rapid.Check(t, func(t *rapid.T) {
+		rule := genRule().Draw(t, "rule")
+		in := toAny(rule)
+		k := rapid.SampledFrom(slices.Sorted(maps.Keys(rule))).Draw(t, "key")
+		in[strings.ToUpper(k[:1])+k[1:]] = genValue().Draw(t, "variant value")
+		if got := Consented([]map[string]json.RawMessage{rule}, encode(t, in, false)); got != -1 {
+			t.Fatalf("rule %v matched %v", rule, in)
+		}
+	})
+}
+
 func TestConsentTable(t *testing.T) {
 	rule := map[string]json.RawMessage{"group": json.RawMessage(`"Kira only"`), "n": json.RawMessage(`1`)}
 	cases := []struct {
@@ -142,6 +156,12 @@ func TestConsentTable(t *testing.T) {
 		{`{"group":["Kira only"],"n":1}`, -1},
 		{`{"group":"Everyone","group":"Kira only","n":1}`, -1},
 		{`{"group":"Kira only","n":1,"x":{"a":1,"a":2}}`, -1},
+		// Regression (Codex review, round 3): a decoder that matches keys
+		// without regard to case could read Group in place of group.
+		{`{"group":"Kira only","n":1,"Group":"Everyone"}`, -1},
+		{`{"group":"Kira only","n":1,"x":[{"k":1,"\u212a":2}]}`, -1},
+		{`{"group":"Kira only","n":1,"x":{"a":1,"A":2}}`, -1},
+		{`{"group":"Kira only","N":1}`, -1},
 		{`{"group":"Kira only","n":1} {}`, -1},
 		{`[{"group":"Kira only","n":1}]`, -1},
 		{`null`, -1},

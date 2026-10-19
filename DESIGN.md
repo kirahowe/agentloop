@@ -249,7 +249,9 @@ decision (`consent` on the decision entry). Matching is exact after JSON
 normalisation: key order, spacing and string escapes do not matter, but a
 number matches only one written the same way and a string only the same
 characters. Input that is not one object, or that names a key twice
-anywhere, matches nothing, and so does an empty rule. A request refuses
+anywhere, matches nothing, and so does an empty rule. Two keys that
+differ only in case count as one key named twice, since a decoder such
+as Go's encoding/json reads either into the same field. A request refuses
 `consent` on any other class, beside `always_hold`, or with an empty
 rule. Arguments a rule does not name are free.
 
