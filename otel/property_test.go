@@ -395,8 +395,14 @@ func TestPropertyDeterministic(t *testing.T) {
 		if string(a) != string(b) || string(a) != string(c) {
 			t.Fatal("the same log gave different output")
 		}
+		// The seed in use: an empty TraceSeed means the conversation id,
+		// and "" + "x" would be the same seed as a conversation named x.
+		seed := opts.TraceSeed
+		if seed == "" {
+			seed = opts.ConversationID
+		}
 		other := opts
-		other.TraceSeed = opts.TraceSeed + "x"
+		other.TraceSeed = seed + "x"
 		d, _ := otel.Marshal(entries, other)
 		ids := map[string]bool{}
 		for _, s := range spansOf(t, a) {
