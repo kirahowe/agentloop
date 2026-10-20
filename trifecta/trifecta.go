@@ -15,11 +15,9 @@
 package trifecta
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
-	"io"
 	"slices"
 	"sort"
 	"strings"
@@ -155,7 +153,7 @@ func DecideCall(labels []string, t Tool, input json.RawMessage) (agentloop.Verdi
 // many decoders, Go's encoding/json among them, read either into one
 // field.
 func Consented(rules []map[string]json.RawMessage, input json.RawMessage) int {
-	if len(rules) == 0 || strictjson.DuplicateKeys(input) != nil {
+	if len(rules) == 0 {
 		return -1
 	}
 	v := normal(input)
@@ -174,7 +172,7 @@ func Consented(rules []map[string]json.RawMessage, input json.RawMessage) int {
 func matches(rule map[string]json.RawMessage, obj map[string]any) bool {
 	for k, want := range rule {
 		got, ok := obj[k]
-		if !ok || strictjson.DuplicateKeys(want) != nil {
+		if !ok {
 			return false
 		}
 		w := normal(want)
@@ -226,15 +224,11 @@ func fold(s string) string {
 // nothing.
 var errValue = new(int)
 
-// normal is the JSON value in b with numbers kept as written, or errValue.
+// normal is the JSON value in b, read by the strict dialect with numbers
+// kept as written, or errValue. A repeated key anywhere makes it errValue.
 func normal(b []byte) any {
-	dec := json.NewDecoder(bytes.NewReader(b))
-	dec.UseNumber()
-	var v any
-	if err := dec.Decode(&v); err != nil {
-		return errValue
-	}
-	if _, err := dec.Token(); err != io.EOF {
+	v, err := strictjson.Value(b)
+	if err != nil {
 		return errValue
 	}
 	return v
@@ -349,7 +343,7 @@ func (p Policy) decideReader(call agentloop.ToolCall, outer Tool, allowed []stri
 	var in struct {
 		Tool string `json:"tool"`
 	}
-	if err := json.Unmarshal(call.Input, &in); err != nil || in.Tool == "" {
+	if err := strictjson.Unmarshal(call.Input, &in); err != nil || in.Tool == "" {
 		return deny(fmt.Sprintf("The input to %s does not name an inner tool.", call.Name))
 	}
 	if !slices.Contains(allowed, in.Tool) {

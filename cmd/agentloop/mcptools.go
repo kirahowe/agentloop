@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"reflect"
 	"strings"
 
 	"github.com/kirahowe/agentloop/internal/request"
@@ -31,11 +30,11 @@ func mcpToolsCmd(ctx context.Context, stdin io.Reader, stdout io.Writer) error {
 	if err != nil {
 		return err
 	}
-	if err := strictjson.Check(raw, reflect.TypeFor[mcpToolsInput]()); err != nil {
+	var in mcpToolsInput
+	if err := strictjson.Object(raw); err != nil {
 		return usage.Errorf("mcp-tools input: %v", err)
 	}
-	var in mcpToolsInput
-	if err := json.Unmarshal(raw, &in); err != nil {
+	if err := strictjson.UnmarshalKnown(raw, &in); err != nil {
 		return usage.Errorf("mcp-tools input: %v", err)
 	}
 	if err := mcp.CheckURL(in.URL); err != nil {

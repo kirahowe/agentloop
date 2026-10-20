@@ -34,18 +34,18 @@ func narrowSchema(name string, params json.RawMessage, cfg ToolConfig) (json.Raw
 		return params, nil, nil
 	}
 	var schema map[string]json.RawMessage
-	if err := json.Unmarshal(params, &schema); err != nil {
+	if err := strictjson.Unmarshal(params, &schema); err != nil {
 		return nil, nil, fmt.Errorf("inputSchema is not an object: %w", err)
 	}
 	var props map[string]json.RawMessage
 	if raw, ok := schema["properties"]; ok {
-		if err := json.Unmarshal(raw, &props); err != nil {
+		if err := strictjson.Unmarshal(raw, &props); err != nil {
 			return nil, nil, fmt.Errorf("inputSchema's properties is not an object: %w", err)
 		}
 	}
 	var required []string
 	if raw, ok := schema["required"]; ok {
-		if err := json.Unmarshal(raw, &required); err != nil {
+		if err := strictjson.Unmarshal(raw, &required); err != nil {
 			return nil, nil, fmt.Errorf("inputSchema's required is not a list of names: %w", err)
 		}
 	}
@@ -103,12 +103,11 @@ func narrowSchema(name string, params json.RawMessage, cfg ToolConfig) (json.Raw
 // what the model is told when it named one, and bad why the arguments
 // cannot be sent otherwise.
 func (n *narrowing) apply(input json.RawMessage) (out json.RawMessage, refused, bad string) {
-	if err := strictjson.DuplicateKeys(input); err != nil {
-		return nil, "", "the arguments name a key twice"
+	if err := strictjson.Valid(input); err != nil {
+		return nil, "", "the arguments are not strict JSON: " + err.Error()
 	}
 	var args map[string]json.RawMessage
-	dec := json.NewDecoder(bytes.NewReader(input))
-	if err := dec.Decode(&args); err != nil || args == nil {
+	if err := strictjson.Unmarshal(input, &args); err != nil || args == nil {
 		return nil, "", "the arguments are not a JSON object"
 	}
 	// A key that differs from a fixed or hidden name only in case is

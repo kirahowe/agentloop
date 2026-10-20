@@ -24,8 +24,10 @@ import (
 //   - a request from the server other than ping, and a notification
 //     whose method is not notifications/...
 //   - a batch (a JSON array)
-//   - a frame that is not a JSON-RPC message, that names a key twice in
-//     an object, or that shares a line with the message before it
+//   - a frame that is not a JSON-RPC message, that breaks the strict
+//     dialect of internal/strictjson (a key twice in an object, invalid
+//     UTF-8, nesting or a number past its bounds), or that shares a line
+//     with the message before it
 //
 // A violation breaks the connection (see conn.violation). A frame longer
 // than the cap ends it without being one.
@@ -116,9 +118,9 @@ func (wr *wire) Read(ctx context.Context) (jsonrpc.Message, error) {
 		wr.cn.violation("the server wrote more than one JSON value on a line")
 		return nil, errors.New("a message from the server shares a line with the one before")
 	}
-	if strictjson.DuplicateKeys(raw) != nil {
-		wr.cn.violation("the server sent a message that names a key twice")
-		return nil, errors.New("a message from the server names a key twice")
+	if err := strictjson.Valid(raw); err != nil {
+		wr.cn.violation("the server sent a message that is not strict JSON: " + err.Error())
+		return nil, errors.New("a message from the server is not strict JSON")
 	}
 	msg, why := checkFrame(raw)
 	if why != "" {

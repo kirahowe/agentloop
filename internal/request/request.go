@@ -9,12 +9,10 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"maps"
 	"net/url"
 	"os"
 	"os/exec"
-	"reflect"
 	"regexp"
 	"slices"
 	"sort"
@@ -241,19 +239,14 @@ func Load(path string, mode Mode) (*Request, error) {
 	if err != nil {
 		return nil, usage.Errorf("cannot read request: %v", err)
 	}
-	// encoding/json takes "POLICY" for "policy" and lets a repeated key
-	// replace the first; a request names each field once, exactly.
-	if err := strictjson.Check(raw, reflect.TypeFor[Request]()); err != nil {
-		return nil, usage.Errorf("bad request %s: %v", path, err)
-	}
-	dec := json.NewDecoder(bytes.NewReader(raw))
-	dec.DisallowUnknownFields()
+	// A request is one object in the strict dialect that names each of its
+	// fields once, exactly ("POLICY" is not "policy"), and nothing else.
 	var r Request
-	if err := dec.Decode(&r); err != nil {
+	if err := strictjson.Object(raw); err != nil {
 		return nil, usage.Errorf("bad request %s: %v", path, err)
 	}
-	if _, err := dec.Token(); err != io.EOF {
-		return nil, usage.Errorf("bad request %s: trailing data after the JSON object", path)
+	if err := strictjson.UnmarshalKnown(raw, &r); err != nil {
+		return nil, usage.Errorf("bad request %s: %v", path, err)
 	}
 	if err := r.validate(mode); err != nil {
 		return nil, err

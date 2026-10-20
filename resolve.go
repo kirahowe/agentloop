@@ -9,13 +9,16 @@ import (
 	"errors"
 	"fmt"
 	"slices"
+
+	"github.com/kirahowe/agentloop/internal/strictjson"
 )
 
 // InputDigest is the SHA-256, in hex, of a call's input in canonical JSON:
 // object keys sorted, no insignificant whitespace, no HTML escaping, and
-// numbers as written. Input that is not JSON is hashed as it is. A hold
-// records it, and a resolution must name it, so a person approves exactly
-// the input they were shown.
+// numbers as written. Input that is not JSON in the strict dialect
+// (internal/strictjson) is hashed as it is. A hold records it, and a
+// resolution must name it, so a person approves exactly the input they
+// were shown.
 func InputDigest(input json.RawMessage) string {
 	sum := sha256.Sum256(canonicalJSON(input))
 	return hex.EncodeToString(sum[:])
@@ -25,10 +28,8 @@ func canonicalJSON(raw json.RawMessage) []byte {
 	if len(bytes.TrimSpace(raw)) == 0 {
 		raw = json.RawMessage(`{}`)
 	}
-	dec := json.NewDecoder(bytes.NewReader(raw))
-	dec.UseNumber()
-	var v any
-	if err := dec.Decode(&v); err != nil {
+	v, err := strictjson.Value(raw)
+	if err != nil {
 		return raw
 	}
 	var b bytes.Buffer

@@ -98,7 +98,7 @@ func (r *Reader) EffectiveInput(raw json.RawMessage) (json.RawMessage, map[strin
 		return raw, nil, true
 	}
 	var outer map[string]json.RawMessage
-	if json.Unmarshal(raw, &outer) != nil || outer == nil {
+	if strictjson.Unmarshal(raw, &outer) != nil || outer == nil {
 		return nil, nil, false
 	}
 	outer["input"] = inner
@@ -195,7 +195,7 @@ type input struct {
 
 func parseInput(raw json.RawMessage) (input, error) {
 	var in input
-	if err := json.Unmarshal(raw, &in); err != nil {
+	if err := strictjson.Unmarshal(raw, &in); err != nil {
 		return in, err
 	}
 	return in, nil
@@ -505,9 +505,9 @@ func ParseReplyFor(s *jsonschema.Schema, text string, operator bool) (Reply, err
 		return Reply{}, fmt.Errorf("the reply is not acceptable JSON: %w", err)
 	}
 	if operator {
-		if err := json.Unmarshal([]byte(body), &raw); err == nil {
+		if err := strictjson.Unmarshal([]byte(body), &raw); err == nil {
 			if op, ok := raw["operator"]; ok {
-				if err := json.Unmarshal(op, &out.Operator); err != nil {
+				if err := strictjson.Unmarshal(op, &out.Operator); err != nil {
 					return Reply{}, errors.New(`"operator" must be a string`)
 				}
 				delete(raw, "operator")
@@ -546,7 +546,7 @@ func parseReply(s *jsonschema.Schema, body string) (answer []byte, unanswerable 
 		return nil, false, errors.New(`the reply must be an object with exactly one key, "answer" or "unanswerable"`)
 	}
 	var raw map[string]json.RawMessage
-	if err := json.Unmarshal([]byte(body), &raw); err != nil {
+	if err := strictjson.Unmarshal([]byte(body), &raw); err != nil {
 		return nil, false, err
 	}
 	answer, err = Answer(s, raw["answer"])

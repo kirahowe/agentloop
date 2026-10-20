@@ -129,6 +129,12 @@ func TestParseEnvelopeRefusesRepeatedAndMisspelledKeys(t *testing.T) {
 		`{"CONTENT":"x","Is_Error":true,"LABELS":["private"]}`,
 		`{"content":"x","content":"y","labels":[]}`,
 		`{"content":"x","is_error":true,"is_error":false,"labels":[]}`,
+		// The rest of the strict dialect (relay#58).
+		"{\"content\":\"a\xffb\",\"labels\":[]}",
+		"\xef\xbb\xbf{\"content\":\"x\",\"labels\":[]}",
+		`{"content":"\ud800","labels":[]}`,
+		`{"content":"x","labels":[]} null`,
+		`{"content":"x","labels":[],"display":{"title":"t","body":"b","labels":[],"n":` + strings.Repeat("9", 1001) + `}}`,
 	} {
 		if res, why := ParseEnvelope([]byte(out), knownLabel); why == "" {
 			t.Errorf("accepted %s as %+v", out, res)

@@ -11,6 +11,8 @@ import (
 	"sync"
 	"time"
 	"unicode"
+
+	"github.com/kirahowe/agentloop/internal/strictjson"
 )
 
 // A Store keeps a session's entries. It is the only thing a session needs
@@ -166,7 +168,7 @@ func (m *MemoryStore) Load() ([]Entry, error) {
 	entries := make([]Entry, 0, len(m.data))
 	for _, b := range m.data {
 		var e Entry
-		if err := json.Unmarshal(b, &e); err != nil {
+		if err := strictjson.Unmarshal(b, &e); err != nil {
 			return nil, err
 		}
 		entries = append(entries, e)
@@ -214,7 +216,7 @@ func (f *FileStore) Load() ([]Entry, error) {
 	var entries []Entry
 	for i, line := range lines {
 		var e Entry
-		if err := json.Unmarshal(line, &e); err != nil {
+		if err := strictjson.Unmarshal(line, &e); err != nil {
 			if i == len(lines)-1 {
 				break
 			}
@@ -313,7 +315,7 @@ func repairTail(path string) error {
 // must agree on this, or a line one ignores as torn the other would keep.
 func isEntryLine(line []byte) bool {
 	var e Entry
-	return json.Unmarshal(line, &e) == nil
+	return strictjson.Unmarshal(line, &e) == nil
 }
 
 func truncateTo(path string, size int64) error {

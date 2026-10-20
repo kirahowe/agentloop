@@ -6,9 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"os/exec"
-	"reflect"
 	"strings"
 
 	"github.com/kirahowe/agentloop"
@@ -116,17 +114,12 @@ func StdinEnvelope(call agentloop.Call) []byte {
 // a display that agentloop.CheckDisplay refuses, or anything after the
 // object but whitespace.
 func ParseEnvelope(stdout []byte, known func(string) bool) (agentloop.Result, string) {
-	if err := strictjson.Check(stdout, reflect.TypeFor[stdoutEnvelope]()); err != nil {
-		return agentloop.Result{}, "stdout is not an envelope: " + err.Error()
-	}
-	dec := json.NewDecoder(bytes.NewReader(stdout))
-	dec.DisallowUnknownFields()
 	var env stdoutEnvelope
-	if err := dec.Decode(&env); err != nil {
+	if err := strictjson.Object(stdout); err != nil {
 		return agentloop.Result{}, "stdout is not an envelope: " + err.Error()
 	}
-	if _, err := dec.Token(); err != io.EOF {
-		return agentloop.Result{}, "stdout has more after the envelope"
+	if err := strictjson.UnmarshalKnown(stdout, &env); err != nil {
+		return agentloop.Result{}, "stdout is not an envelope: " + err.Error()
 	}
 	if env.Content == nil {
 		return agentloop.Result{}, "the envelope has no content"

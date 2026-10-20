@@ -331,7 +331,7 @@ func TestReaderCheckInput(t *testing.T) {
 		{"unknown inner tool", string(readerInput("web_post", closedSchema)), "cannot read through web_post"},
 		{"inner input does not match", `{"tool":"mail_read","input":{"id":7},"question":"q","schema":{}}`, "does not match its schema"},
 		{"schema does not compile", `{"tool":"mail_read","input":{"id":"x"},"question":"q","schema":{"type":"nope"}}`, "The answer schema is not usable"},
-		{"schema names a key twice", `{"tool":"mail_read","input":{"id":"x"},"question":"q","schema":{"type":"object","type":"string"}}`, "The answer schema is not usable"},
+		{"schema names a key twice", `{"tool":"mail_read","input":{"id":"x"},"question":"q","schema":{"type":"object","type":"string"}}`, "duplicate object member name"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {

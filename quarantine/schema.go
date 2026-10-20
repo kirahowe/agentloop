@@ -21,11 +21,9 @@
 package quarantine
 
 import (
-	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"slices"
 	"strconv"
 	"strings"
@@ -127,19 +125,9 @@ func fail(path, reason string) *Result {
 	return &r
 }
 
-// decode reads exactly one JSON value, numbers kept as written.
-func decode(data []byte) (any, error) {
-	dec := json.NewDecoder(bytes.NewReader(data))
-	dec.UseNumber()
-	var v any
-	if err := dec.Decode(&v); err != nil {
-		return nil, err
-	}
-	if _, err := dec.Token(); !errors.Is(err, io.EOF) {
-		return nil, errors.New("there is more after the value")
-	}
-	return v, nil
-}
+// decode reads exactly one JSON value in the strict dialect, numbers kept
+// as written.
+func decode(data []byte) (any, error) { return strictjson.Value(data) }
 
 // How a keyword is read. Every keyword Check knows is in keywords; any
 // other is free text.

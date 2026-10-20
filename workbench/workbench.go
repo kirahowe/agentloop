@@ -17,6 +17,8 @@ import (
 	"github.com/kirahowe/agentloop"
 	"github.com/kirahowe/agentloop/quarantine"
 	"github.com/kirahowe/agentloop/trifecta"
+
+	"github.com/kirahowe/agentloop/internal/strictjson"
 )
 
 // ToolName is the workbench tool's name.
@@ -341,7 +343,7 @@ type input struct {
 // CheckInput checks that the answer schema compiles.
 func (w *Workbench) CheckInput(raw json.RawMessage) string {
 	var in input
-	if err := json.Unmarshal(raw, &in); err != nil {
+	if err := strictjson.Unmarshal(raw, &in); err != nil {
 		return fmt.Sprintf("The input to %s is not usable: %v", ToolName, err)
 	}
 	if _, err := quarantine.Compile(in.Schema); err != nil {
@@ -358,7 +360,7 @@ func (w *Workbench) Call(ctx context.Context, in json.RawMessage) (agentloop.Res
 // CallWith runs a child session for the task and returns its answer.
 func (w *Workbench) CallWith(ctx context.Context, call agentloop.Call) (agentloop.Result, error) {
 	var in input
-	if err := json.Unmarshal(call.Input, &in); err != nil {
+	if err := strictjson.Unmarshal(call.Input, &in); err != nil {
 		return agentloop.Result{}, err
 	}
 	compiled, err := quarantine.Compile(in.Schema)
@@ -483,7 +485,7 @@ func (s *shell) Call(ctx context.Context, raw json.RawMessage) (agentloop.Result
 	var in struct {
 		Command string `json:"command"`
 	}
-	if err := json.Unmarshal(raw, &in); err != nil {
+	if err := strictjson.Unmarshal(raw, &in); err != nil {
 		return agentloop.Result{}, err
 	}
 	s.rep.Commands++

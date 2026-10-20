@@ -14,6 +14,8 @@ import (
 
 	"github.com/kirahowe/agentloop"
 	"github.com/kirahowe/agentloop/trifecta"
+
+	"github.com/kirahowe/agentloop/internal/strictjson"
 )
 
 // ToResult turns a tools/call result into what the agent records. It is
@@ -202,14 +204,9 @@ func DefinitionDigest(name, description string, input, output json.RawMessage) (
 // Canonical is JSON with object keys sorted, no insignificant whitespace,
 // no HTML escaping and numbers as written, as agentloop.InputDigest uses.
 func Canonical(raw []byte) ([]byte, error) {
-	dec := json.NewDecoder(bytes.NewReader(raw))
-	dec.UseNumber()
-	var v any
-	if err := dec.Decode(&v); err != nil {
+	v, err := strictjson.Value(raw)
+	if err != nil {
 		return nil, err
-	}
-	if dec.More() {
-		return nil, fmt.Errorf("more than one JSON value")
 	}
 	var b bytes.Buffer
 	enc := json.NewEncoder(&b)

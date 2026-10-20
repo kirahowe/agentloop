@@ -250,7 +250,8 @@ func TestInputDigestIsCanonical(t *testing.T) {
 
 // Regression: an input naming a key twice reads one way to the schema and
 // the digest a person approves (the last value) and perhaps another to the
-// tool. It is denied before the policy sees it.
+// tool. It is refused before the policy sees it, and before it is written
+// to the log, which must read back by the strict dialect (relay#58).
 func TestInputWithARepeatedKeyIsDenied(t *testing.T) {
 	c := newCounter()
 	asked := 0
@@ -262,12 +263,13 @@ func TestInputWithARepeatedKeyIsDenied(t *testing.T) {
 			return agentloop.Decision{Verdict: agentloop.Hold}
 		}),
 	}
-	s, _ := newSession(t)
-	wantReason(t, run(t, a, s, "go"), agentloop.ReasonCompleted)
-	res := resultsOf(s.Messages())["a"]
-	if asked != 0 || c.all() != 0 || !res.IsError || !strings.Contains(res.Content, "twice") {
-		t.Fatalf("asked %d, ran %d, result %+v", asked, c.all(), res)
+	s, store := newSession(t)
+	out := run(t, a, s, "go")
+	wantReason(t, out, agentloop.ReasonModelError)
+	if asked != 0 || c.all() != 0 || out.Error == nil || !strings.Contains(out.Error.Error(), "duplicate") {
+		t.Fatalf("asked %d, ran %d, outcome %+v", asked, c.all(), out)
 	}
+	reopen(t, store)
 }
 
 // Regression: an agent with no policy could allow a call held under one,
