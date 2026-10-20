@@ -552,7 +552,49 @@ new session.
 
 Every entry goes through JSON before the session applies it, so the live
 state and the state rebuilt from the same log are always equal, and a
-session shares no memory with its callers.
+session shares no memory with its callers. Entries read back from a store
+go through the strict reader (see Reading JSON), as does that round trip.
+
+### Reading JSON
+
+relay, agentloop and acp-tui read every message one of them gets from
+another by the same rules, so a message means the same thing to all
+three or none of them takes it (relay#58). In agentloop that reader is
+`internal/strictjson`, built on `encoding/json/v2`. It accepts:
+
+- RFC 8259 JSON in valid UTF-8, with no byte order mark and no unpaired
+  surrogate escape;
+- exactly one value, with only whitespace after it;
+- no member name twice in one object, at any depth, compared after
+  unescaping;
+- member names matched exactly and case-sensitively, so `"Labels"` is
+  another member, not `labels`;
+- nesting of at most 128 levels, and number literals of at most 1000
+  characters.
+
+Unknown members are ignored, except in a tool envelope, a request and
+the `mcp-tools` input, which refuse them. A value of no fixed shape keeps
+each number as written.
+
+`encoding/json` (v1) does none of this: it folds case when it matches a
+name to a struct field (`ſ` reaches a field named `s`), takes one of two
+repeated names, and replaces invalid UTF-8. agentloop's own code does not
+use it to read what another process wrote. The strict reader covers the ACP
+client's lines (see The command), tool envelopes, request files,
+`mcp-tools` input, MCP servers' stdio messages, session logs read back,
+tool call input where agentloop reads a field of it (the reader's inner
+tool, the workbench's task, consent rules), and the canonical JSON that
+digests are taken of. The table of hostile lines that all three
+components test against is `testdata/strict-json/cases.jsonl`.
+
+Provider responses are read by the providers' SDKs, which keep their
+own decoders: relay's threat model trusts the provider. What a provider
+returns for a turn must still pass the reader, with tighter bounds,
+before it is logged (see The loop). Remote MCP servers are read by the
+MCP SDK's HTTP transport, which decodes each message before agentloop
+sees it, so their messages are not screened by the strict reader. Only
+agentloop reads that traffic, so no other component can read it
+differently.
 
 ### The loop
 
@@ -623,8 +665,9 @@ A run:
 A response that repeats a tool call id, or has a call with no id, is not
 recorded: the run ends with `model_error`, kind `invalid_request`. So is
 a response whose tool call input, or the provider's record of the turn,
+is not JSON in the strict dialect (a name given twice, invalid UTF-8),
 nests deeper than 64 levels or has a number longer than 100 characters:
-every line agentloop writes stays readable by strict JSON parsers.
+every line agentloop writes must read back by the strict reader.
 
 A call refused because the run reached `MaxToolCalls` keeps the labels its
 decision added, though it never ran. Labels err toward caution.
@@ -731,8 +774,8 @@ because the SDK handles a server's requests on a goroutine of its own
 and would lose their order with the results. These break the
 connection: a request from the server other than `ping`, a notification
 whose method does not start with `notifications/`, a batch, a frame that
-is not a JSON-RPC message, a message that names a key twice in one
-object, and a message that shares a line with the one before. The call
+is not a JSON-RPC message, a message the strict reader refuses (see
+Reading JSON), and a message that shares a line with the one before. The call
 whose result follows such a message fails, and no call runs after it
 until `Reconnect`. `Restart` does not start such a server again.
 
@@ -951,10 +994,10 @@ else, and only known labels. With command tools it also needs
 `forbid_labels` becomes `Agent.Forbid` and `trifecta.Policy.Forbid`. A
 request whose `policy.labels`, or any tool's labels, include a label it
 forbids is unusable, since the session could not start or the tool
-could never be called; so is `forbid_labels` beside `unrestricted`. Unknown
-fields anywhere are refused, and so are fields spelled other than exactly
-(`"POLICY"`) or given twice in one object, which encoding/json would
-otherwise accept, the last one winning. `resolve` needs a real policy, and
+could never be called; so is `forbid_labels` beside `unrestricted`. The
+request is read by the strict reader (see Reading JSON): unknown fields
+anywhere are refused, and so are fields spelled other than exactly
+(`"POLICY"`) and fields given twice in one object. `resolve` needs a real policy, and
 a request without one refuses a session that `Session.Policed` reports:
 an unrestricted request never carries on a policed session. With a real policy the agent's starting
 labels are `policy.labels` and its policy is `trifecta.Policy`.
@@ -1118,8 +1161,9 @@ to 200 characters, a body of at most 200,000 bytes, at most 50 sources,
 each with a title and a one-line ref) fails the call like any other bad
 envelope. If the program exits non-zero,
 writes more than the output cap (1 MiB) to stdout, or writes anything
-(a field spelled otherwise or given twice included)
-but one such envelope with known labels, the model gets only "The tool
+but one such envelope with known labels, read by the strict reader (see
+Reading JSON; a field spelled otherwise or given twice fails it), the
+model gets only "The tool
 <name> failed." and the call is an error. The reason, with the program's
 stderr, goes to the result entry's `log`, for the operator. A timeout or
 a cancel is reported by the loop as for any tool.
@@ -1235,6 +1279,17 @@ the client's is ignored, agentloop reports the directory the tools run
 in: `tool_dir`, made absolute, or agentloop's own working directory when
 `tool_dir` is empty. A `cwd` filter therefore matches every session or
 none.
+
+Every line the client writes must pass the strict reader (see Reading
+JSON) as one object before the ACP SDK reads it, since the SDK decodes
+with `encoding/json` v1. A line that passes reaches the SDK unchanged. A
+request that fails, if it has one `id` (a string or a number) and a
+`method` that can still be read, gets a JSON-RPC parse error (`-32700`)
+for that id. Any other line that fails is dropped and noted in the log,
+a response from the client included: its id is one the agent chose, so
+an error with it would read to the client as the answer to a request of
+its own. A line longer than 10 MiB ends the connection, as it would in
+the SDK.
 
 What a client sees of a run comes from the run's events, translated by
 pure functions in `acp/` (`Translator.Step` for a live turn, `Replay` for

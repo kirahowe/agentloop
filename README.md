@@ -102,6 +102,12 @@ the request's `resolve` list. `agentloop acp` asks the client instead,
 with `session/request_permission`, and shows the session's labels on
 every tool call.
 
+What agentloop reads from another process (the ACP client, tool
+envelopes, local MCP servers, request and session files) goes through one
+strict JSON reader, the same dialect relay and acp-tui read: valid
+UTF-8, one value, no name given twice, names matched exactly. See
+[Reading JSON](DESIGN.md#reading-json).
+
 A request can also turn on a quarantined reader with a `quarantine`
 block. The agent then has a built-in tool, `read_quarantined`, that runs
 one of the named `read` tools, gives its result to a second model with
