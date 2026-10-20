@@ -1282,8 +1282,19 @@ none.
 
 Every line the client writes must pass the strict reader (see Reading
 JSON) as one object before the ACP SDK reads it, since the SDK decodes
-with `encoding/json` v1. A line that passes reaches the SDK unchanged. A
-request that fails, if it has one `id` (a string or a number) and a
+with `encoding/json` v1. Passing the strict reader is not enough on its
+own, because v1 also matches member names without regard to case: with
+no exact match, `"Method"`, `"ID"` or `"paramſ"` reach the fields named
+`method`, `id` and `params`, and `{"cwd":"a","Cwd":"b"}` reads as cwd
+`b`, where relay and acp-tui see unknown members. So the screen also
+refuses a line with a member name, at any depth, that folds to a name
+the SDK decodes without being spelled exactly as one. Those names come
+from reflection over the SDK's message types, and a test checks them
+against every json tag in the SDK's source. The check goes by name, not
+by position, so it also refuses such a name as a key in free-form data
+like `_meta`; refusing errs on the safe side. A line that passes both
+reaches the SDK unchanged, and the SDK reads the same members from it
+as the strict reader does. A request that fails, if it has one `id` (a string or a number) and a
 `method` that can still be read, gets a JSON-RPC parse error (`-32700`)
 for that id. Any other line that fails is dropped and noted in the log,
 a response from the client included: its id is one the agent chose, so

@@ -26,8 +26,10 @@ var errLineTooLong = fmt.Errorf("a line from the client is longer than %d bytes"
 // without regard to case and keeps one of two repeated names, so a line
 // relay or acp-tui read one way could mean another here. Every line must
 // be one JSON object in the strict dialect of internal/strictjson, the
-// one relay and acp-tui read (relay#58). A line that passes reaches the
-// SDK byte for byte. A line that fails never does: if it is a request
+// one relay and acp-tui read (relay#58), and must not hold a member name
+// the SDK would fold onto a field spelled otherwise (see sdkNames). A line
+// that passes both reaches the SDK byte for byte, and the SDK reads the
+// same members from it as the strict reader. A line that fails never does: if it is a request
 // whose id can be read, the client gets a JSON-RPC parse error (-32700)
 // for that id, and otherwise it is dropped. A blank line is dropped too,
 // as the SDK would skip it.
@@ -87,6 +89,9 @@ func (s *strictInput) screen(line []byte) {
 		return
 	}
 	err := strictjson.Object(msg)
+	if err == nil {
+		err = foldedName(msg)
+	}
 	if err == nil {
 		s.pending = line
 		return
