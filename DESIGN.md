@@ -1297,8 +1297,12 @@ refuses a line with a member name, at any depth, that folds to a name
 the SDK decodes without being spelled exactly as one. Those names come
 from reflection over the SDK's message types, and a test checks them
 against every json tag in the SDK's source. The check goes by name, not
-by position, so it also refuses such a name as a key in free-form data
-like `_meta`; refusing errs on the safe side. A line that passes both
+by position, with one exception: it does not look inside the value of a
+member named exactly `_meta` or `data`. The SDK keeps `_meta` as raw JSON
+and decodes `data` into `any` or a string wherever they appear, so v1
+folds no names there, and a client's `{"_meta":{"Title":"x"}}` passes
+(a test checks those field types in the SDK). Elsewhere a folded name in
+free-form data is still refused, which errs on the safe side. A line that passes both
 reaches the SDK unchanged, and the SDK reads the same members from it
 as the strict reader does. A request that fails, if it has one `id` (a string or a number) and a
 `method` that can still be read, gets a JSON-RPC parse error (`-32700`)

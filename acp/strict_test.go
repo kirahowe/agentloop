@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"regexp"
 	"slices"
 	"strings"
@@ -275,4 +276,73 @@ func TestPropertyFoldIsEqualFold(t *testing.T) {
 			}
 		}
 	})
+}
+
+// Every SDK field named in freeForm holds raw JSON, an any or a string,
+// so v1 matches no name inside its value, and foldedName may skip it.
+func TestFreeFormNamesAreFreeForm(t *testing.T) {
+	ok := map[reflect.Type]bool{
+		reflect.TypeFor[map[string]json.RawMessage](): true,
+		reflect.TypeFor[json.RawMessage]():            true,
+		reflect.TypeFor[any]():                        true,
+		reflect.TypeFor[string]():                     true,
+	}
+	found := map[string]int{}
+	seen := map[reflect.Type]bool{}
+	var walk func(reflect.Type)
+	walk = func(rt reflect.Type) {
+		for rt.Kind() == reflect.Pointer || rt.Kind() == reflect.Slice || rt.Kind() == reflect.Array || rt.Kind() == reflect.Map {
+			rt = rt.Elem()
+		}
+		if rt.Kind() != reflect.Struct || seen[rt] {
+			return
+		}
+		seen[rt] = true
+		for i := range rt.NumField() {
+			f := rt.Field(i)
+			name, _, _ := strings.Cut(f.Tag.Get("json"), ",")
+			if freeForm[name] {
+				found[name]++
+				if !ok[f.Type] {
+					t.Errorf("%s.%s, json name %q, is a %s, which v1 may decode names into", rt, f.Name, name, f.Type)
+				}
+			}
+			walk(f.Type)
+		}
+	}
+	for _, r := range sdkRoots {
+		walk(reflect.TypeOf(r))
+	}
+	for name := range freeForm {
+		if found[name] == 0 {
+			t.Errorf("no SDK field is named %q", name)
+		}
+	}
+}
+
+// Names inside a free-form value pass: _meta and an error's data are
+// kept as raw JSON or decoded into any, so v1 folds nothing there. The
+// same names elsewhere, and a folded _meta itself, are still refused.
+func TestStrictInputFreeFormNames(t *testing.T) {
+	pass := []string{
+		`{"jsonrpc":"2.0","id":2,"method":"session/new","params":{"cwd":"/tmp","mcpServers":[],"_meta":{"Title":"hello","Cwd":{"Method":1}}}}`,
+		`{"jsonrpc":"2.0","id":3,"error":{"code":-32603,"message":"m","data":{"Message":"x","Path":"/"}}}`,
+		`{"jsonrpc":"2.0","method":"session/cancel","params":{"sessionId":"s","_meta":{"SessionId":"t"}}}`,
+	}
+	for _, l := range pass {
+		line := []byte(l + "\n")
+		if sdk, answers, err := screened(t, line); err != nil || !bytes.Equal(sdk, line) || len(answers) > 0 {
+			t.Errorf("%s: err %v, passed %q, answered %q", l, err, sdk, answers)
+		}
+	}
+	refuse := []string{
+		`{"jsonrpc":"2.0","id":4,"method":"session/new","params":{"cwd":"/tmp","mcpServers":[],"_Meta":{"x":1},"Cwd":"/etc"}}`,
+		`{"jsonrpc":"2.0","id":5,"method":"session/new","params":{"cwd":"/tmp","mcpServers":[],"_meta":{},"Cwd":"/etc"}}`,
+		`{"jsonrpc":"2.0","id":6,"method":"session/new","params":{"cwd":"/tmp","mcpServers":[],"_meta":{"x":{}}},"Params":{}}`,
+	}
+	for _, l := range refuse {
+		if sdk, _, err := screened(t, []byte(l+"\n")); err != nil || len(sdk) > 0 {
+			t.Errorf("%s: err %v, passed %q", l, err, sdk)
+		}
+	}
 }

@@ -25,9 +25,10 @@ import (
 // member name, at any depth, that folds to one of them without being
 // spelled exactly as one of them is refused like a line that fails the
 // strict reader. The check is by name alone, not by where the member
-// sits, so it also refuses such a name as a key of free-form data (a
-// _meta object, a tool's raw input). That is the safe direction: the line
-// is not passed on, so it cannot mean two things.
+// sits, so it also refuses such a name as a key of most free-form data
+// (a tool's raw input, say). That is the safe direction: the line is not
+// passed on, so it cannot mean two things. The exception is the value of
+// a member in freeForm, which the SDK never decodes names from.
 var sdkNames = foldedNames(sdkRoots...)
 
 // sdkRoots are the types the SDK decodes from what a client sends: the
@@ -66,6 +67,15 @@ var sdkRoots = []any{
 	acp.WaitForTerminalExitRequest{}, acp.WaitForTerminalExitResponse{},
 	acp.WriteTextFileRequest{}, acp.WriteTextFileResponse{},
 }
+
+// freeForm are the member names whose value the SDK never decodes into a
+// struct, wherever it reads them: _meta, kept as raw JSON per key, and
+// data, an error's data or a content block's base64 string, decoded into
+// any. Inside such a value v1 matches no name to a field, so a client may
+// put any names there, "Title" in _meta included, and foldedName does not
+// look. A member spelled otherwise ("_Meta", "Data") is still checked by
+// its name like any other. TestFreeFormNamesAreFreeForm checks the SDK.
+var freeForm = map[string]bool{"_meta": true, "data": true}
 
 // envelopeNames are the members of the SDK's JSON-RPC envelope, which is
 // unexported and so cannot be reflected over.
@@ -158,8 +168,14 @@ func foldedName(line []byte) error {
 		}
 		if tok.Kind() == '"' {
 			if k, n := dec.StackIndex(dec.StackDepth()); k == '{' && n%2 == 1 {
-				if name := tok.String(); folds(name) {
+				name := tok.String()
+				if folds(name) {
 					return fmt.Errorf("member %q would be read by the ACP SDK as %q", name, sdkNames[fold(name)][0])
+				}
+				if freeForm[name] {
+					if dec.SkipValue() != nil {
+						return nil
+					}
 				}
 			}
 		}
