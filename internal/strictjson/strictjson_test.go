@@ -284,3 +284,22 @@ func FuzzValid(f *testing.F) {
 		}
 	})
 }
+
+// An exponent passes exactly when its value is within ±MaxExponent,
+// however many leading zeros it has.
+func TestPropertyExponentBound(t *testing.T) {
+	rapid.Check(t, func(t *rapid.T) {
+		n := rapid.IntRange(-3*strictjson.MaxExponent, 3*strictjson.MaxExponent).Draw(t, "exp")
+		zeros := strings.Repeat("0", rapid.IntRange(0, 30).Draw(t, "zeros"))
+		sign := rapid.SampledFrom([]string{"", "+"}).Draw(t, "sign")
+		if n < 0 {
+			sign = "-"
+		}
+		abs := max(n, -n)
+		lit := "1" + rapid.SampledFrom([]string{"e", "E"}).Draw(t, "e") + sign + zeros + strconv.Itoa(abs)
+		err := strictjson.Valid([]byte(`{"n":` + lit + `}`))
+		if want := abs <= strictjson.MaxExponent; (err == nil) != want {
+			t.Fatalf("%s: err %v, want accepted %v", lit, err, want)
+		}
+	})
+}

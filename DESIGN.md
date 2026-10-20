@@ -570,8 +570,9 @@ three or none of them takes it (relay#58). In agentloop that reader is
   unescaping;
 - member names matched exactly and case-sensitively, so `"Labels"` is
   another member, not `labels`;
-- nesting of at most 128 levels, and number literals of at most 1000
-  characters.
+- nesting of at most 128 levels, number literals of at most 1000
+  characters, and exponents between -9999 and 9999 by value (leading
+  zeros allowed).
 
 Unknown members are ignored, except in a tool envelope, a request and
 the `mcp-tools` input, which refuse them. A value of no fixed shape keeps

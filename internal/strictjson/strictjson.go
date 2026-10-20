@@ -11,11 +11,12 @@
 //     unescaping;
 //   - member names matched exactly and case-sensitively (unknown members
 //     are ignored unless the caller uses UnmarshalKnown);
-//   - nesting at most MaxNesting levels, and no number literal longer
-//     than MaxNumber characters.
+//   - nesting at most MaxNesting levels, no number literal longer than
+//     MaxNumber characters, and no exponent (the integer after e or E,
+//     sign included) outside ±MaxExponent by value.
 //
 // encoding/json/v2 does all but the last rule by default; Valid adds the
-// two bounds with jsontext. encoding/json (v1) must not read such input:
+// three bounds with jsontext. encoding/json (v1) must not read such input:
 // it folds case when it matches names to struct fields (so "Method" and
 // "ſ" reach fields named method and s), keeps the last of two repeated
 // names, and replaces invalid UTF-8.
@@ -37,6 +38,9 @@ import (
 const (
 	MaxNesting = 128
 	MaxNumber  = 1000
+	// MaxExponent bounds a number's exponent either way, in every reader
+	// of the dialect, so no reader meets an exponent it cannot hold.
+	MaxExponent = 9999
 )
 
 // Valid says why data is not one JSON value in the dialect, or returns nil.
@@ -128,7 +132,7 @@ type limits struct{ depth, number int }
 
 // scan reads data token by token with jsontext's default options, which
 // check the syntax, the UTF-8, the surrogate escapes and repeated names.
-// It adds the depth and number bounds, and refuses anything after the
+// It adds the depth, number and exponent bounds, and refuses anything after the
 // first value but whitespace.
 func (l limits) scan(data []byte) error {
 	dec := jsontext.NewDecoder(bytes.NewReader(data))
@@ -140,6 +144,9 @@ func (l limits) scan(data []byte) error {
 			}
 			if len(v) > l.number {
 				return fmt.Errorf("a number longer than %d characters", l.number)
+			}
+			if !exponentInBounds(v) {
+				return fmt.Errorf("an exponent outside ±%d", MaxExponent)
 			}
 		} else {
 			tok, err := dec.ReadToken()
@@ -161,4 +168,23 @@ func (l limits) scan(data []byte) error {
 		return err
 	}
 	return nil
+}
+
+// exponentInBounds reports whether the exponent of the number literal v,
+// if it has one, is within ±MaxExponent. Leading zeros do not count, so
+// the bound is on the value.
+func exponentInBounds(v []byte) bool {
+	i := bytes.IndexAny(v, "eE")
+	if i < 0 {
+		return true
+	}
+	digits := bytes.TrimLeft(bytes.TrimLeft(v[i+1:], "+-"), "0")
+	if len(digits) > 4 {
+		return false
+	}
+	n := 0
+	for _, c := range digits {
+		n = n*10 + int(c-'0')
+	}
+	return n <= MaxExponent
 }
