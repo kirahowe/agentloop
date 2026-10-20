@@ -143,9 +143,13 @@ func (s *Server) describe() agentloop.ModelInfo {
 // end of the connection and stops writing too, so a client that only
 // closed its writing half would otherwise never get the cancelled
 // responses of the turns in flight. Ended says when in has ended.
+//
+// Each line of in passes the strict JSON reader before the SDK sees it
+// (see strictInput).
 func (s *Server) Connect(out io.Writer, in io.Reader) (*acp.AgentSideConnection, error) {
-	held := &heldInput{r: in, ended: make(chan struct{}), release: make(chan struct{})}
-	conn, err := acp.NewAgentSideConnectionWithOptions(s, out, held, acp.ConnectionOptions{
+	w := &serialWriter{w: out}
+	held := &heldInput{r: newStrictInput(in, w, s.logf), ended: make(chan struct{}), release: make(chan struct{})}
+	conn, err := acp.NewAgentSideConnectionWithOptions(s, w, held, acp.ConnectionOptions{
 		Logger: slog.New(slog.NewTextHandler(s.cfg.Log, nil)),
 	})
 	if err != nil {
