@@ -1293,18 +1293,25 @@ own, because v1 also matches member names without regard to case: with
 no exact match, `"Method"`, `"ID"` or `"paramſ"` reach the fields named
 `method`, `id` and `params`, and `{"cwd":"a","Cwd":"b"}` reads as cwd
 `b`, where relay and acp-tui see unknown members. So the screen also
-refuses a line with a member name, at any depth, that folds to a name
-the SDK decodes without being spelled exactly as one. Those names come
-from reflection over the SDK's message types, and a test checks them
-against every json tag in the SDK's source. The check goes by name, not
-by position, with one exception: it does not look inside the value of a
-member named exactly `_meta` or `data`. The SDK keeps `_meta` as raw JSON
-and decodes `data` into `any` or a string wherever they appear, so v1
-folds no names there, and a client's `{"_meta":{"Title":"x"}}` passes
-(a test checks those field types in the SDK). Elsewhere a folded name in
-free-form data is still refused, which errs on the safe side. A line that passes both
-reaches the SDK unchanged, and the SDK reads the same members from it
-as the strict reader does. A request that fails, if it has one `id` (a string or a number) and a
+removes every member, at any depth, whose name folds to a name the SDK
+decodes without being spelled exactly as one. To relay and acp-tui such
+a member is unknown and ignored, so once it is gone the SDK reads the
+same members they do, and a line all three accept means the same to all
+three (the shared table's case variants are tested through the screen
+against the method the table expects). Those names come from reflection
+over the SDK's message types, and a test checks them against every json
+tag in the SDK's source. The check goes by name, not by position, with
+one exception: it does not look inside the value of a member named
+exactly `_meta` or `data`. The SDK keeps `_meta` as raw JSON and decodes
+`data` into `any` or a string wherever they appear, so v1 folds no names
+there, and a client's `{"_meta":{"Title":"x"}}` passes whole (a test
+checks those field types in the SDK). Elsewhere a folded name is removed
+even from free-form data the SDK keeps in a map, such as an
+elicitation's content, which agentloop never reads. A line with nothing
+to remove reaches the SDK byte for byte; a line with something removed
+keeps every other member and value as written, and loses only the
+whitespace between tokens. The removal is noted in the log.
+A line that fails the strict reader never reaches the SDK. A request that fails, if it has one `id` (a string or a number) and a
 `method` that can still be read, gets a JSON-RPC parse error (`-32700`)
 for that id. Any other line that fails is dropped and noted in the log,
 a response from the client included: its id is one the agent chose, so

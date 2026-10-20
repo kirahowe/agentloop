@@ -3,7 +3,6 @@ package acpagent
 import (
 	"bytes"
 	"encoding/json/jsontext"
-	"fmt"
 	"reflect"
 	"strings"
 	"unicode"
@@ -21,14 +20,14 @@ import (
 // reader accepts could therefore still mean something else to the SDK.
 //
 // sdkNames closes that gap from the other side: it holds every member
-// name the SDK decodes into a struct field, by its fold. A line with a
-// member name, at any depth, that folds to one of them without being
-// spelled exactly as one of them is refused like a line that fails the
-// strict reader. The check is by name alone, not by where the member
-// sits, so it also refuses such a name as a key of most free-form data
-// (a tool's raw input, say). That is the safe direction: the line is not
-// passed on, so it cannot mean two things. The exception is the value of
-// a member in freeForm, which the SDK never decodes names from.
+// name the SDK decodes into a struct field, by its fold. withoutFolded
+// removes each member, at any depth, whose name folds to one of them
+// without being spelled exactly as one of them, so the SDK ignores it as
+// relay and acp-tui do. The check is by name alone, not by where the
+// member sits, so it also removes such a name as a key of free-form data
+// the SDK keeps in a map (an elicitation's content, say), which agentloop
+// never reads. The exception is the value of a member in freeForm, which
+// the SDK never decodes names from and which is copied as it is.
 var sdkNames = foldedNames(sdkRoots...)
 
 // sdkRoots are the types the SDK decodes from what a client sends: the
@@ -72,8 +71,8 @@ var sdkRoots = []any{
 // struct, wherever it reads them: _meta, kept as raw JSON per key, and
 // data, an error's data or a content block's base64 string, decoded into
 // any. Inside such a value v1 matches no name to a field, so a client may
-// put any names there, "Title" in _meta included, and foldedName does not
-// look. A member spelled otherwise ("_Meta", "Data") is still checked by
+// put any names there, "Title" in _meta included, and withoutFolded leaves
+// them alone. A member spelled otherwise ("_Meta", "Data") is still checked by
 // its name like any other. TestFreeFormNamesAreFreeForm checks the SDK.
 var freeForm = map[string]bool{"_meta": true, "data": true}
 
@@ -156,31 +155,94 @@ func fold(s string) string {
 	return b.String()
 }
 
-// foldedName returns an error naming the first member of line, at any
-// depth, whose name the SDK would match to a field of another spelling.
-// line must already have passed the strict reader.
-func foldedName(line []byte) error {
+// withoutFolded returns line with every member removed, at any depth,
+// whose name the SDK would match to a field of another spelling, and the
+// names it removed. To relay and acp-tui such a member is unknown and
+// ignored, so once it is gone the SDK reads the same members as they do.
+// The value of a member in freeForm is copied as it is. line must already
+// have passed the strict reader. When nothing is removed, line itself
+// comes back, so a line any JSON encoder wrote reaches the SDK byte for
+// byte; otherwise the result keeps every other byte of line except
+// whitespace between tokens.
+func withoutFolded(line []byte) ([]byte, []string) {
+	if !hasFolded(line) {
+		return line, nil
+	}
+	dec := jsontext.NewDecoder(bytes.NewReader(line))
+	var out bytes.Buffer
+	enc := jsontext.NewEncoder(&out, jsontext.PreserveRawStrings(true))
+	var removed []string
+	copyValue := func() bool {
+		v, err := dec.ReadValue()
+		return err == nil && enc.WriteValue(v) == nil
+	}
+	for {
+		kind := dec.PeekKind()
+		if kind == 0 {
+			break
+		}
+		if k, n := dec.StackIndex(dec.StackDepth()); kind == '"' && k == '{' && n%2 == 0 {
+			raw, err := dec.ReadValue()
+			if err != nil {
+				return line, nil // the strict reader has already passed the line
+			}
+			name, err := jsontext.AppendUnquote(nil, raw)
+			if err != nil {
+				return line, nil
+			}
+			switch {
+			case folds(string(name)):
+				removed = append(removed, string(name))
+				if dec.SkipValue() != nil {
+					return line, nil
+				}
+			case freeForm[string(name)]:
+				if enc.WriteValue(raw) != nil || !copyValue() {
+					return line, nil
+				}
+			default:
+				if enc.WriteValue(raw) != nil {
+					return line, nil
+				}
+			}
+			continue
+		}
+		switch kind {
+		case '{', '[', '}', ']':
+			tok, err := dec.ReadToken()
+			if err != nil || enc.WriteToken(tok) != nil {
+				return line, nil
+			}
+		default:
+			if !copyValue() {
+				return line, nil
+			}
+		}
+	}
+	return bytes.TrimRight(out.Bytes(), "\n"), removed
+}
+
+// hasFolded reports whether line has a member withoutFolded would remove.
+func hasFolded(line []byte) bool {
 	dec := jsontext.NewDecoder(bytes.NewReader(line))
 	for {
 		tok, err := dec.ReadToken()
 		if err != nil {
-			return nil // the strict reader has already passed the line
+			return false
 		}
 		if tok.Kind() == '"' {
 			if k, n := dec.StackIndex(dec.StackDepth()); k == '{' && n%2 == 1 {
 				name := tok.String()
 				if folds(name) {
-					return fmt.Errorf("member %q would be read by the ACP SDK as %q", name, sdkNames[fold(name)][0])
+					return true
 				}
-				if freeForm[name] {
-					if dec.SkipValue() != nil {
-						return nil
-					}
+				if freeForm[name] && dec.SkipValue() != nil {
+					return false
 				}
 			}
 		}
 		if dec.StackDepth() == 0 {
-			return nil
+			return false
 		}
 	}
 }
