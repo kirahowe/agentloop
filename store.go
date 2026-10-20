@@ -11,8 +11,6 @@ import (
 	"sync"
 	"time"
 	"unicode"
-
-	"github.com/kirahowe/agentloop/internal/strictjson"
 )
 
 // A Store keeps a session's entries. It is the only thing a session needs
@@ -168,7 +166,7 @@ func (m *MemoryStore) Load() ([]Entry, error) {
 	entries := make([]Entry, 0, len(m.data))
 	for _, b := range m.data {
 		var e Entry
-		if err := strictjson.Unmarshal(b, &e); err != nil {
+		if err := json.Unmarshal(b, &e); err != nil {
 			return nil, err
 		}
 		entries = append(entries, e)
@@ -202,6 +200,13 @@ func NewFileStore(path string) *FileStore { return &FileStore{path: path} }
 // Load reads the file. A final line that is not complete JSON is what a
 // write cut short by a crash leaves, and is ignored. A bad line anywhere
 // else means the log is damaged, and is an error.
+//
+// The log is agentloop's own, written by encoding/json, so it is read
+// with encoding/json and not the strict reader (relay#58 covers JSON
+// another process wrote). Earlier versions logged tool call inputs and
+// provider data with a repeated name or invalid UTF-8 inside, which the
+// strict reader refuses; such a line is complete, so it must neither stop
+// the session from loading nor be cut off as a torn write.
 func (f *FileStore) Load() ([]Entry, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -216,7 +221,7 @@ func (f *FileStore) Load() ([]Entry, error) {
 	var entries []Entry
 	for i, line := range lines {
 		var e Entry
-		if err := strictjson.Unmarshal(line, &e); err != nil {
+		if err := json.Unmarshal(line, &e); err != nil {
 			if i == len(lines)-1 {
 				break
 			}
@@ -315,7 +320,7 @@ func repairTail(path string) error {
 // must agree on this, or a line one ignores as torn the other would keep.
 func isEntryLine(line []byte) bool {
 	var e Entry
-	return strictjson.Unmarshal(line, &e) == nil
+	return json.Unmarshal(line, &e) == nil
 }
 
 func truncateTo(path string, size int64) error {

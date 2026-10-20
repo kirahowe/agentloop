@@ -103,7 +103,7 @@ with `session/request_permission`, and shows the session's labels on
 every tool call.
 
 What agentloop reads from another process (the ACP client, tool
-envelopes, local MCP servers, request and session files) goes through one
+envelopes, local MCP servers, request files) goes through one
 strict JSON reader, the same dialect relay and acp-tui read: valid
 UTF-8, one value, no name given twice, names matched exactly. See
 [Reading JSON](DESIGN.md#reading-json).

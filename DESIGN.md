@@ -552,8 +552,9 @@ new session.
 
 Every entry goes through JSON before the session applies it, so the live
 state and the state rebuilt from the same log are always equal, and a
-session shares no memory with its callers. Entries read back from a store
-go through the strict reader (see Reading JSON), as does that round trip.
+session shares no memory with its callers. Both that round trip and
+reading entries back from a store use `encoding/json`, not the strict
+reader: the log is agentloop's own (see The loop).
 
 ### Reading JSON
 
@@ -581,8 +582,7 @@ name to a struct field (`ſ` reaches a field named `s`), takes one of two
 repeated names, and replaces invalid UTF-8. agentloop's own code does not
 use it to read what another process wrote. The strict reader covers the ACP
 client's lines (see The command), tool envelopes, request files,
-`mcp-tools` input, MCP servers' stdio messages, session logs read back,
-tool call input where agentloop reads a field of it (the reader's inner
+`mcp-tools` input, MCP servers' stdio messages, tool call input where agentloop reads a field of it (the reader's inner
 tool, the workbench's task, consent rules), and the canonical JSON that
 digests are taken of. The table of hostile lines that all three
 components test against is `testdata/strict-json/cases.jsonl`.
@@ -667,7 +667,13 @@ recorded: the run ends with `model_error`, kind `invalid_request`. So is
 a response whose tool call input, or the provider's record of the turn,
 is not JSON in the strict dialect (a name given twice, invalid UTF-8),
 nests deeper than 64 levels or has a number longer than 100 characters:
-every line agentloop writes must read back by the strict reader.
+relay reads the session log with its strict reader, so every line
+agentloop writes there must pass it. agentloop reads its own log back
+with `encoding/json`. Logs written before relay#58 can
+hold a complete line with a repeated name or invalid UTF-8 inside a tool
+call's input or the provider's data. Such a line still loads, and an
+append never cuts it off as a torn write: only a line that fails
+`encoding/json` counts as torn.
 
 A call refused because the run reached `MaxToolCalls` keeps the labels its
 decision added, though it never ran. Labels err toward caution.

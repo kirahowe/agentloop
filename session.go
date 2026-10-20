@@ -8,8 +8,6 @@ import (
 	"sort"
 	"sync"
 	"time"
-
-	"github.com/kirahowe/agentloop/internal/strictjson"
 )
 
 // A Session is a conversation and everything decided in it. It is the
@@ -374,7 +372,7 @@ func normalize(e Entry) (Entry, error) {
 		return Entry{}, err
 	}
 	var out Entry
-	if err := strictjson.Unmarshal(b, &out); err != nil {
+	if err := json.Unmarshal(b, &out); err != nil { // as FileStore.Load reads it
 		return Entry{}, err
 	}
 	return out, nil

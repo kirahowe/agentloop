@@ -2,6 +2,7 @@ package agentloop_test
 
 import (
 	"bytes"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -218,5 +219,74 @@ func TestMemoryStoreCopiesEntries(t *testing.T) {
 	again, _ := m.Load()
 	if again[0].RunStarted.Prompt != "one" {
 		t.Fatal("Load hands out the store's own entries")
+	}
+}
+
+// Earlier versions logged tool call inputs and provider data that the
+// strict reader refuses: a name given twice (Bounded did not check) and,
+// through encoding/json's RawMessage, invalid UTF-8. Such a line is
+// complete, so it loads wherever it is, and an append after it keeps it
+// rather than cutting it off as a torn write (relay#58 review).
+func TestFileStoreKeepsOldNonStrictLines(t *testing.T) {
+	entries := sampleEntries(t)
+	msg := -1
+	for i, e := range entries {
+		if e.Message != nil {
+			msg = i
+			break
+		}
+	}
+	if msg < 0 {
+		t.Fatal("no message entry in the sample")
+	}
+	oldLine := func(data string) []byte {
+		e := entries[msg]
+		m := *e.Message
+		m.Message.Native = &agentloop.Native{Provider: "p", Model: "m", Data: json.RawMessage(data)}
+		e.Message = &m
+		b, err := json.Marshal(e) // as the old Append wrote it
+		if err != nil {
+			t.Fatal(err)
+		}
+		return b
+	}
+	lines := map[string][]byte{
+		"repeated name": oldLine(`{"a":1,"a":2}`),
+		"invalid UTF-8": oldLine("{\"s\":\"a\xffb\"}"),
+	}
+	for name, bad := range lines {
+		for _, last := range []bool{false, true} {
+			path := filepath.Join(t.TempDir(), "s.jsonl")
+			var raw []byte
+			for i, e := range entries[:4] {
+				if i == msg && !last {
+					raw = append(append(raw, bad...), '\n')
+					continue
+				}
+				b, _ := json.Marshal(e)
+				raw = append(append(raw, b...), '\n')
+			}
+			if last {
+				raw = append(append(raw, bad...), '\n')
+			}
+			if err := os.WriteFile(path, raw, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			want := bytes.Count(raw, []byte("\n"))
+			got, err := agentloop.NewFileStore(path).Load()
+			if err != nil || len(got) != want {
+				t.Fatalf("%s, last %v: %d entries of %d, %v", name, last, len(got), want, err)
+			}
+			if err := agentloop.NewFileStore(path).Append(entries[5]); err != nil {
+				t.Fatal(err)
+			}
+			after, _ := os.ReadFile(path)
+			if !bytes.HasPrefix(after, raw) {
+				t.Fatalf("%s, last %v: the append changed the lines before it", name, last)
+			}
+			if got, err := agentloop.NewFileStore(path).Load(); err != nil || len(got) != want+1 {
+				t.Fatalf("%s, last %v: %d entries after append, %v", name, last, len(got), err)
+			}
+		}
 	}
 }

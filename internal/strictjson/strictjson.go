@@ -1,6 +1,6 @@
 // Package strictjson is how agentloop reads JSON that another process
-// wrote: the ACP client's messages, tool envelopes, MCP traffic, request
-// files and the session files it reads back. relay and acp-tui read the
+// wrote: the ACP client's messages, tool envelopes, MCP traffic and
+// request files. relay and acp-tui read the
 // same dialect (relay#58), so a message means one thing to all three or
 // is refused by all three:
 //
@@ -120,8 +120,8 @@ func Input(data []byte) error {
 }
 
 // Bounded checks what a provider returned for a turn the same way as
-// Input: it is written to the session log, and the log must read back by
-// the dialect.
+// Input: it is written to the session log, which relay reads with its
+// strict reader.
 func Bounded(data []byte) error { return Input(data) }
 
 type limits struct{ depth, number int }
