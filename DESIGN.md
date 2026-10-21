@@ -586,7 +586,8 @@ client's lines (see The command), tool envelopes, request files,
 `mcp-tools` input, MCP servers' stdio messages, tool call input where agentloop reads a field of it (the reader's inner
 tool, the workbench's task, consent rules), and the canonical JSON that
 digests are taken of. The table of hostile lines that all three
-components test against is `testdata/strict-json/cases.jsonl`.
+components test against is `testdata/strict-json/cases.jsonl`, a copy
+of the one in relay's `testdata/strict-json`, which is the source.
 
 Provider responses are read by the providers' SDKs, which keep their
 own decoders: relay's threat model trusts the provider. What a provider
