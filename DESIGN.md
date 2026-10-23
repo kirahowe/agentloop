@@ -558,7 +558,7 @@ reader: the log is agentloop's own (see The loop).
 
 ### Reading JSON
 
-relay, agentloop and acp-tui read every message one of them gets from
+relay, agentloop and relay-tui read every message one of them gets from
 another by the same rules, so a message means the same thing to all
 three or none of them takes it (relay#58). In agentloop that reader is
 `internal/strictjson`, built on `encoding/json/v2`. It accepts:
@@ -1236,7 +1236,7 @@ and `session/resume` response carries the model as ACP's session config
 option in the `model` category: a select with id `model` whose only
 value, and current value, is the request's model id, named by the
 provider's display name (or the id when there is none). A client such as
-acp-tui can show it. `session/set_config_option` that sets the model to
+relay-tui can show it. `session/set_config_option` that sets the model to
 itself answers the options unchanged. Anything else, including switching
 to another model, is refused with `-32602`. The model is fixed by the
 request. Only JSON-RPC goes to
@@ -1294,9 +1294,9 @@ with `encoding/json` v1. Passing the strict reader is not enough on its
 own, because v1 also matches member names without regard to case: with
 no exact match, `"Method"`, `"ID"` or `"paramſ"` reach the fields named
 `method`, `id` and `params`, and `{"cwd":"a","Cwd":"b"}` reads as cwd
-`b`, where relay and acp-tui see unknown members. So the screen also
+`b`, where relay and relay-tui see unknown members. So the screen also
 removes every member, at any depth, whose name folds to a name the SDK
-decodes without being spelled exactly as one. To relay and acp-tui such
+decodes without being spelled exactly as one. To relay and relay-tui such
 a member is unknown and ignored, so once it is gone the SDK reads the
 same members they do, and a line all three accept means the same to all
 three (the shared table's case variants are tested through the screen

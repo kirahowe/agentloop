@@ -1,6 +1,6 @@
 // Package strictjson is how agentloop reads JSON that another process
 // wrote: the ACP client's messages, tool envelopes, MCP traffic and
-// request files. relay and acp-tui read the
+// request files. relay and relay-tui read the
 // same dialect (relay#58), so a message means one thing to all three or
 // is refused by all three:
 //

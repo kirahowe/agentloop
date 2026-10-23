@@ -24,9 +24,9 @@ var errLineTooLong = fmt.Errorf("a line from the client is longer than %d bytes"
 // strictInput screens each line the client writes before the SDK reads
 // it. The SDK decodes with encoding/json (v1), which matches member names
 // without regard to case and keeps one of two repeated names, so a line
-// relay or acp-tui read one way could mean another here. Every line must
+// relay or relay-tui read one way could mean another here. Every line must
 // be one JSON object in the strict dialect of internal/strictjson, the
-// one relay and acp-tui read (relay#58). A member whose name the SDK
+// one relay and relay-tui read (relay#58). A member whose name the SDK
 // would fold onto a field spelled otherwise (see sdkNames) is unknown to
 // that dialect, so it is removed before the SDK sees the line, and the
 // SDK reads the same members as the strict reader. Any other line that

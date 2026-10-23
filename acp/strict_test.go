@@ -31,7 +31,7 @@ func screened(t tb, in []byte) (sdk, answers []byte, err error) {
 	return sdk, out.Bytes(), err
 }
 
-// Every line of the shared table that relay and acp-tui accept reaches
+// Every line of the shared table that relay and relay-tui accept reaches
 // the SDK, and the SDK reads the method the table expects from it: the
 // table's case variants ("Method", "paramſ") arrive without the folded
 // member, which the dialect ignores and v1 would have read. A line with
@@ -120,7 +120,7 @@ func TestStrictInputAnswersRequests(t *testing.T) {
 
 // A member whose name v1 would fold onto an SDK field is removed, at any
 // depth, and the rest of the line reaches the SDK with its values as
-// written. To relay and acp-tui such a member is unknown, so after the
+// written. To relay and relay-tui such a member is unknown, so after the
 // removal the SDK reads what they read.
 func TestStrictInputRemovesFoldedNames(t *testing.T) {
 	cases := []struct{ name, line, want string }{
@@ -268,7 +268,7 @@ func TestSDKNamesCoverTheSDK(t *testing.T) {
 }
 
 // Through the server: a folded name is read as an unknown member, as
-// relay and acp-tui read it, whether it is the method, the id or a
+// relay and relay-tui read it, whether it is the method, the id or a
 // parameter, and the shared table's lines are never refused.
 func TestServerIgnoresFoldedNames(t *testing.T) {
 	h := serve(t, textAgent(), Options{}, false)

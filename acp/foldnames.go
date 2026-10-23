@@ -15,7 +15,7 @@ import (
 // matches a member name to a struct field without regard to case: when
 // no field has the exact name, "Method", "METHOD" and "paramſ" reach the
 // fields named method and params, and {"cwd":"a","Cwd":"b"} reads as cwd
-// "b". The strict dialect matches names exactly, so to relay and acp-tui
+// "b". The strict dialect matches names exactly, so to relay and relay-tui
 // those members are unknown and ignored (relay#58). A line the strict
 // reader accepts could therefore still mean something else to the SDK.
 //
@@ -23,7 +23,7 @@ import (
 // name the SDK decodes into a struct field, by its fold. withoutFolded
 // removes each member, at any depth, whose name folds to one of them
 // without being spelled exactly as one of them, so the SDK ignores it as
-// relay and acp-tui do. The check is by name alone, not by where the
+// relay and relay-tui do. The check is by name alone, not by where the
 // member sits, so it also removes such a name as a key of free-form data
 // the SDK keeps in a map (an elicitation's content, say), which agentloop
 // never reads. The exception is the value of a member in freeForm, which
@@ -157,7 +157,7 @@ func fold(s string) string {
 
 // withoutFolded returns line with every member removed, at any depth,
 // whose name the SDK would match to a field of another spelling, and the
-// names it removed. To relay and acp-tui such a member is unknown and
+// names it removed. To relay and relay-tui such a member is unknown and
 // ignored, so once it is gone the SDK reads the same members as they do.
 // The value of a member in freeForm is copied as it is. line must already
 // have passed the strict reader. When nothing is removed, line itself

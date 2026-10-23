@@ -1,5 +1,5 @@
 // Package stricttest loads the table of lines that relay, agentloop and
-// acp-tui must read alike (relay#58), from testdata/strict-json/cases.jsonl.
+// relay-tui must read alike (relay#58), from testdata/strict-json/cases.jsonl.
 // The file is a byte-identical copy of the shared table; change the
 // table there and copy it to all three repos.
 package stricttest

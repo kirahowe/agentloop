@@ -16,7 +16,7 @@ import (
 	"pgregory.net/rapid"
 )
 
-// Every line of the shared table is read as relay and acp-tui read it.
+// Every line of the shared table is read as relay and relay-tui read it.
 func TestCases(t *testing.T) {
 	for _, c := range stricttest.Cases(t) {
 		t.Run(c.Name, func(t *testing.T) {
