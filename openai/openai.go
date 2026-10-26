@@ -26,6 +26,7 @@ import (
 	"github.com/openai/openai-go/v3/shared"
 
 	"github.com/kirahowe/agentloop"
+	"github.com/kirahowe/agentloop/internal/httpclient"
 )
 
 // Provider is the name recorded in Native.Provider.
@@ -35,7 +36,8 @@ const Provider = "openai"
 type Config struct {
 	APIKey  string
 	BaseURL string // default https://api.openai.com/v1
-	// HTTPClient is used for requests. Nil means http.DefaultClient.
+	// HTTPClient is used for requests. Nil means a client that ignores the
+	// proxy environment variables.
 	HTTPClient *http.Client
 	// DefaultMaxTokens caps a response when the request sets no cap.
 	// Zero leaves the cap to the API.
@@ -65,7 +67,7 @@ func New(cfg Config) *Model {
 	}
 	hc := cfg.HTTPClient
 	if hc == nil {
-		hc = http.DefaultClient
+		hc = httpclient.New()
 	}
 	opts := []option.RequestOption{
 		option.WithBaseURL(base),

@@ -21,6 +21,7 @@ import (
 	"github.com/anthropics/anthropic-sdk-go/shared/constant"
 
 	"github.com/kirahowe/agentloop"
+	"github.com/kirahowe/agentloop/internal/httpclient"
 )
 
 // Provider is the name recorded in Native.Provider.
@@ -33,7 +34,8 @@ const fallbackMaxTokens = 64000
 type Config struct {
 	APIKey  string
 	BaseURL string
-	// HTTPClient is used for every request. Nil means http.DefaultClient.
+	// HTTPClient is used for every request. Nil means a client that ignores the
+	// proxy environment variables.
 	HTTPClient *http.Client
 	// RefusalFallback asks the API to retry a refused request on its
 	// default fallback model.
@@ -58,7 +60,7 @@ var (
 func New(cfg Config) *Model {
 	hc := cfg.HTTPClient
 	if hc == nil {
-		hc = http.DefaultClient
+		hc = httpclient.New()
 	}
 	opts := []option.RequestOption{
 		option.WithoutEnvironmentDefaults(),
