@@ -11,7 +11,7 @@ import (
 )
 
 var allReasons = []agentloop.Reason{
-	agentloop.ReasonCompleted, agentloop.ReasonMaxTokens, agentloop.ReasonRefused, agentloop.ReasonHeld,
+	agentloop.ReasonCompleted, agentloop.ReasonMaxTokens, agentloop.ReasonRefused,
 	agentloop.ReasonLimit, agentloop.ReasonModelError, agentloop.ReasonCanceled, agentloop.ReasonForbidden, "", "exploded",
 }
 
@@ -39,16 +39,13 @@ func genOutcome(t *rapid.T) *agentloop.Outcome {
 			out.Error.ResetsAt = time.Date(2026, 10, 15, 10, 0, 0, 0, time.FixedZone("x", 3600))
 		}
 	}
-	if rapid.Bool().Draw(t, "hasheld") {
-		out.Held = []agentloop.HeldCall{{ToolCall: agentloop.ToolCall{ID: "c1", Name: "echo"}}}
-	}
 	return out
 }
 
 // TestPropertyStopMapping is P1.5: every outcome gives exactly one of a
 // stop reason or an error, as the table in Respond says, and the stop
-// reason validates as a PromptResponse. model_error and held never give a
-// stop reason.
+// reason validates as a PromptResponse. model_error never gives a stop
+// reason.
 func TestPropertyStopMapping(t *testing.T) {
 	rapid.Check(t, func(t *rapid.T) {
 		out := genOutcome(t)
@@ -84,7 +81,7 @@ func TestPropertyStopMapping(t *testing.T) {
 			if stop != w {
 				t.Fatalf("limit %q gave %q, want %q", out.Limit, stop, w)
 			}
-		case agentloop.ReasonModelError, agentloop.ReasonHeld, agentloop.ReasonForbidden, "", "exploded":
+		case agentloop.ReasonModelError, agentloop.ReasonForbidden, "", "exploded":
 			if err == nil {
 				t.Fatalf("%q gave the stop reason %q", out.Reason, stop)
 			}
@@ -111,17 +108,11 @@ func TestRespondModelErrorData(t *testing.T) {
 	}
 }
 
-// A held run is an error naming the held calls: the client cannot decide
-// them, and the prompt may not even have been recorded.
-func TestRespondHeldIsAnError(t *testing.T) {
-	stop, err := Respond(&agentloop.Outcome{Reason: agentloop.ReasonHeld, Held: []agentloop.HeldCall{
-		{ToolCall: agentloop.ToolCall{ID: "c1", Name: "rm"}}, {ToolCall: agentloop.ToolCall{ID: "c2", Name: "curl"}},
-	}})
-	if stop != "" || err == nil || err.Code != -32603 {
+// The reason "held" no longer exists: an outcome carrying it is an error
+// like any other unknown reason.
+func TestRespondHeldIsUnknown(t *testing.T) {
+	stop, err := Respond(&agentloop.Outcome{Reason: "held"})
+	if stop != "" || err == nil || err.Code != -32603 || err.Data.(map[string]any)["reason"] != "held" {
 		t.Fatalf("got %q, %v", stop, err)
-	}
-	held := err.Data.(map[string]any)["held"].([]map[string]any)
-	if len(held) != 2 || held[0]["toolCallId"] != "c1" || held[1]["name"] != "curl" {
-		t.Fatalf("held %+v", held)
 	}
 }

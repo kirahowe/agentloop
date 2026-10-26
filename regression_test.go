@@ -148,11 +148,8 @@ func TestConcurrentRunIsRefused(t *testing.T) {
 	if got := len(s.Entries()); got != before {
 		t.Fatalf("the refused Run wrote %d entries", got-before)
 	}
-	// Reading and resolving stay available meanwhile.
+	// Reading stays available meanwhile.
 	s.Messages()
-	if err := s.Resolve("a", agentloop.Decision{Verdict: agentloop.Allow}); err == nil {
-		t.Fatal("resolved a call that is not held")
-	}
 	close(release)
 	if err := <-done; err != nil {
 		t.Fatal(err)
@@ -257,13 +254,13 @@ func TestMessageEntryCannotHoldResults(t *testing.T) {
 	}
 }
 
-// TestPropertyHolds is property 11. A held call waits; resolving it
-// allows or denies exactly that call; the next run carries it out once;
-// resolving anything else is an error that writes nothing.
-func TestPropertyHolds(t *testing.T) {
+// TestPropertyVerdicts: for any mix of allow and deny verdicts, an allowed
+// call runs exactly once, a denied one never runs, every call is decided
+// once and answered in place, and the verdict is what the model reads.
+func TestPropertyVerdicts(t *testing.T) {
 	rapid.Check(t, func(t *rapid.T) {
 		n := rapid.IntRange(1, 5).Draw(t, "calls")
-		verdicts := rapid.SliceOfN(rapid.SampledFrom([]agentloop.Verdict{agentloop.Allow, agentloop.Hold, agentloop.Hold, agentloop.Deny}), n, n).Draw(t, "verdicts")
+		verdicts := rapid.SliceOfN(rapid.SampledFrom([]agentloop.Verdict{agentloop.Allow, agentloop.Deny}), n, n).Draw(t, "verdicts")
 		var calls []agentloop.ToolCall
 		byText := map[string]agentloop.Verdict{}
 		for i := range verdicts {
@@ -285,139 +282,28 @@ func TestPropertyHolds(t *testing.T) {
 		store := agentloop.NewMemoryStore()
 		s := openRapid(t, store)
 		out := runRapid(t, a, s, "go")
-		var wantHeld []string
-		for i, v := range verdicts {
-			if v == agentloop.Hold {
-				wantHeld = append(wantHeld, calls[i].ID)
-			}
+		if out.Reason != agentloop.ReasonCompleted {
+			t.Fatalf("outcome %+v", out)
 		}
-		if len(wantHeld) == 0 {
-			if out.Reason != agentloop.ReasonCompleted {
-				t.Fatalf("nothing held but %s", out.Reason)
-			}
-			return
-		}
-		if out.Reason != agentloop.ReasonHeld || !reflect.DeepEqual(ids(out.Held), wantHeld) {
-			t.Fatalf("outcome %+v, want held %v", out, wantHeld)
-		}
-		// A person decides on some of them. Nothing else may resolve.
-		resolved := map[string]agentloop.Verdict{}
-		for _, id := range wantHeld {
-			choice := rapid.SampledFrom([]string{"allow", "deny", "leave"}).Draw(t, "choice")
-			if choice == "leave" {
-				continue
-			}
-			before := len(s.Entries())
-			if err := s.Resolve(id, agentloop.Decision{Verdict: agentloop.Hold}); err == nil {
-				t.Fatal("resolved with hold")
-			}
-			if err := s.Resolve(id, agentloop.Decision{Verdict: "maybe"}); err == nil {
-				t.Fatal("resolved with a made-up verdict")
-			}
-			if len(s.Entries()) != before {
-				t.Fatal("a refused Resolve wrote an entry")
-			}
-			v := agentloop.Allow
-			if choice == "deny" {
-				v = agentloop.Deny
-			}
-			if err := s.Resolve(id, agentloop.Decision{Verdict: v, Reason: "person " + id}); err != nil {
-				t.Fatal(err)
-			}
-			resolved[id] = v
-			if err := s.Resolve(id, agentloop.Decision{Verdict: v}); err == nil {
-				t.Fatal("resolved twice")
-			}
-		}
-		for i, v := range verdicts {
-			id := calls[i].ID
-			if v != agentloop.Hold {
-				before := len(s.Entries())
-				if err := s.Resolve(id, agentloop.Decision{Verdict: agentloop.Allow}); err == nil {
-					t.Fatalf("resolved %s, which is %s, not held", id, v)
-				}
-				if len(s.Entries()) != before {
-					t.Fatal("a refused Resolve wrote an entry")
-				}
-			}
-		}
-		if err := s.Resolve("nope", agentloop.Decision{Verdict: agentloop.Allow}); err == nil {
-			t.Fatal("resolved an unknown call")
-		}
-
-		// Resume from what was stored.
-		s = openRapid(t, store)
-		out = runRapid(t, a, s, "")
-		var stillHeld []string
-		for _, id := range wantHeld {
-			if _, ok := resolved[id]; !ok {
-				stillHeld = append(stillHeld, id)
-			}
-		}
-		if len(stillHeld) > 0 {
-			if out.Reason != agentloop.ReasonHeld || !reflect.DeepEqual(ids(out.Held), stillHeld) {
-				t.Fatalf("outcome %+v, want held %v", out, stillHeld)
-			}
-		} else if out.Reason != agentloop.ReasonCompleted {
-			t.Fatalf("all resolved but %s", out.Reason)
-		}
+		res := resultsOf(s.Messages())
 		for i, v := range verdicts {
 			id, text := calls[i].ID, fmt.Sprintf("t%d", i)
-			info, _ := s.Call(id)
-			ran := c.count(text)
-			switch {
-			case v == agentloop.Allow:
-				if ran != 1 || !info.Finished || info.Result.IsError {
-					t.Fatalf("%s: allowed, ran %d, %+v", id, ran, info)
-				}
-			case v == agentloop.Deny:
-				if ran != 0 || info.Result == nil || info.Result.Content != "policy "+id {
-					t.Fatalf("%s: denied, ran %d, %+v", id, ran, info)
-				}
-			case resolved[id] == agentloop.Allow:
-				if ran != 1 || !info.Finished || info.Result.Content != "echo: "+text {
-					t.Fatalf("%s: resolved allow, ran %d, %+v", id, ran, info)
-				}
-			case resolved[id] == agentloop.Deny:
-				if ran != 0 || info.Result == nil || info.Result.Content != "person "+id || !info.Result.IsError {
-					t.Fatalf("%s: resolved deny, ran %d, %+v", id, ran, info)
-				}
-			default:
-				if ran != 0 || info.Finished || !info.Held() {
-					t.Fatalf("%s: still held, ran %d, %+v", id, ran, info)
-				}
-			}
 			if asked[id] != 1 {
 				t.Fatalf("the policy was asked about %s %d times", id, asked[id])
 			}
-		}
-		// Finally approve the rest; each runs once, and the model finishes.
-		for _, id := range stillHeld {
-			if err := s.Resolve(id, agentloop.Decision{Verdict: agentloop.Allow}); err != nil {
-				t.Fatal(err)
-			}
-		}
-		if len(stillHeld) > 0 {
-			out = runRapid(t, a, openRapid(t, store), "")
-			if out.Reason != agentloop.ReasonCompleted {
-				t.Fatalf("%+v", out)
-			}
-			for i, v := range verdicts {
-				if v == agentloop.Hold && resolved[calls[i].ID] != agentloop.Deny && c.count(fmt.Sprintf("t%d", i)) != 1 {
-					t.Fatalf("call %d ran %d times", i, c.count(fmt.Sprintf("t%d", i)))
+			switch v {
+			case agentloop.Allow:
+				if c.count(text) != 1 || res[id].IsError {
+					t.Fatalf("allowed call %s ran %d times, result %+v", id, c.count(text), res[id])
+				}
+			case agentloop.Deny:
+				if c.count(text) != 0 || !res[id].IsError || res[id].Content != "policy "+id {
+					t.Fatalf("denied call %s ran %d times, result %+v", id, c.count(text), res[id])
 				}
 			}
 		}
 		checkRequestShape(t, openRapid(t, store).Messages())
 	})
-}
-
-func ids(calls []agentloop.HeldCall) []string {
-	var out []string
-	for _, c := range calls {
-		out = append(out, c.ID)
-	}
-	return out
 }
 
 func openRapid(t *rapid.T, store agentloop.Store) *agentloop.Session {

@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"slices"
 	"time"
 
 	"github.com/kirahowe/agentloop/internal/strictjson"
@@ -96,8 +95,6 @@ const (
 	ReasonMaxTokens Reason = "max_tokens"
 	// ReasonRefused: the model declined to answer.
 	ReasonRefused Reason = "refused"
-	// ReasonHeld: calls wait for a person; see Outcome.Held.
-	ReasonHeld Reason = "held"
 	// ReasonLimit: a Limits field was reached; see Outcome.Limit.
 	ReasonLimit Reason = "limit"
 	// ReasonModelError: the model call failed for good; see Outcome.Error.
@@ -131,11 +128,7 @@ type Outcome struct {
 	// Text is the last assistant text.
 	Text  string      `json:"text,omitempty"`
 	Error *ModelError `json:"error,omitempty"`
-	Held  []HeldCall  `json:"held,omitempty"`
-	// LabelSources, for held, says which entry first gave the session
-	// each of its labels, so whoever decides can see why it holds them.
-	LabelSources map[string]LabelSource `json:"label_sources,omitempty"`
-	Limit        string                 `json:"limit,omitempty"`
+	Limit string      `json:"limit,omitempty"`
 	// Forbidden, for forbidden, is the labels the session held or would
 	// have started with that Agent.Forbid names.
 	Forbidden []string `json:"forbidden,omitempty"`
@@ -145,28 +138,6 @@ type Outcome struct {
 	// Turns and Usage count this run only.
 	Turns int   `json:"turns"`
 	Usage Usage `json:"usage"`
-}
-
-// A HeldCall is a call waiting for a person, with the digest of its input
-// that a resolution must name (see Agent.Resolve). For a tool whose
-// arguments the operator narrowed (Narrowed), EffectiveInput is the input
-// the call would run on, the model's with FixedArgs added, FixedArgs is
-// the arguments the operator set, and the digest is of EffectiveInput.
-type HeldCall struct {
-	ToolCall
-	InputSHA256    string                     `json:"input_sha256"`
-	EffectiveInput json.RawMessage            `json:"effective_input,omitempty"`
-	FixedArgs      map[string]json.RawMessage `json:"fixed_args,omitempty"`
-}
-
-// HeldCallOf is call as a person is asked about it.
-func HeldCallOf(tools []Tool, call ToolCall) HeldCall {
-	in, fixed := EffectiveInput(tools, call)
-	h := HeldCall{ToolCall: call, InputSHA256: InputDigest(in), FixedArgs: fixed}
-	if len(fixed) > 0 {
-		h.EffectiveInput = in
-	}
-	return h
 }
 
 // A Refusal is one tool result the session was not given, because it
@@ -184,8 +155,8 @@ type Event struct {
 	Delta *Delta
 }
 
-// Run carries the session forward until the model is done, something
-// needs a person, or something stops it. It first settles the calls an
+// Run carries the session forward until the model is done or something
+// stops it. It first settles the calls an
 // earlier run left open, so it resumes a session from any point. A
 // non-empty prompt is added as a user message once those are settled.
 //
@@ -343,7 +314,7 @@ func (r *runner) drive(ctx context.Context, prompt string) (*Outcome, error) {
 
 // settleCutOff answers the calls of a turn that ended without tool_use
 // before the run ends, so the session is a conversation a model can take
-// whenever no call is held. Nothing runs: settle gives each open call of
+// whenever no call is open. Nothing runs: settle gives each open call of
 // such a turn its cut-off result without consulting the policy or the tools.
 func (r *runner) settleCutOff(ctx context.Context) error {
 	_, err := r.settle(ctx)
@@ -548,21 +519,6 @@ func (r *runner) settleAndCheck(ctx context.Context) (*Outcome, error) {
 	switch {
 	case res.canceled:
 		return r.outcome(ReasonCanceled), nil
-	case len(res.held) > 0:
-		out := r.outcome(ReasonHeld)
-		for _, c := range res.held {
-			h := HeldCallOf(r.a.Tools, c)
-			// A call held in an earlier run keeps the digest its hold
-			// recorded: a resolution must name it. If the operator's
-			// settings changed since, an allow becomes a deny
-			// (ErrSettingsChanged), and a deny still goes through.
-			if info, ok := r.s.Call(c.ID); ok && info.HoldSHA256 != "" {
-				h.InputSHA256 = info.HoldSHA256
-			}
-			out.Held = append(out.Held, h)
-		}
-		out.LabelSources = r.s.LabelSources()
-		return out, nil
 	case res.limit != "":
 		out := r.outcome(ReasonLimit)
 		out.Limit = res.limit
@@ -573,7 +529,6 @@ func (r *runner) settleAndCheck(ctx context.Context) (*Outcome, error) {
 
 type settled struct {
 	canceled bool
-	held     []ToolCall
 	// limit names the limit that refused a call, if one did.
 	limit string
 }
@@ -584,7 +539,7 @@ type settled struct {
 const stoppedWhileRunning = "The run stopped while this call was running, so it may or may not have taken effect. It was not run again."
 
 // settle gives every open call of the last assistant turn a result, or
-// leaves it held. See DESIGN.md for the rules.
+// See DESIGN.md for the rules.
 func (r *runner) settle(ctx context.Context) (settled, error) {
 	var res settled
 	turn, ok := r.s.lastTurn()
@@ -617,9 +572,8 @@ func (r *runner) settle(ctx context.Context) (settled, error) {
 		}
 		// An allow a policy gave in an earlier run, to a call that never
 		// started, is stale: the session may have learned more since. It
-		// is decided again. A person's allow stands.
-		stale := info.Decision != nil && info.Decision.Verdict == Allow && !info.Resolved
-		if info.Decision == nil || stale {
+		// is decided again.
+		if info.Decision == nil || info.Decision.Verdict == Allow {
 			d := r.decide(ctx, info.Call)
 			if err := r.recordDecision(info.Call, d); err != nil {
 				return res, err
@@ -627,18 +581,7 @@ func (r *runner) settle(ctx context.Context) (settled, error) {
 			info, _ = r.s.Call(id)
 		}
 		switch info.Decision.Verdict {
-		case Hold:
-			res.held = append(res.held, info.Call)
 		case Allow:
-			// A person's allow is bound to the input the call would run
-			// on then. If the operator's settings for the tool changed
-			// since, it would run on other input, so it does not run.
-			if info.Resolved && info.ApprovedSHA256 != "" && HeldCallOf(r.a.Tools, info.Call).InputSHA256 != info.ApprovedSHA256 {
-				if err := r.finish(id, ToolResult{Content: SettingsChanged, IsError: true}, nil, ""); err != nil {
-					return res, err
-				}
-				continue
-			}
 			if max := r.a.Limits.MaxToolCalls; max > 0 && r.toolCalls >= max {
 				msg := "This call was not run: the limit on tool calls was reached."
 				if err := r.finish(id, ToolResult{Content: msg, IsError: true}, nil, ""); err != nil {
@@ -647,8 +590,8 @@ func (r *runner) settle(ctx context.Context) (settled, error) {
 				res.limit = LimitToolCalls
 				continue
 			}
-			// A tool that calls a model (a quarantined reader) spends
-			// tokens, so the token limit is checked between calls too.
+			// A tool that calls a model spends tokens, so the token limit is
+			// checked between calls too.
 			if max := r.a.Limits.MaxTokens; max > 0 && r.usage.Total() >= max {
 				msg := "This call was not run: the limit on tokens was reached."
 				if err := r.finish(id, ToolResult{Content: msg, IsError: true}, nil, ""); err != nil {
@@ -657,7 +600,7 @@ func (r *runner) settle(ctx context.Context) (settled, error) {
 				res.limit = LimitTokens
 				continue
 			}
-			canceled, err := r.execute(ctx, info.Call, info.Decision.Deferred)
+			canceled, err := r.execute(ctx, info.Call)
 			if err != nil {
 				return res, err
 			}
@@ -687,38 +630,23 @@ func (r *runner) decide(ctx context.Context, call ToolCall) Decision {
 	if r.a.Policy == nil {
 		return Decision{Verdict: Allow}
 	}
-	// The policy sees the input the call would run on, so a consent rule
-	// on an argument the operator fixed applies, and a call cannot dodge
-	// one by leaving that argument out.
-	call.Input, _ = EffectiveInput(r.a.Tools, call)
 	d := r.a.Policy.Decide(ctx, call, r.s.View())
 	switch d.Verdict {
 	case Allow:
 		// Whatever the policy says, an allow may not give the session a
 		// label it may not hold, now or with the result.
-		if len(Forbidden(append(slices.Clone(d.Labels), d.Deferred...), r.a.Forbid)) > 0 {
+		if len(Forbidden(d.Labels, r.a.Forbid)) > 0 {
 			return Decision{Verdict: Deny, Reason: ForbiddenDecision}
 		}
 		return d
-	case Deny, Hold:
+	case Deny:
 		return d
 	}
 	return Decision{Verdict: Deny, Reason: fmt.Sprintf("The policy gave no usable verdict (%q).", d.Verdict)}
 }
 
 func (r *runner) recordDecision(call ToolCall, d Decision) error {
-	e := &DecisionEntry{CallID: call.ID, Tool: call.Name, Verdict: d.Verdict, Reason: d.Reason, Labels: d.Labels, Deferred: d.Deferred, Consent: d.Consent}
-	if d.Verdict != Allow {
-		e.Consent = nil
-		// Deferred labels go with an allow only.
-		e.Deferred = nil
-	}
-	if d.Verdict == Hold {
-		// A hold adds nothing: its labels are asked for again when a
-		// person allows the call.
-		e.Labels = nil
-		e.InputSHA256 = HeldCallOf(r.a.Tools, call).InputSHA256
-	}
+	e := &DecisionEntry{CallID: call.ID, Tool: call.Name, Verdict: d.Verdict, Reason: d.Reason, Labels: d.Labels}
 	return r.record(Entry{Type: EntryDecision, Decision: e})
 }
 
@@ -733,7 +661,7 @@ func (r *runner) finishEntry(id string, e ToolResultEntry) error {
 
 // execute runs an allowed call and records its result. It reports
 // whether the context ended meanwhile.
-func (r *runner) execute(ctx context.Context, call ToolCall, deferred []string) (canceled bool, err error) {
+func (r *runner) execute(ctx context.Context, call ToolCall) (canceled bool, err error) {
 	tool, ok := r.tb.tools[call.Name]
 	if !ok {
 		// Allowed in an earlier run, whose agent had the tool; this one
@@ -752,7 +680,7 @@ func (r *runner) execute(ctx context.Context, call ToolCall, deferred []string) 
 	var out Result
 	var callErr error
 	if ct, ok := tool.(CallTool); ok {
-		out, callErr = ct.CallWith(callCtx, Call{ID: call.ID, Input: call.Input, Labels: r.s.Labels(), Deferred: slices.Clone(deferred)})
+		out, callErr = ct.CallWith(callCtx, Call{ID: call.ID, Input: call.Input, Labels: r.s.Labels()})
 	} else {
 		out, callErr = tool.Call(callCtx, call.Input)
 	}
@@ -772,7 +700,7 @@ func (r *runner) execute(ctx context.Context, call ToolCall, deferred []string) 
 			res.Content = fmt.Sprintf("The tool failed: %v", callErr)
 		}
 	}
-	labels, log, report := out.Labels, out.Log, out.Quarantine
+	labels, log := out.Labels, out.Log
 	// What the tool's model calls cost is spent whatever became of the
 	// result.
 	for _, u := range out.Usage {
@@ -785,15 +713,15 @@ func (r *runner) execute(ctx context.Context, call ToolCall, deferred []string) 
 		// labels. Nothing of what the tool said is kept, not even in the
 		// log: it is what the session may not hold.
 		res = ToolResult{Content: RefusedResult, IsError: true}
-		labels, report = nil, nil
+		labels = nil
 		log = fmt.Sprintf("agentloop refused this result: it carried %v, which this session may not hold.", bad)
 		r.refused = append(r.refused, Refusal{CallID: call.ID, Tool: call.Name, Labels: bad})
 	}
 	var display *Display
 	if shown != nil && callErr == nil {
-		display, res.Content, log = r.display(call, *shown, out.Labels, deferred, res.Content, log)
+		display, res.Content, log = r.display(call, *shown, out.Labels, res.Content, log)
 	}
-	e := ToolResultEntry{Result: res, Labels: labels, Log: log, Usage: out.Usage, Quarantine: report, Display: display}
+	e := ToolResultEntry{Result: res, Labels: labels, Log: log, Usage: out.Usage, Display: display}
 	if err := r.finishEntry(call.ID, e); err != nil {
 		return false, err
 	}
@@ -802,12 +730,12 @@ func (r *runner) execute(ctx context.Context, call ToolCall, deferred []string) 
 
 // display is what is kept of a result's display, the content the model
 // is given with it, and the operator's log. The display is labelled with
-// the result's labels, the labels deferred to it and the session's, as
-// anything the call made would be. One that would carry a label the
+// the result's labels and the session's, as anything the call made
+// would be. One that would carry a label the
 // session may not hold is dropped, and only the log says so. The content
 // gains a note naming the display's ref, and nothing of the display.
-func (r *runner) display(call ToolCall, d Display, result, deferred []string, content, log string) (*Display, string, string) {
-	d.Labels = unionLabels(d.Labels, result, deferred, r.s.Labels())
+func (r *runner) display(call ToolCall, d Display, result []string, content, log string) (*Display, string, string) {
+	d.Labels = UnionLabels(d.Labels, result, r.s.Labels())
 	d.Sources = append([]Source{}, d.Sources...)
 	d.Ref = ""
 	if bad := Forbidden(d.Labels, r.a.Forbid); len(bad) > 0 {

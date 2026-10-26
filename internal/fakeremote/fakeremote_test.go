@@ -13,7 +13,6 @@ import (
 	"time"
 
 	"github.com/kirahowe/agentloop/mcp"
-	"github.com/kirahowe/agentloop/trifecta"
 )
 
 func start(t *testing.T, o Options) (*Server, *http.Client) {
@@ -126,7 +125,7 @@ func TestSignInRefreshAndCall(t *testing.T) {
 	}
 	cl, err := mcp.Connect(context.Background(), mcp.Server{Name: "fake", URL: f.Base + "/mcp",
 		Token: func(context.Context, bool) (string, error) { return again["access_token"].(string), nil },
-		Tools: map[string]mcp.ToolConfig{"list_subscribers": {Policy: trifecta.Tool{Class: trifecta.Read}}}})
+		Tools: map[string]mcp.ToolConfig{"list_subscribers": {}}})
 	if err != nil {
 		t.Fatal(err)
 	}

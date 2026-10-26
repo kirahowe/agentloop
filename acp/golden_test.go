@@ -80,13 +80,6 @@ func goldenCases() []goldenCase {
 			notices: true,
 		},
 		{name: "refusal", model: fake.Script(refusal)},
-		{
-			name:  "held_call",
-			model: fake.Script(fake.ToolUse("I need to check.", call)),
-			policy: agentloop.PolicyFunc(func(context.Context, agentloop.ToolCall, agentloop.View) agentloop.Decision {
-				return agentloop.Decision{Verdict: agentloop.Hold}
-			}),
-		},
 		{name: "turn_limit", model: fake.Script(fake.ToolUse("", call)), limits: agentloop.Limits{MaxTurns: 1}},
 	}
 }

@@ -37,15 +37,15 @@ func TestPropertyChaos(t *testing.T) {
 	runProperty(t, scenario.Faults{Crash: true, Cancel: true, Wild: true})
 }
 
-// The trifecta's invariants (see scenario.GenTrifecta and checkCall) over
+// The label invariants (see scenario.GenLabelled and checkCall) over
 // random runs with several calls a turn, tool errors and timeouts,
-// cancellation, crashes and resumes, and people resolving holds.
-func TestPropertyTrifecta(t *testing.T) {
+// cancellation, crashes and resumes.
+func TestPropertyLabels(t *testing.T) {
 	rapid.Check(t, func(t *rapid.T) {
 		f := scenario.Faults{
 			Crash:  rapid.Bool().Draw(t, "crash"),
 			Cancel: rapid.Bool().Draw(t, "cancel"),
 		}
-		scenario.New(t, scenario.GenTrifecta(t), f).Execute()
+		scenario.New(t, scenario.GenLabelled(t), f).Execute()
 	})
 }

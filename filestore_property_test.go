@@ -102,7 +102,7 @@ func TestPropertyFileStoreTorn(t *testing.T) {
 			if err != nil {
 				t.Fatalf("cut at %d: resume: %v", off, err)
 			}
-			if out.Reason != agentloop.ReasonCompleted && out.Reason != agentloop.ReasonHeld {
+			if out.Reason != agentloop.ReasonCompleted {
 				t.Fatalf("cut at %d: %+v", off, out)
 			}
 
@@ -156,7 +156,7 @@ func TestFileStoreEveryOffset(t *testing.T) {
 			{Kind: scenario.StToolUse, Stop: agentloop.StopToolUse, Text: "café <x>", In: 3, Out: 4, Calls: []scenario.CallSpec{{Name: "echo"}, {Name: "any"}, {Name: "echo", Input: 4}}},
 			{Kind: scenario.StErr, ErrKind: agentloop.Overloaded},
 		}, Behaviors: map[string]scenario.Behavior{"echo": {}, "any": {Kind: scenario.BOK, Labels: []string{"private"}}, "lab": {}},
-			Rules: map[string]scenario.Rule{"echo": {Base: agentloop.Hold}, "any": {Base: agentloop.Allow}, "lab": {Base: agentloop.Allow}},
+			Rules: map[string]scenario.Rule{"echo": {Base: agentloop.Deny}, "any": {Base: agentloop.Allow}, "lab": {Base: agentloop.Allow}},
 			Retry: &agentloop.RetryPolicy{Retries: 2}, Iterations: 1}
 		sc := scenario.New(rt, cfg, scenario.Faults{})
 		sc.Execute()
@@ -338,7 +338,6 @@ func touch(s *agentloop.Session) {
 	s.Usage()
 	s.Entries()
 	s.View()
-	s.Held()
 	s.Pending()
 	for _, turn := range s.Turns() {
 		for _, id := range turn.Calls {

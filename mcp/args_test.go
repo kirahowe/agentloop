@@ -75,13 +75,13 @@ func TestNarrowedToolRefusesAndFixesBeforeTheServerSeesTheCall(t *testing.T) {
 func TestNarrowingThatCannotWorkFailsConnect(t *testing.T) {
 	r := newRemote(t, false)
 	for why, cfg := range map[string]ToolConfig{
-		"no such argument":    {Policy: read().Policy, HiddenArgs: []string{"nope"}},
-		"hidden and required": {Policy: read().Policy, HiddenArgs: []string{"msg"}},
-		"fixed and hidden": {Policy: read().Policy, HiddenArgs: []string{"list"},
+		"no such argument":    {Labels: read().Labels, HiddenArgs: []string{"nope"}},
+		"hidden and required": {Labels: read().Labels, HiddenArgs: []string{"msg"}},
+		"fixed and hidden": {Labels: read().Labels, HiddenArgs: []string{"list"},
 			FixedArgs: map[string]json.RawMessage{"list": json.RawMessage(`"a"`)}},
-		"repeated hidden":  {Policy: read().Policy, HiddenArgs: []string{"list", "list"}},
-		"fixed not JSON":   {Policy: read().Policy, FixedArgs: map[string]json.RawMessage{"list": json.RawMessage(`{`)}},
-		"fixed wrong type": {Policy: read().Policy, FixedArgs: map[string]json.RawMessage{"send_now": json.RawMessage(`"no"`)}},
+		"repeated hidden":  {Labels: read().Labels, HiddenArgs: []string{"list", "list"}},
+		"fixed not JSON":   {Labels: read().Labels, FixedArgs: map[string]json.RawMessage{"list": json.RawMessage(`{`)}},
+		"fixed wrong type": {Labels: read().Labels, FixedArgs: map[string]json.RawMessage{"send_now": json.RawMessage(`"no"`)}},
 	} {
 		c, err := Connect(context.Background(), r.server(map[string]ToolConfig{"echo": cfg}, staticToken("good")))
 		if why == "fixed wrong type" {

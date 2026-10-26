@@ -212,22 +212,21 @@ func TestPropertyDisplayNeverReachesTheModel(t *testing.T) {
 }
 
 func TestCheckDisplay(t *testing.T) {
-	known := func(l string) bool { return l == "private" || l == "contaminated" }
 	long := strings.Repeat("x", agentloop.MaxDisplayTitle+1)
 	for name, d := range map[string]agentloop.Display{
-		"no title":      {Body: "b"},
-		"long title":    {Title: long},
-		"long body":     {Title: "t", Body: strings.Repeat("x", agentloop.MaxDisplayBody+1)},
-		"unknown label": {Title: "t", Labels: []string{"secret"}},
-		"blank source":  {Title: "t", Sources: []agentloop.Source{{Title: "", Ref: "web:x"}}},
-		"two-line ref":  {Title: "t", Sources: []agentloop.Source{{Title: "s", Ref: "web:x\nmore"}}},
+		"no title":     {Body: "b"},
+		"long title":   {Title: long},
+		"long body":    {Title: "t", Body: strings.Repeat("x", agentloop.MaxDisplayBody+1)},
+		"bad label":    {Title: "t", Labels: []string{"two\nlines"}},
+		"blank source": {Title: "t", Sources: []agentloop.Source{{Title: "", Ref: "web:x"}}},
+		"two-line ref": {Title: "t", Sources: []agentloop.Source{{Title: "s", Ref: "web:x\nmore"}}},
 	} {
-		if agentloop.CheckDisplay(d, known) == nil {
+		if agentloop.CheckDisplay(d) == nil {
 			t.Errorf("%s: accepted", name)
 		}
 	}
 	if err := agentloop.CheckDisplay(agentloop.Display{Title: "t", Body: "b", Labels: []string{"private"},
-		Sources: []agentloop.Source{{Title: "s", Ref: "web:https://example.org/"}}}, known); err != nil {
+		Sources: []agentloop.Source{{Title: "s", Ref: "web:https://example.org/"}}}); err != nil {
 		t.Errorf("refused a good display: %v", err)
 	}
 }

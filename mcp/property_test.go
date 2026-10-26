@@ -11,7 +11,7 @@ import (
 	sdk "github.com/modelcontextprotocol/go-sdk/mcp"
 	"pgregory.net/rapid"
 
-	"github.com/kirahowe/agentloop/trifecta"
+	"github.com/kirahowe/agentloop"
 )
 
 // jsonValue is a generated JSON value.
@@ -160,18 +160,18 @@ func TestPropertyDigestCanonical(t *testing.T) {
 }
 
 // A result's labels only add to the configured ones, and any label that
-// is not known fails the call.
+// is not valid fails the call.
 func TestPropertyLabelMerge(t *testing.T) {
-	label := rapid.SampledFrom([]string{"private", "contaminated", "untrusted", "Private", ""})
+	label := rapid.SampledFrom([]string{"private", "contaminated", "from the web", "Private", "", "a\nb"})
 	rapid.Check(t, func(t *rapid.T) {
-		configured := rapid.SliceOfDistinct(rapid.SampledFrom(trifecta.Labels), rapid.ID[string]).Draw(t, "configured")
+		configured := rapid.SliceOfDistinct(rapid.SampledFrom([]string{"private", "contaminated"}), rapid.ID[string]).Draw(t, "configured")
 		added := rapid.SliceOf(label).Draw(t, "added")
 		arr := make([]any, len(added))
 		for i, l := range added {
 			arr[i] = l
 		}
 		got, why := ResultLabels(map[string]any{LabelsKey: arr, "other": 1})
-		unknown := slices.ContainsFunc(added, func(l string) bool { return !trifecta.KnownLabel(l) })
+		unknown := slices.ContainsFunc(added, func(l string) bool { return agentloop.CheckLabel(l) != nil })
 		if unknown != (why != "") {
 			t.Fatalf("added %q: why %q", added, why)
 		}
@@ -231,7 +231,7 @@ func TestPropertyContent(t *testing.T) {
 				content = append(content, &sdk.EmbeddedResource{Resource: &sdk.ResourceContents{URI: "SECRET", MIMEType: "SECRET", Text: "words"}})
 			}
 		}
-		cfg := ToolConfig{Policy: trifecta.Tool{Class: trifecta.Read}, AllowContent: allow}
+		cfg := ToolConfig{AllowContent: allow}
 		r := ToResult("t", cfg, nil, &sdk.CallToolResult{Content: content})
 		if strings.Contains(r.Content, "SECRET") {
 			t.Fatalf("shown: %q", r.Content)
@@ -243,30 +243,4 @@ func TestPropertyContent(t *testing.T) {
 			t.Fatalf("text lost: %q", r.Content)
 		}
 	})
-}
-
-func TestLint(t *testing.T) {
-	yes, no := true, false
-	cases := []struct {
-		class  trifecta.Class
-		labels []string
-		a      *sdk.ToolAnnotations
-		want   int
-	}{
-		{trifecta.Read, nil, nil, 0},
-		{trifecta.Read, nil, &sdk.ToolAnnotations{ReadOnlyHint: true}, 0},
-		{trifecta.Read, nil, &sdk.ToolAnnotations{DestructiveHint: &yes}, 1},
-		{trifecta.Read, nil, &sdk.ToolAnnotations{DestructiveHint: &no, OpenWorldHint: &no}, 0},
-		{trifecta.Read, nil, &sdk.ToolAnnotations{OpenWorldHint: &yes}, 1},
-		{trifecta.Read, []string{"contaminated"}, &sdk.ToolAnnotations{OpenWorldHint: &yes}, 0},
-		{trifecta.Write, nil, &sdk.ToolAnnotations{OpenWorldHint: &yes}, 1},
-		{trifecta.Write, nil, &sdk.ToolAnnotations{ReadOnlyHint: true}, 1},
-		{trifecta.Egress, nil, &sdk.ToolAnnotations{OpenWorldHint: &yes, DestructiveHint: &yes}, 0},
-		{trifecta.Act, nil, &sdk.ToolAnnotations{ReadOnlyHint: true}, 1},
-	}
-	for i, c := range cases {
-		if got := Lint("x", trifecta.Tool{Class: c.class, Labels: c.labels}, c.a); len(got) != c.want {
-			t.Errorf("case %d: %q", i, got)
-		}
-	}
 }

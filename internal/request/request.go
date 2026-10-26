@@ -16,6 +16,7 @@ import (
 	"regexp"
 	"slices"
 	"sort"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -26,9 +27,6 @@ import (
 	"github.com/kirahowe/agentloop/internal/strictjson"
 	"github.com/kirahowe/agentloop/internal/usage"
 	"github.com/kirahowe/agentloop/openai"
-	"github.com/kirahowe/agentloop/quarantine"
-	"github.com/kirahowe/agentloop/trifecta"
-	"github.com/kirahowe/agentloop/workbench"
 )
 
 // displayRefPrefix is what a display_ref_prefix may be: a kind, a colon
@@ -41,33 +39,30 @@ const KeyTimeout = 30 * time.Second
 
 // Request is the JSON document that says what to run.
 type Request struct {
-	Provider           string                 `json:"provider"`
-	Model              string                 `json:"model"`
-	Effort             string                 `json:"effort"`
-	BaseURL            string                 `json:"base_url"`
-	APIKeyCommand      []string               `json:"api_key_command"`
-	RefusalFallback    *bool                  `json:"refusal_fallback"`
-	System             string                 `json:"system"`
-	Prompt             string                 `json:"prompt"`
-	Session            string                 `json:"session"`
-	SessionDir         string                 `json:"session_dir"`
-	Tools              []Tool                 `json:"tools"`
-	MCPServers         map[string]MCPServer   `json:"mcp_servers"`
-	ToolCommand        []string               `json:"tool_command"`
-	ToolEnv            map[string]string      `json:"tool_env"`
-	ToolDir            string                 `json:"tool_dir"`
-	ToolTimeoutSeconds float64                `json:"tool_timeout_seconds"`
-	TimeoutSeconds     float64                `json:"timeout_seconds"`
-	Limits             agentloop.Limits       `json:"limits"`
-	ToolKinds          map[string]string      `json:"tool_kinds"`
-	Title              string                 `json:"title"`
-	NewSessionsOnly    *bool                  `json:"new_sessions_only"`
-	Policy             *Policy                `json:"policy"`
-	ToolProtocol       string                 `json:"tool_protocol"`
-	Resolve            []agentloop.Resolution `json:"resolve"`
-	Quarantine         *Quarantine            `json:"quarantine"`
-	DisplayRefPrefix   string                 `json:"display_ref_prefix"`
-	Workbench          *WorkbenchConfig       `json:"workbench"`
+	Provider           string               `json:"provider"`
+	Model              string               `json:"model"`
+	Effort             string               `json:"effort"`
+	BaseURL            string               `json:"base_url"`
+	APIKeyCommand      []string             `json:"api_key_command"`
+	RefusalFallback    *bool                `json:"refusal_fallback"`
+	System             string               `json:"system"`
+	Prompt             string               `json:"prompt"`
+	Session            string               `json:"session"`
+	SessionDir         string               `json:"session_dir"`
+	Tools              []Tool               `json:"tools"`
+	MCPServers         map[string]MCPServer `json:"mcp_servers"`
+	ToolCommand        []string             `json:"tool_command"`
+	ToolEnv            map[string]string    `json:"tool_env"`
+	ToolDir            string               `json:"tool_dir"`
+	ToolTimeoutSeconds float64              `json:"tool_timeout_seconds"`
+	TimeoutSeconds     float64              `json:"timeout_seconds"`
+	Limits             agentloop.Limits     `json:"limits"`
+	ToolKinds          map[string]string    `json:"tool_kinds"`
+	Title              string               `json:"title"`
+	NewSessionsOnly    *bool                `json:"new_sessions_only"`
+	Policy             *Policy              `json:"policy"`
+	ToolProtocol       string               `json:"tool_protocol"`
+	DisplayRefPrefix   string               `json:"display_ref_prefix"`
 	Retry              *struct {
 		Retries        int     `json:"retries"`
 		BackoffSeconds float64 `json:"backoff_seconds"`
@@ -134,82 +129,20 @@ const (
 // path of the file holding what its credentials_command printed.
 const CredentialsPlaceholder = "{credentials_file}"
 
-// Policy is the request's trifecta policy: the session's starting labels,
-// each tool's class and labels, and the labels the session may never
-// hold. {"unrestricted": true} instead turns the policy off; it is for
-// agentloop's own examples and tests.
+// Policy is the request's label policy. It is optional: without one every
+// tool the request gives is allowed. It holds the session's starting
+// labels, labels a tool's results always carry, and labels the session may
+// never hold.
 type Policy struct {
-	Unrestricted *bool                    `json:"unrestricted"`
-	Labels       []string                 `json:"labels"`
-	Tools        map[string]trifecta.Tool `json:"tools"`
-	ForbidLabels []string                 `json:"forbid_labels"`
+	Labels       []string              `json:"labels"`
+	Tools        map[string]ToolPolicy `json:"tools"`
+	ForbidLabels []string              `json:"forbid_labels"`
 }
 
-// Quarantine turns on the quarantined reader, read_quarantined: the
-// reader model, on the request's provider with its base_url and key, and
-// the tools it may read through.
-type Quarantine struct {
-	Model           string `json:"model"`
-	Effort          string `json:"effort"`
-	MaxOutputTokens int    `json:"max_output_tokens"`
-	// Retries is how many times the reader is asked again after an
-	// answer that is not valid. Nil means DefaultQuarantineRetries.
-	Retries *int     `json:"retries"`
-	Tools   []string `json:"tools"`
-	// ReaderOnly names tools among Tools that the model is not offered:
-	// it reaches them only through the reader, so their output never
-	// enters the session's context directly.
-	ReaderOnly []string `json:"reader_only"`
-}
-
-// WorkbenchConfig turns on the sandboxed workbench, which runs shell
-// commands under macOS sandbox-exec in a child session of its own. The
-// reader's model (quarantine.model) runs it unless this names another.
-type WorkbenchConfig struct {
-	Model           string `json:"model"`
-	Effort          string `json:"effort"`
-	MaxOutputTokens int    `json:"max_output_tokens"`
-	// MaxTurns and MaxTokens bound the child session. Zero means the
-	// defaults.
-	MaxTurns  int   `json:"max_turns"`
-	MaxTokens int64 `json:"max_tokens"`
-	// Retries is how many times the child is asked again after a reply
-	// that is not a valid answer. Nil means DefaultQuarantineRetries.
-	Retries *int `json:"retries"`
-	// DenyRead are paths the commands may not read, added to the ones
-	// the workbench always denies. Each is an absolute path, or one
-	// ending in "*" to deny every path with that prefix.
-	DenyRead []string `json:"deny_read"`
-	// CommandTimeoutSeconds bounds one command, OutputBytes how much of
-	// its output the child sees, Processes how many processes it may add,
-	// ScratchBytes how large the scratch directory may grow, and
-	// MinFreeBytes how much free space its filesystem must keep. Zero
-	// means the defaults.
-	CommandTimeoutSeconds float64 `json:"command_timeout_seconds"`
-	OutputBytes           int     `json:"output_bytes"`
-	Processes             int     `json:"processes"`
-	ScratchBytes          int64   `json:"scratch_bytes"`
-	MinFreeBytes          int64   `json:"min_free_bytes"`
-}
-
-// WorkbenchLimits bounds the child session when the request gives no
-// numbers of its own.
-var WorkbenchLimits = struct {
-	MaxTurns  int
-	MaxTokens int64
-}{MaxTurns: 40, MaxTokens: 400000}
-
-// DefaultQuarantineRetries is the reader's retries when the request
-// gives none.
-const DefaultQuarantineRetries = 1
-
-// MaxQuarantineRetries bounds quarantine.retries, since each one is a
-// model call.
-const MaxQuarantineRetries = 5
-
-// Restricted reports whether the request has a real policy.
-func (r *Request) Restricted() bool {
-	return r.Policy != nil && r.Policy.Unrestricted == nil
+// ToolPolicy is one tool's entry in the policy: the labels the session
+// takes on when a call to the tool is allowed.
+type ToolPolicy struct {
+	Labels []string `json:"labels"`
 }
 
 // ToolProtocolEnvelope is the tool_protocol for envelope tools; the plain
@@ -246,12 +179,40 @@ func Load(path string, mode Mode) (*Request, error) {
 		return nil, usage.Errorf("bad request %s: %v", path, err)
 	}
 	if err := strictjson.UnmarshalKnown(raw, &r); err != nil {
+		if gone := removedField(err.Error()); gone != "" {
+			err = errors.New(gone)
+		}
 		return nil, usage.Errorf("bad request %s: %v", path, err)
 	}
 	if err := r.validate(mode); err != nil {
 		return nil, err
 	}
 	return &r, nil
+}
+
+// removedField turns the error UnmarshalKnown gave for a field that
+// agentloop used to take into a message that says it was taken away, or
+// returns "" for any other error. A request written for the holding
+// agentloop is refused, never half read.
+func removedField(msg string) string {
+	path, ok := strings.CutPrefix(msg, "unknown field ")
+	if !ok {
+		return ""
+	}
+	path, err := strconv.Unquote(path)
+	if err != nil {
+		return ""
+	}
+	parts := strings.Split(path, ".")
+	switch {
+	case len(parts) == 1 && slices.Contains([]string{"resolve", "quarantine", "workbench"}, parts[0]):
+	case len(parts) == 2 && parts[0] == "policy" && parts[1] == "unrestricted":
+	case len(parts) == 4 && parts[0] == "policy" && parts[1] == "tools" &&
+		slices.Contains([]string{"class", "always_hold", "consent"}, parts[len(parts)-1]):
+	default:
+		return ""
+	}
+	return fmt.Sprintf("the field %q was removed: agentloop no longer holds calls, classes tools or runs a reader or workbench (a policy holds only labels, tool labels and forbid_labels)", path)
 }
 
 func (r *Request) validate(mode Mode) error {
@@ -284,12 +245,6 @@ func (r *Request) validate(mode Mode) error {
 		if t.Name == "" {
 			return usage.Errorf("a tool has no name")
 		}
-		if t.Name == quarantine.ToolName {
-			return usage.Errorf("%s is built in; give a quarantine block instead of a tool by that name", quarantine.ToolName)
-		}
-		if t.Name == workbench.ToolName {
-			return usage.Errorf("%s is built in; give a workbench block instead of a tool by that name", workbench.ToolName)
-		}
 		if !toolName.MatchString(t.Name) {
 			return usage.Errorf("tool name %q is not 1 to 64 letters, digits, - or _", t.Name)
 		}
@@ -308,12 +263,6 @@ func (r *Request) validate(mode Mode) error {
 		return usage.Errorf("request has tools but no tool_command")
 	}
 	if err := r.validatePolicy(); err != nil {
-		return err
-	}
-	if err := r.validateQuarantine(); err != nil {
-		return err
-	}
-	if err := r.validateWorkbench(); err != nil {
 		return err
 	}
 	if r.ToolTimeoutSeconds < 0 || r.TimeoutSeconds < 0 {
@@ -341,19 +290,16 @@ func (r *Request) validate(mode Mode) error {
 	if err != nil {
 		return err
 	}
-	a, err := r.Agent("", r.stubMCP())
-	if err != nil {
-		return usage.Errorf("bad quarantine: %v", err)
-	}
+	a := r.Agent("", r.stubMCP())
 	if _, err := a.Run(context.Background(), sess, ""); err != nil {
 		return usage.Errorf("bad tool definition: %v", err)
 	}
 	return nil
 }
 
-// validatePolicy fails closed: a request with tools must say how they are
-// policed, every tool needs a known class, and every label must be one
-// agentloop knows, so a typo cannot drop one.
+// validatePolicy checks the policy, when there is one: its labels must be
+// valid, the session must be able to start with them, and each tool entry
+// must name a tool the request gives.
 func (r *Request) validatePolicy() error {
 	switch r.ToolProtocol {
 	case "", ToolProtocolEnvelope:
@@ -362,27 +308,15 @@ func (r *Request) validatePolicy() error {
 	}
 	p := r.Policy
 	if p == nil {
-		if len(r.Tools) > 0 {
-			return usage.Errorf(`request has tools but no policy (give one, or {"unrestricted": true})`)
-		}
-		return nil
-	}
-	if p.Unrestricted != nil {
-		if !*p.Unrestricted {
-			return usage.Errorf(`policy.unrestricted can only be true; leave it out for a real policy`)
-		}
-		if p.Labels != nil || p.Tools != nil || p.ForbidLabels != nil {
-			return usage.Errorf("an unrestricted policy cannot have labels, tools or forbid_labels")
-		}
 		return nil
 	}
 	if len(r.commandTools()) > 0 && r.ToolProtocol != ToolProtocolEnvelope {
 		return usage.Errorf(`a request with a policy and command tools needs "tool_protocol": %q`, ToolProtocolEnvelope)
 	}
-	if err := trifecta.CheckLabels(p.Labels); err != nil {
+	if err := agentloop.CheckLabels(p.Labels); err != nil {
 		return usage.Errorf("policy.labels: %v", err)
 	}
-	if err := trifecta.CheckLabels(p.ForbidLabels); err != nil {
+	if err := agentloop.CheckLabels(p.ForbidLabels); err != nil {
 		return usage.Errorf("policy.forbid_labels: %v", err)
 	}
 	// A session that would start holding a label it may not hold is not
@@ -393,33 +327,14 @@ func (r *Request) validatePolicy() error {
 	tools := map[string]bool{}
 	for _, name := range r.toolNames() {
 		tools[name] = true
-		if _, ok := p.Tools[name]; !ok {
-			return usage.Errorf("policy.tools has no entry for the tool %q", name)
-		}
 	}
 	for _, name := range slices.Sorted(maps.Keys(p.Tools)) {
 		e := p.Tools[name]
 		if !tools[name] {
 			return usage.Errorf("policy.tools names %q, which is not one of the tools", name)
 		}
-		if !trifecta.KnownClass(e.Class) {
-			return usage.Errorf("policy.tools gives %q the class %q (want one of %v)", name, e.Class, trifecta.Classes)
-		}
-		if err := trifecta.CheckLabels(e.Labels); err != nil {
+		if err := agentloop.CheckLabels(e.Labels); err != nil {
 			return usage.Errorf("policy.tools %q: %v", name, err)
-		}
-		if e.Consent != nil {
-			switch {
-			case e.Class != trifecta.Act:
-				return usage.Errorf("policy.tools gives %q consent, which only a tool of class act takes (its class is %q)", name, e.Class)
-			case e.AlwaysHold:
-				return usage.Errorf("policy.tools gives %q both consent and always_hold, which holds every call whatever the consent", name)
-			}
-			for i, rule := range e.Consent {
-				if len(rule) == 0 {
-					return usage.Errorf("policy.tools %q: consent rule %d is empty; a rule names at least one argument and its value", name, i)
-				}
-			}
 		}
 		if bad := agentloop.Forbidden(e.Labels, p.ForbidLabels); len(bad) > 0 {
 			return usage.Errorf("policy.tools gives %q the labels %v, which policy.forbid_labels forbids", name, bad)
@@ -439,120 +354,13 @@ func (r *Request) commandTools() []Tool {
 	return out
 }
 
-// toolNames are the names of every tool the agent has: the request's
-// tools, and read_quarantined when there is a quarantine block.
+// toolNames are the names of every tool the agent has.
 func (r *Request) toolNames() []string {
 	var names []string
 	for _, t := range r.Tools {
 		names = append(names, t.Name)
 	}
-	if r.Quarantine != nil {
-		names = append(names, quarantine.ToolName)
-	}
-	if r.Workbench != nil {
-		names = append(names, workbench.ToolName)
-	}
 	return names
-}
-
-// validateQuarantine checks the quarantine block. The reader needs a
-// real policy, since its whole purpose is the labels; it reads only
-// through tools of class read or egress, which bring content in and
-// change nothing (an egress call is decided under the caller's labels,
-// see trifecta's decideReader); and it cannot read through itself.
-func (r *Request) validateQuarantine() error {
-	q := r.Quarantine
-	if q == nil {
-		return nil
-	}
-	if !r.Restricted() {
-		return usage.Errorf("quarantine needs a policy: the reader exists to keep labels off the session")
-	}
-	if q.Model == "" {
-		return usage.Errorf("quarantine has no model")
-	}
-	switch agentloop.Effort(q.Effort) {
-	case "", agentloop.EffortLow, agentloop.EffortMedium, agentloop.EffortHigh, agentloop.EffortXHigh, agentloop.EffortMax:
-	default:
-		return usage.Errorf("unknown quarantine.effort %q", q.Effort)
-	}
-	if q.MaxOutputTokens < 0 {
-		return usage.Errorf("quarantine.max_output_tokens cannot be negative")
-	}
-	if q.Retries != nil && (*q.Retries < 0 || *q.Retries > MaxQuarantineRetries) {
-		return usage.Errorf("quarantine.retries must be from 0 to %d", MaxQuarantineRetries)
-	}
-	if len(q.Tools) == 0 {
-		return usage.Errorf("quarantine.tools names no tool to read through")
-	}
-	if e := r.Policy.Tools[quarantine.ToolName]; e.Class != trifecta.Read {
-		return usage.Errorf("policy.tools must give %s the class read", quarantine.ToolName)
-	}
-	given := map[string]bool{}
-	for _, t := range r.Tools {
-		given[t.Name] = true
-	}
-	seen := map[string]bool{}
-	for _, name := range q.Tools {
-		switch {
-		case name == quarantine.ToolName:
-			return usage.Errorf("quarantine.tools cannot name %s itself", quarantine.ToolName)
-		case seen[name]:
-			return usage.Errorf("quarantine.tools names %q twice", name)
-		case !given[name]:
-			return usage.Errorf("quarantine.tools names %q, which is not one of the tools", name)
-		case r.Policy.Tools[name].Class != trifecta.Read && r.Policy.Tools[name].Class != trifecta.Egress:
-			return usage.Errorf("quarantine.tools names %q, whose class is %q; the reader reads only through tools of class read or egress", name, r.Policy.Tools[name].Class)
-		}
-		seen[name] = true
-	}
-	only := map[string]bool{}
-	for _, name := range q.ReaderOnly {
-		switch {
-		case only[name]:
-			return usage.Errorf("quarantine.reader_only names %q twice", name)
-		case !seen[name]:
-			return usage.Errorf("quarantine.reader_only names %q, which is not in quarantine.tools", name)
-		}
-		only[name] = true
-	}
-	return nil
-}
-
-// validateWorkbench checks the workbench block. It needs a real policy,
-// since its answers' labels are the point, and a model, from its own
-// block or the quarantine block. Its class is read: it brings content in
-// and sends nothing out.
-func (r *Request) validateWorkbench() error {
-	w := r.Workbench
-	if w == nil {
-		return nil
-	}
-	if !r.Restricted() {
-		return usage.Errorf("workbench needs a policy: it exists to keep labels off the session")
-	}
-	if w.Model == "" && (r.Quarantine == nil || r.Quarantine.Model == "") {
-		return usage.Errorf("workbench has no model, and there is no quarantine block to take one from")
-	}
-	switch agentloop.Effort(w.Effort) {
-	case "", agentloop.EffortLow, agentloop.EffortMedium, agentloop.EffortHigh, agentloop.EffortXHigh, agentloop.EffortMax:
-	default:
-		return usage.Errorf("unknown workbench.effort %q", w.Effort)
-	}
-	if w.MaxOutputTokens < 0 || w.MaxTurns < 0 || w.MaxTokens < 0 || w.CommandTimeoutSeconds < 0 ||
-		w.OutputBytes < 0 || w.Processes < 0 || w.ScratchBytes < 0 || w.MinFreeBytes < 0 {
-		return usage.Errorf("workbench numbers cannot be negative")
-	}
-	if w.Retries != nil && (*w.Retries < 0 || *w.Retries > MaxQuarantineRetries) {
-		return usage.Errorf("workbench.retries must be from 0 to %d", MaxQuarantineRetries)
-	}
-	if e := r.Policy.Tools[workbench.ToolName]; e.Class != trifecta.Read {
-		return usage.Errorf("policy.tools must give %s the class read", workbench.ToolName)
-	}
-	if err := workbench.Available(); err != nil {
-		return usage.Errorf("workbench: %v", err)
-	}
-	return nil
 }
 
 // validateMode checks the fields that differ between the commands.
@@ -569,25 +377,6 @@ func (r *Request) validateMode(mode Mode) error {
 				return usage.Errorf("%s is only for agentloop acp", f.name)
 			}
 		}
-		if r.Resolve != nil && !r.Restricted() {
-			return usage.Errorf("resolve needs a policy: a person's allow takes the call's labels from it")
-		}
-		seen := map[string]bool{}
-		for _, res := range r.Resolve {
-			if res.CallID == "" {
-				return usage.Errorf("a resolve entry has no call_id")
-			}
-			if seen[res.CallID] {
-				return usage.Errorf("resolve names the call %q twice", res.CallID)
-			}
-			seen[res.CallID] = true
-			if res.Verdict != agentloop.Allow && res.Verdict != agentloop.Deny {
-				return usage.Errorf("resolve gives the call %q the verdict %q (want allow or deny)", res.CallID, res.Verdict)
-			}
-			if res.InputSHA256 == "" {
-				return usage.Errorf("resolve gives the call %q no input_sha256", res.CallID)
-			}
-		}
 		return nil
 	}
 	if r.SessionDir == "" {
@@ -595,7 +384,6 @@ func (r *Request) validateMode(mode Mode) error {
 	}
 	for _, f := range []field{
 		{"session", r.Session != ""}, {"prompt", r.Prompt != ""}, {"timeout_seconds", r.TimeoutSeconds != 0},
-		{"resolve", r.Resolve != nil},
 	} {
 		if f.set {
 			return usage.Errorf("%s is not used by agentloop acp", f.name)
@@ -788,10 +576,8 @@ func (r *Request) newModelFor(key, model string) agentloop.Model {
 
 // Agent builds the agent, with the MCP tools and pins of m, which may be
 // nil when the request has no MCP servers. The key goes to the model and
-// nowhere else: the tools get exactly tool_env. It fails only when the
-// quarantined reader cannot be built, which Load has already ruled out
-// for a request it accepted.
-func (r *Request) Agent(key string, m *MCP) (*agentloop.Agent, error) {
+// nowhere else: the tools get exactly tool_env.
+func (r *Request) Agent(key string, m *MCP) *agentloop.Agent {
 	env := make([]string, 0, len(r.ToolEnv))
 	for k, v := range r.ToolEnv {
 		env = append(env, k+"="+v)
@@ -802,7 +588,7 @@ func (r *Request) Agent(key string, m *MCP) (*agentloop.Agent, error) {
 		argv := append(append([]string{}, r.ToolCommand...), t.Name)
 		tools = append(tools, &command.Tool{
 			Def: t.ToolSpec, Argv: argv, Env: env, Dir: r.ToolDir,
-			Envelope: r.ToolProtocol == ToolProtocolEnvelope, KnownLabel: trifecta.KnownLabel,
+			Envelope: r.ToolProtocol == ToolProtocolEnvelope,
 		})
 	}
 	if m != nil {
@@ -815,27 +601,6 @@ func (r *Request) Agent(key string, m *MCP) (*agentloop.Agent, error) {
 			Backoff: Seconds(r.Retry.BackoffSeconds),
 			MaxWait: Seconds(r.Retry.MaxWaitSeconds),
 		}
-	}
-	var readers map[string][]string
-	bench, err := r.workbench(key, retry)
-	if err != nil {
-		return nil, err
-	}
-	if bench != nil {
-		tools = append(tools, bench)
-	}
-	reader, err := r.reader(key, tools, retry)
-	if err != nil {
-		return nil, err
-	}
-	if reader != nil {
-		// The reader holds its inner tools itself, so a reader-only tool
-		// is left out of what the model is offered.
-		tools = slices.DeleteFunc(tools, func(t agentloop.Tool) bool {
-			return slices.Contains(r.Quarantine.ReaderOnly, t.Spec().Name)
-		})
-		tools = append(tools, reader)
-		readers = map[string][]string{quarantine.ToolName: slices.Clone(r.Quarantine.Tools)}
 	}
 	a := &agentloop.Agent{
 		Model:       r.newModel(key),
@@ -851,10 +616,10 @@ func (r *Request) Agent(key string, m *MCP) (*agentloop.Agent, error) {
 	if a.ToolTimeout == 0 && len(r.MCPServers) > 0 {
 		a.ToolTimeout = DefaultMCPToolTimeout
 	}
-	if r.Restricted() {
+	if r.Policy != nil {
 		a.Labels = slices.Clone(r.Policy.Labels)
 		a.Forbid = slices.Clone(r.Policy.ForbidLabels)
-		a.Policy = trifecta.Policy{Tools: maps.Clone(r.Policy.Tools), Forbid: slices.Clone(r.Policy.ForbidLabels), Readers: readers}
+		a.Policy = labelPolicy(r.Policy.Tools)
 	}
 	if r.Retry != nil {
 		a.Retry = &retry
@@ -862,84 +627,25 @@ func (r *Request) Agent(key string, m *MCP) (*agentloop.Agent, error) {
 	if m != nil && len(m.Pins) > 0 {
 		a.Pins = maps.Clone(m.Pins)
 	}
-	return a, nil
+	return a
 }
 
-// reader is the read_quarantined tool, reading through the named tools
-// among tools, or nil when the request has no quarantine block.
-func (r *Request) reader(key string, tools []agentloop.Tool, retry agentloop.RetryPolicy) (*quarantine.Reader, error) {
-	q := r.Quarantine
-	if q == nil {
-		return nil, nil
+// toolLabels are the labels the policy gives a tool, none without a policy.
+func (r *Request) toolLabels(name string) []string {
+	if r.Policy == nil {
+		return nil
 	}
-	var inner []agentloop.Tool
-	labels := map[string][]string{}
-	for _, t := range tools {
-		if name := t.Spec().Name; slices.Contains(q.Tools, name) {
-			inner = append(inner, t)
-			labels[name] = slices.Clone(r.Policy.Tools[name].Labels)
-		}
-	}
-	retries := DefaultQuarantineRetries
-	if q.Retries != nil {
-		retries = *q.Retries
-	}
-	return quarantine.NewReader(quarantine.Reader{
-		Model:           r.newModelFor(key, q.Model),
-		ModelID:         q.Model,
-		Effort:          agentloop.Effort(q.Effort),
-		MaxOutputTokens: q.MaxOutputTokens,
-		Retries:         retries,
-		Retry:           retry,
-		Inner:           inner,
-		Labels:          labels,
-	})
+	return slices.Clone(r.Policy.Tools[name].Labels)
 }
 
-// workbench is the workbench tool, or nil when the request has no
-// workbench block. Its model is its own, else the reader's.
-func (r *Request) workbench(key string, retry agentloop.RetryPolicy) (*workbench.Workbench, error) {
-	w := r.Workbench
-	if w == nil {
-		return nil, nil
-	}
-	model := w.Model
-	if model == "" {
-		model = r.Quarantine.Model
-	}
-	effort := w.Effort
-	if effort == "" && r.Quarantine != nil {
-		effort = r.Quarantine.Effort
-	}
-	retries := DefaultQuarantineRetries
-	if w.Retries != nil {
-		retries = *w.Retries
-	}
-	limits := workbench.Limits{
-		Timeout:      Seconds(w.CommandTimeoutSeconds),
-		OutputBytes:  w.OutputBytes,
-		Processes:    w.Processes,
-		ScratchBytes: w.ScratchBytes,
-		MinFreeBytes: w.MinFreeBytes,
-	}
-	turns, tokens := w.MaxTurns, w.MaxTokens
-	if turns == 0 {
-		turns = WorkbenchLimits.MaxTurns
-	}
-	if tokens == 0 {
-		tokens = WorkbenchLimits.MaxTokens
-	}
-	return workbench.New(workbench.Workbench{
-		Model:           r.newModelFor(key, model),
-		ModelID:         model,
-		Effort:          agentloop.Effort(effort),
-		MaxOutputTokens: w.MaxOutputTokens,
-		MaxTurns:        turns,
-		MaxTokens:       tokens,
-		Retries:         retries,
-		Retry:           retry,
-		Limits:          limits,
-		DenyRead:        w.DenyRead,
+// labelPolicy is the policy that allows every call and gives the session
+// the labels of the tool it calls. A call to a tool with no entry adds
+// none. (Agent.Forbid refuses a decision that would add a forbidden
+// label.)
+func labelPolicy(tools map[string]ToolPolicy) agentloop.Policy {
+	tools = maps.Clone(tools)
+	return agentloop.PolicyFunc(func(_ context.Context, call agentloop.ToolCall, _ agentloop.View) agentloop.Decision {
+		return agentloop.Decision{Verdict: agentloop.Allow, Labels: slices.Clone(tools[call.Name].Labels)}
 	})
 }
 

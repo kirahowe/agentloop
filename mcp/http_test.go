@@ -14,7 +14,6 @@ import (
 	sdk "github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"github.com/kirahowe/agentloop"
-	"github.com/kirahowe/agentloop/trifecta"
 )
 
 // remote is a streamable-HTTP MCP server for a test: the SDK's handler
@@ -249,7 +248,7 @@ func TestHTTPDriftIsRefusedOnReconnect(t *testing.T) {
 		t.Fatal(err)
 	}
 	// And a client that pins the old digest cannot connect.
-	srv := r.server(map[string]ToolConfig{"echo": {Policy: trifecta.Tool{Class: trifecta.Read}, Digest: pinned}}, staticToken("good"))
+	srv := r.server(map[string]ToolConfig{"echo": {Digest: pinned}}, staticToken("good"))
 	if _, err := Connect(context.Background(), srv); !errors.As(err, &drift) {
 		t.Fatal(err)
 	}

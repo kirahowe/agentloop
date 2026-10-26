@@ -26,7 +26,6 @@ type Session struct {
 	usage    Usage
 	calls    map[string]*callState
 	turns    []Turn
-	decided  int
 	pins     map[string]string
 }
 
@@ -47,23 +46,10 @@ type CallInfo struct {
 	Call ToolCall
 	// Decision is the latest decision on the call, nil until it is checked.
 	Decision *Decision
-	// Resolved says the latest decision is a person's, on a held call.
-	Resolved bool
-	// HoldSHA256 is the digest the call's hold recorded, which a
-	// resolution must name, and ApprovedSHA256 the digest a person's
-	// allow was bound to. The call runs only while its effective input
-	// still has it (see Narrowed).
-	HoldSHA256     string
-	ApprovedSHA256 string
-	Started        bool
-	Finished       bool
+	Started  bool
+	Finished bool
 	// Result is set once Finished.
 	Result *ToolResult
-}
-
-// Held reports whether the call waits for a person.
-func (c CallInfo) Held() bool {
-	return !c.Finished && c.Decision != nil && c.Decision.Verdict == Hold
 }
 
 type callState struct {
@@ -99,7 +85,7 @@ func OpenSession(store Store) (*Session, error) {
 
 // Messages is the conversation. Results that follow an assistant turn are
 // gathered into one user message, in the order of the calls. While calls
-// are held or pending the conversation is not yet one a model can take.
+// are pending the conversation is not yet one a model can take.
 func (s *Session) Messages() []Message {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -152,38 +138,6 @@ func (s *Session) Call(id string) (CallInfo, bool) {
 	return st.info, true
 }
 
-// Held lists the calls waiting for a person, in order.
-func (s *Session) Held() []ToolCall {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	var held []ToolCall
-	for _, t := range s.turns {
-		for _, id := range t.Calls {
-			if info := s.calls[id].info; info.Held() {
-				held = append(held, info.Call)
-			}
-		}
-	}
-	return held
-}
-
-// Policed reports whether a policy has left its mark on the session: it
-// holds a label, or a call in it was ever held. Such a session should be
-// carried on only under a policy.
-func (s *Session) Policed() bool {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if len(s.labels) > 0 {
-		return true
-	}
-	for _, e := range s.entries {
-		if e.Type == EntryDecision && e.Decision.Verdict == Hold {
-			return true
-		}
-	}
-	return false
-}
-
 // Pending lists the calls of the last assistant turn that have no result
 // yet, in order. A resumed run settles exactly these.
 func (s *Session) Pending() []ToolCall {
@@ -192,59 +146,18 @@ func (s *Session) Pending() []ToolCall {
 	return s.pending()
 }
 
-// Resolve records a person's decision on a held call. The next Run
-// carries it out. The verdict must be allow or deny, and the call must be
-// held.
-func (s *Session) Resolve(callID string, d Decision) error {
-	return s.resolve(callID, d, "")
-}
-
-// resolve is Resolve, recording on an allow the digest of the input it
-// was given for (see CallInfo.ApprovedSHA256).
-func (s *Session) resolve(callID string, d Decision, digest string) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	st, ok := s.calls[callID]
-	if !ok {
-		return fmt.Errorf("there is no call %q", callID)
-	}
-	if !st.info.Held() {
-		return fmt.Errorf("call %q is not held", callID)
-	}
-	if d.Verdict != Allow && d.Verdict != Deny {
-		return fmt.Errorf("a held call is resolved with allow or deny, not %q", d.Verdict)
-	}
-	// Only an allow is bound to an input.
-	if d.Verdict != Allow {
-		digest = ""
-	}
-	_, err := s.appendLocked(Entry{Type: EntryDecision, Decision: &DecisionEntry{
-		CallID:      callID,
-		Tool:        st.info.Call.Name,
-		Verdict:     d.Verdict,
-		Reason:      d.Reason,
-		Labels:      d.Labels,
-		Deferred:    d.Deferred,
-		Resolved:    true,
-		InputSHA256: digest,
-	}})
-	return err
-}
-
 // Where a label can come from, other than a tool call.
 const (
 	// LabelSeed: the agent's starting labels.
 	LabelSeed = "seed"
-	// LabelPrompt: what a prompt's content brought in.
-	LabelPrompt = "prompt"
 	// LabelTool: a tool call's decision or result.
 	LabelTool = "tool"
 )
 
 // A LabelSource is the entry that first gave the session a label, so a
-// person can be told why the session holds it.
+// client can show why the session holds it.
 type LabelSource struct {
-	// Kind is LabelSeed, LabelPrompt or LabelTool.
+	// Kind is LabelSeed or LabelTool.
 	Kind string `json:"kind"`
 	// Tool and CallID name the call, for LabelTool.
 	Tool   string `json:"tool,omitempty"`
@@ -262,7 +175,7 @@ func (s *Session) LabelSources() map[string]LabelSource {
 }
 
 // AddLabels adds labels to the session from outside any call, from
-// source (LabelSeed or LabelPrompt). It writes an entry only when one of
+// source (LabelSeed). It writes an entry only when one of
 // them is new, and returns the entry it wrote, if any.
 func (s *Session) AddLabels(labels []string, source string) (*Entry, error) {
 	s.mu.Lock()
@@ -536,20 +449,7 @@ func (s *Session) mutate(e Entry) {
 	case EntryDecision:
 		d := e.Decision
 		st := s.calls[d.CallID]
-		if st.info.Decision == nil || st.info.Decision.Verdict == Hold {
-			// A call counts once, when its first final verdict lands.
-			if d.Verdict != Hold {
-				s.decided++
-			}
-		}
-		st.info.Decision = &Decision{Verdict: d.Verdict, Reason: d.Reason, Labels: d.Labels, Deferred: d.Deferred}
-		st.info.Resolved = d.Resolved
-		switch {
-		case d.Verdict == Hold:
-			st.info.HoldSHA256 = d.InputSHA256
-		case d.Resolved && d.Verdict == Allow:
-			st.info.ApprovedSHA256 = d.InputSHA256
-		}
+		st.info.Decision = &Decision{Verdict: d.Verdict, Reason: d.Reason, Labels: d.Labels}
 		if d.Verdict == Allow {
 			s.addLabels(d.Labels, LabelSource{Kind: LabelTool, Tool: d.Tool, CallID: d.CallID, Seq: e.Seq})
 		}
@@ -633,7 +533,7 @@ func (s *Session) sortedLabels() []string {
 }
 
 func (s *Session) view() View {
-	return View{Labels: s.sortedLabels(), ToolCalls: s.decided}
+	return View{Labels: s.sortedLabels()}
 }
 
 func (s *Session) pending() []ToolCall {

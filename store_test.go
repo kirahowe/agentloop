@@ -15,9 +15,9 @@ import (
 
 func sampleEntries(t *testing.T) []agentloop.Entry {
 	t.Helper()
-	a, _ := crashScenario(false)
+	a, _ := crashScenario()
 	s, _ := newSession(t)
-	finish(t, a, s, "go")
+	run(t, a, s, "go")
 	return s.Entries()
 }
 
@@ -61,9 +61,9 @@ func entryJSON(t *testing.T, entries []agentloop.Entry) []string {
 
 func TestFileStoreSessionRoundTrip(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "s.jsonl")
-	a, _ := crashScenario(false)
+	a, _ := crashScenario()
 	s := reopen(t, agentloop.NewFileStore(path))
-	finish(t, a, s, "go")
+	run(t, a, s, "go")
 	s2 := reopen(t, agentloop.NewFileStore(path))
 	if !reflect.DeepEqual(s.Messages(), s2.Messages()) {
 		t.Fatal("conversation differs after reopening the file")
@@ -193,7 +193,7 @@ func TestResumeFromTornFile(t *testing.T) {
 	f.WriteString(`{"seq":1000,"type":"tool_res`)
 	f.Close()
 
-	a, c := crashScenario(false)
+	a, c := crashScenario()
 	s := reopen(t, agentloop.NewFileStore(path))
 	wantReason(t, run(t, a, s, ""), agentloop.ReasonCompleted)
 	if c.count("read") != 0 {

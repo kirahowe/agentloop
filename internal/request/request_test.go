@@ -14,15 +14,13 @@ import (
 	"github.com/kirahowe/agentloop"
 	"github.com/kirahowe/agentloop/command"
 	"github.com/kirahowe/agentloop/internal/usage"
-	"github.com/kirahowe/agentloop/quarantine"
-	"github.com/kirahowe/agentloop/trifecta"
 )
 
 func FuzzLoadRequest(f *testing.F) {
 	good, _ := json.Marshal(map[string]any{
 		"provider": "anthropic", "model": "m", "session": "/tmp/x/s.jsonl", "prompt": "p",
 		"api_key_command": []string{"printf", "k"},
-		"policy":          map[string]any{"unrestricted": true},
+		"policy":          map[string]any{"labels": []string{"private"}},
 		"tools":           []map[string]any{{"name": "t", "description": "d", "parameters": map[string]any{"type": "object", "properties": map[string]any{"a": map[string]any{"type": "string"}}}}},
 		"tool_command":    []string{"x"}, "tool_env": map[string]string{"A": "b"},
 		"limits": map[string]any{"max_turns": 3}, "retry": map[string]any{"retries": 1},
@@ -30,8 +28,9 @@ func FuzzLoadRequest(f *testing.F) {
 	})
 	f.Add(good)
 	f.Add([]byte(`{}`))
-	f.Add([]byte(`{"provider":"anthropic","model":"m","session":"s","prompt":"p","api_key_command":["k"],"tools":[{"name":"mail"}],"tool_command":["x"],"tool_protocol":"envelope","policy":{"tools":{"mail":{"class":"read","labels":["contaminated"]},"read_quarantined":{"class":"read"}}},"quarantine":{"model":"small","tools":["mail"],"retries":2}}`))
-	f.Add([]byte(`{"provider":"anthropic","model":"m","session":"s","prompt":"p","api_key_command":["k"],"mcp_servers":{"m":{"command":["/bin/m","--c={credentials_file}"],"credentials_command":["k"],"send_labels":true}},"tools":[{"name":"look","protocol":"mcp-stdio","server":"m","tool":"lookup","allow_content":["resource"]}],"policy":{"tools":{"look":{"class":"read"}}}}`))
+	f.Add([]byte(`{"provider":"anthropic","model":"m","session":"s","prompt":"p","api_key_command":["k"],"tools":[{"name":"mail"}],"tool_command":["x"],"tool_protocol":"envelope","policy":{"labels":["private"],"tools":{"mail":{"labels":["contaminated"]}},"forbid_labels":["x"]}}`))
+	f.Add([]byte(`{"provider":"anthropic","model":"m","session":"s","prompt":"p","api_key_command":["k"],"tools":[{"name":"mail"}],"tool_command":["x"],"policy":{"tools":{"mail":{"class":"read"}}},"quarantine":{"model":"small"},"resolve":[]}`))
+	f.Add([]byte(`{"provider":"anthropic","model":"m","session":"s","prompt":"p","api_key_command":["k"],"mcp_servers":{"m":{"command":["/bin/m","--c={credentials_file}"],"credentials_command":["k"],"send_labels":true}},"tools":[{"name":"look","protocol":"mcp-stdio","server":"m","tool":"lookup","allow_content":["resource"]}],"policy":{"tools":{"look":{"labels":["private"]}}}}`))
 	f.Add([]byte(`null`))
 	f.Add([]byte(`{"provider":"openai","model":"m","session":"s","tools":[{"name":"a","parameters":{"$ref":"#"}}],"tool_command":["x"]}`))
 	f.Add([]byte(`{"provider":"openai","model":"m","session":"s","tools":[{"name":"a","parameters":{"type":"object","properties":{"a":{"$ref":"#/$defs/a"}},"$defs":{"a":{"$ref":"#/$defs/a"}}}}],"tool_command":["x"]}`))
@@ -89,10 +88,7 @@ func checkAccepted(t *testing.T, req *Request, mode Mode) {
 	if req.TimeoutSeconds > 0 && Seconds(req.TimeoutSeconds) <= 0 {
 		t.Fatal("a positive timeout became none")
 	}
-	a, err := req.Agent("k", req.stubMCP())
-	if err != nil {
-		t.Fatalf("an accepted request does not build: %v", err)
-	}
+	a := req.Agent("k", req.stubMCP())
 	sess, _ := agentloop.OpenSession(agentloop.NewMemoryStore())
 	// The agent the request describes must start: an accepted request
 	// never fails at tool setup.
@@ -130,8 +126,9 @@ func TestFetchKeyTrimsAndFails(t *testing.T) {
 	}
 }
 
-// A real policy becomes the agent's labels and a trifecta policy, and
-// envelope tools; an unrestricted one adds neither.
+// A policy becomes the agent's labels, its forbid list and a policy that
+// gives each tool's labels, and command tools speak the envelope; with no
+// policy the agent has none of those and every tool is allowed.
 func TestPolicyBuildsTheAgent(t *testing.T) {
 	dir := t.TempDir()
 	load := func(m map[string]any) *Request {
@@ -151,33 +148,37 @@ func TestPolicyBuildsTheAgent(t *testing.T) {
 		"tools":        []map[string]any{{"name": "web_fetch"}, {"name": "memo_send"}},
 		"tool_command": []string{"x"},
 		"policy": map[string]any{
-			"labels": []string{"private"},
+			"labels":        []string{"private"},
+			"forbid_labels": []string{"secret"},
 			"tools": map[string]any{
-				"web_fetch": map[string]any{"class": "egress", "labels": []string{"contaminated"}},
-				"memo_send": map[string]any{"class": "write", "always_hold": true},
+				"web_fetch": map[string]any{"labels": []string{"contaminated", "web"}},
 			},
 		},
 		"tool_protocol": "envelope",
 	}
-	a, _ := load(base).Agent("", nil)
-	if !reflect.DeepEqual(a.Labels, []string{"private"}) {
-		t.Fatalf("labels %v", a.Labels)
+	a := load(base).Agent("", nil)
+	if !reflect.DeepEqual(a.Labels, []string{"private"}) || !reflect.DeepEqual(a.Forbid, []string{"secret"}) {
+		t.Fatalf("labels %v forbid %v", a.Labels, a.Forbid)
 	}
-	p, ok := a.Policy.(trifecta.Policy)
-	if !ok || p.Tools["web_fetch"].Class != trifecta.Egress || !p.Tools["memo_send"].AlwaysHold ||
-		!reflect.DeepEqual(p.Tools["web_fetch"].Labels, []string{"contaminated"}) {
-		t.Fatalf("policy %+v", a.Policy)
+	call := func(name string) agentloop.Decision {
+		return a.Policy.Decide(t.Context(), agentloop.ToolCall{Name: name, Input: json.RawMessage(`{}`)}, agentloop.View{})
+	}
+	if d := call("web_fetch"); d.Verdict != agentloop.Allow || !reflect.DeepEqual(d.Labels, []string{"contaminated", "web"}) {
+		t.Fatalf("web_fetch: %+v", d)
+	}
+	if d := call("memo_send"); d.Verdict != agentloop.Allow || len(d.Labels) != 0 {
+		t.Fatalf("memo_send: %+v", d)
 	}
 	for _, tool := range a.Tools {
-		if ct := tool.(*command.Tool); !ct.Envelope || !ct.KnownLabel("private") || ct.KnownLabel("x") {
+		if ct := tool.(*command.Tool); !ct.Envelope {
 			t.Fatalf("tool %+v", ct)
 		}
 	}
-	base["policy"] = map[string]any{"unrestricted": true}
+	delete(base, "policy")
 	delete(base, "tool_protocol")
-	a, _ = load(base).Agent("", nil)
-	if a.Policy != nil || a.Labels != nil || a.Tools[0].(*command.Tool).Envelope {
-		t.Fatalf("an unrestricted request got %+v", a)
+	a = load(base).Agent("", nil)
+	if a.Policy != nil || a.Labels != nil || a.Forbid != nil || a.Tools[0].(*command.Tool).Envelope {
+		t.Fatalf("a request with no policy got %+v", a)
 	}
 }
 
@@ -188,7 +189,6 @@ func TestModes(t *testing.T) {
 	base := func() map[string]any {
 		return map[string]any{
 			"provider": "anthropic", "model": "m", "api_key_command": []string{"printf", "k"},
-			"policy":       map[string]any{"unrestricted": true},
 			"tools":        []map[string]any{{"name": "look", "parameters": map[string]any{"type": "object"}}},
 			"tool_command": []string{"x"},
 		}
@@ -225,17 +225,29 @@ func TestModes(t *testing.T) {
 		{"acp refuses context_window", ACP, acp(func(m map[string]any) { m["context_window"] = 200000 }), `unknown field "context_window"`},
 		{"acp refuses NUL in session_dir", ACP, acp(func(m map[string]any) { m["session_dir"] = "/tmp/a\x00b" }), "NUL"},
 		{"run minimal", Run, run(same), ""},
-		{"run refuses resolve without a policy", Run, run(func(m map[string]any) {
-			m["resolve"] = []map[string]any{{"call_id": "a", "verdict": "deny", "input_sha256": "x"}}
-		}), "resolve needs a policy"},
-		{"run with resolve", Run, run(func(m map[string]any) {
-			m["policy"] = map[string]any{"tools": map[string]any{"look": map[string]any{"class": "read"}}}
+		{"run with a policy", Run, run(func(m map[string]any) {
+			m["policy"] = map[string]any{"labels": []string{"private"}, "tools": map[string]any{"look": map[string]any{"labels": []string{"contaminated"}}}}
 			m["tool_protocol"] = "envelope"
-			m["resolve"] = []map[string]any{{"call_id": "a", "verdict": "allow", "input_sha256": "x"}, {"call_id": "b", "verdict": "deny", "reason": "no", "input_sha256": "y"}}
 		}), ""},
-		{"acp refuses resolve", ACP, acp(func(m map[string]any) {
-			m["resolve"] = []map[string]any{{"call_id": "a", "verdict": "allow"}}
-		}), "resolve is not used"},
+		{"a policy with command tools needs the envelope", Run, run(func(m map[string]any) {
+			m["policy"] = map[string]any{"labels": []string{"private"}}
+		}), "needs \"tool_protocol\""},
+		{"a policy with a bad label", Run, run(func(m map[string]any) {
+			m["policy"] = map[string]any{"forbid_labels": []string{""}}
+			m["tool_protocol"] = "envelope"
+		}), "policy.forbid_labels"},
+		{"a policy that cannot start", Run, run(func(m map[string]any) {
+			m["policy"] = map[string]any{"labels": []string{"private"}, "forbid_labels": []string{"private"}}
+			m["tool_protocol"] = "envelope"
+		}), "cannot start"},
+		{"a policy for no tool", Run, run(func(m map[string]any) {
+			m["policy"] = map[string]any{"tools": map[string]any{"ghost": map[string]any{}}}
+			m["tool_protocol"] = "envelope"
+		}), `"ghost", which is not one of the tools`},
+		{"a tool label the policy forbids", Run, run(func(m map[string]any) {
+			m["policy"] = map[string]any{"forbid_labels": []string{"private"}, "tools": map[string]any{"look": map[string]any{"labels": []string{"private"}}}}
+			m["tool_protocol"] = "envelope"
+		}), "forbids"},
 		{"run refuses session_dir", Run, run(func(m map[string]any) { m["session_dir"] = "/tmp" }), "session_dir is only for agentloop acp"},
 		{"run refuses tool_kinds", Run, run(func(m map[string]any) { m["tool_kinds"] = map[string]string{} }), "tool_kinds is only"},
 		{"run refuses title", Run, run(func(m map[string]any) { m["title"] = "x" }), "title is only"},
@@ -267,182 +279,59 @@ func TestModes(t *testing.T) {
 	}
 }
 
-func quarantineBase() map[string]any {
-	return map[string]any{
-		"provider": "anthropic", "model": "big", "api_key_command": []string{"printf", "k"},
-		"session": "/tmp/s.jsonl", "prompt": "p",
-		"tools": []map[string]any{
-			{"name": "mail_read", "parameters": map[string]any{"type": "object"}},
-			{"name": "web_post", "parameters": map[string]any{"type": "object"}},
+// A request written for the agentloop that held calls is refused with a
+// message that says the field is gone, for every removed field wherever
+// the document puts it.
+func TestRemovedFieldsAreRefused(t *testing.T) {
+	removed := map[string]func(m map[string]any){
+		"resolve":      func(m map[string]any) { m["resolve"] = []map[string]any{} },
+		"quarantine":   func(m map[string]any) { m["quarantine"] = map[string]any{"model": "small"} },
+		"workbench":    func(m map[string]any) { m["workbench"] = map[string]any{} },
+		"unrestricted": func(m map[string]any) { m["policy"] = map[string]any{"unrestricted": true} },
+		"class": func(m map[string]any) {
+			m["policy"] = map[string]any{"tools": map[string]any{"look": map[string]any{"class": "read"}}}
 		},
-		"tool_command":  []string{"x"},
-		"tool_protocol": "envelope",
-		"policy": map[string]any{
-			"tools": map[string]any{
-				"mail_read":        map[string]any{"class": "read", "labels": []string{"contaminated", "private"}},
-				"web_post":         map[string]any{"class": "egress"},
-				"read_quarantined": map[string]any{"class": "read"},
-			},
+		"always_hold": func(m map[string]any) {
+			m["policy"] = map[string]any{"tools": map[string]any{"look": map[string]any{"always_hold": true}}}
 		},
-		"quarantine": map[string]any{"model": "small", "effort": "low", "max_output_tokens": 512, "retries": 2, "tools": []string{"mail_read"}},
-	}
-}
-
-func TestQuarantineRequests(t *testing.T) {
-	q := func(m map[string]any) map[string]any { return m["quarantine"].(map[string]any) }
-	pol := func(m map[string]any) map[string]any { return m["policy"].(map[string]any)["tools"].(map[string]any) }
-	cases := []struct {
-		name string
-		mode Mode
-		edit func(m map[string]any)
-		want string
-	}{
-		{"accepted", Run, func(map[string]any) {}, ""},
-		{"retries default", Run, func(m map[string]any) { delete(q(m), "retries") }, ""},
-		{"acp with a kind for the reader", ACP, func(m map[string]any) {
-			delete(m, "session")
-			delete(m, "prompt")
-			m["session_dir"] = "/tmp/sessions"
-			m["tool_kinds"] = map[string]string{"read_quarantined": "read"}
-		}, ""},
-		{"needs a policy", Run, func(m map[string]any) {
-			m["policy"] = map[string]any{"unrestricted": true}
-			delete(m, "tool_protocol")
-		}, "quarantine needs a policy"},
-		{"needs a model", Run, func(m map[string]any) { delete(q(m), "model") }, "quarantine has no model"},
-		{"bad effort", Run, func(m map[string]any) { q(m)["effort"] = "huge" }, "quarantine.effort"},
-		{"negative max_output_tokens", Run, func(m map[string]any) { q(m)["max_output_tokens"] = -1 }, "max_output_tokens"},
-		{"negative retries", Run, func(m map[string]any) { q(m)["retries"] = -1 }, "quarantine.retries"},
-		{"too many retries", Run, func(m map[string]any) { q(m)["retries"] = MaxQuarantineRetries + 1 }, "quarantine.retries"},
-		{"no inner tools", Run, func(m map[string]any) { q(m)["tools"] = []string{} }, "names no tool"},
-		{"inner tool not among the tools", Run, func(m map[string]any) { q(m)["tools"] = []string{"ghost"} }, `"ghost", which is not one of the tools`},
-		{"an egress inner tool", Run, func(m map[string]any) { q(m)["tools"] = []string{"mail_read", "web_post"} }, ""},
-		{"a write inner tool", Run, func(m map[string]any) {
-			pol(m)["web_post"] = map[string]any{"class": "write"}
-			q(m)["tools"] = []string{"web_post"}
-		}, `whose class is "write"`},
-		{"an act inner tool", Run, func(m map[string]any) {
-			pol(m)["web_post"] = map[string]any{"class": "act"}
-			q(m)["tools"] = []string{"web_post"}
-		}, `whose class is "act"`},
-		{"inner tool twice", Run, func(m map[string]any) { q(m)["tools"] = []string{"mail_read", "mail_read"} }, "twice"},
-		{"the reader itself", Run, func(m map[string]any) { q(m)["tools"] = []string{"read_quarantined"} }, "cannot name read_quarantined itself"},
-		{"no policy entry for the reader", Run, func(m map[string]any) { delete(pol(m), "read_quarantined") }, `no entry for the tool "read_quarantined"`},
-		{"the reader not class read", Run, func(m map[string]any) { pol(m)["read_quarantined"] = map[string]any{"class": "act"} }, "give read_quarantined the class read"},
-		{"a policy entry for the reader without quarantine", Run, func(m map[string]any) { delete(m, "quarantine") }, `"read_quarantined", which is not one of the tools`},
-		{"a tool named like the reader", Run, func(m map[string]any) {
-			m["tools"] = append(m["tools"].([]map[string]any), map[string]any{"name": "read_quarantined"})
-		}, "is built in"},
-		{"a forbidden inner label", Run, func(m map[string]any) {
-			m["policy"].(map[string]any)["forbid_labels"] = []string{"private"}
-		}, "forbid_labels forbids"},
-		{"a reader-only tool", Run, func(m map[string]any) { q(m)["reader_only"] = []string{"mail_read"} }, ""},
-		{"reader-only twice", Run, func(m map[string]any) { q(m)["reader_only"] = []string{"mail_read", "mail_read"} }, "reader_only names \"mail_read\" twice"},
-		{"reader-only outside the reader's tools", Run, func(m map[string]any) { q(m)["reader_only"] = []string{"web_post"} }, "not in quarantine.tools"},
-		{"unknown quarantine field", Run, func(m map[string]any) { q(m)["max_answer_bytes"] = 10 }, "unknown field"},
+		"consent": func(m map[string]any) {
+			m["policy"] = map[string]any{"tools": map[string]any{"look": map[string]any{"consent": []any{}}}}
+		},
 	}
 	dir := t.TempDir()
-	for _, c := range cases {
-		t.Run(c.name, func(t *testing.T) {
-			m := quarantineBase()
-			c.edit(m)
+	for name, edit := range removed {
+		for _, mode := range []Mode{Run, ACP} {
+			m := map[string]any{
+				"provider": "anthropic", "model": "m", "api_key_command": []string{"printf", "k"},
+				"tools": []map[string]any{{"name": "look"}}, "tool_command": []string{"x"}, "tool_protocol": "envelope",
+			}
+			if mode == Run {
+				m["session"], m["prompt"] = "/tmp/s.jsonl", "hi"
+			} else {
+				m["session_dir"] = "/tmp/sessions"
+			}
+			edit(m)
 			b, _ := json.Marshal(m)
 			path := filepath.Join(dir, "r.json")
-			if err := os.WriteFile(path, b, 0o644); err != nil {
-				t.Fatal(err)
+			os.WriteFile(path, b, 0o644)
+			_, err := Load(path, mode)
+			if err == nil || !strings.Contains(err.Error(), "was removed") || !strings.Contains(err.Error(), name) {
+				t.Errorf("%s, mode %d: err = %v", name, mode, err)
 			}
-			req, err := Load(path, c.mode)
-			if c.want == "" {
-				if err != nil {
-					t.Fatalf("refused: %v", err)
-				}
-				checkAccepted(t, req, c.mode)
-				return
+			if _, ok := err.(*usage.Error); !ok {
+				t.Errorf("%s: %T, not a usage error", name, err)
 			}
-			if err == nil || !strings.Contains(err.Error(), c.want) {
-				t.Fatalf("err = %v, want one containing %q", err, c.want)
-			}
-		})
+		}
 	}
 }
 
-func TestQuarantineBuildsTheReader(t *testing.T) {
-	b, _ := json.Marshal(quarantineBase())
-	path := filepath.Join(t.TempDir(), "r.json")
-	os.WriteFile(path, b, 0o644)
-	req, err := Load(path, Run)
-	if err != nil {
-		t.Fatal(err)
-	}
-	a, err := req.Agent("k", req.stubMCP())
-	if err != nil {
-		t.Fatal(err)
-	}
-	var reader *quarantine.Reader
-	for _, tool := range a.Tools {
-		if r, ok := tool.(*quarantine.Reader); ok {
-			reader = r
+// A field no version of agentloop had is an unknown field, not a removed
+// one.
+func TestUnknownFieldIsNotRemoved(t *testing.T) {
+	for _, msg := range []string{`unknown field "foo"`, `unknown field "policy.tools.x.labelz"`, `unknown field "policy.class"`, "bad", ""} {
+		if removedField(msg) != "" {
+			t.Errorf("%q reported as removed", msg)
 		}
-	}
-	if reader == nil {
-		t.Fatal("no reader tool")
-	}
-	if reader.ModelID != "small" || reader.Effort != agentloop.EffortLow || reader.MaxOutputTokens != 512 || reader.Retries != 2 ||
-		len(reader.Inner) != 1 || reader.Inner[0].Spec().Name != "mail_read" || reader.Retry != agentloop.DefaultRetry ||
-		!reflect.DeepEqual(reader.Labels, map[string][]string{"mail_read": {"contaminated", "private"}}) {
-		t.Errorf("reader = %+v", reader)
-	}
-	p := a.Policy.(trifecta.Policy)
-	if !reflect.DeepEqual(p.Readers, map[string][]string{"read_quarantined": {"mail_read"}}) {
-		t.Errorf("readers = %v", p.Readers)
-	}
-}
-
-// A reader-only tool is not offered to the model, but the reader still
-// reads through it.
-func TestReaderOnlyToolsReachOnlyTheReader(t *testing.T) {
-	m := quarantineBase()
-	m["quarantine"].(map[string]any)["reader_only"] = []string{"mail_read"}
-	b, _ := json.Marshal(m)
-	path := filepath.Join(t.TempDir(), "r.json")
-	os.WriteFile(path, b, 0o644)
-	req, err := Load(path, Run)
-	if err != nil {
-		t.Fatal(err)
-	}
-	a, err := req.Agent("k", req.stubMCP())
-	if err != nil {
-		t.Fatal(err)
-	}
-	var reader *quarantine.Reader
-	for _, tool := range a.Tools {
-		if tool.Spec().Name == "mail_read" {
-			t.Fatal("mail_read is offered to the model")
-		}
-		if r, ok := tool.(*quarantine.Reader); ok {
-			reader = r
-		}
-	}
-	if reader == nil || len(reader.Inner) != 1 || reader.Inner[0].Spec().Name != "mail_read" {
-		t.Fatalf("reader = %+v", reader)
-	}
-}
-
-// A reader that cannot be built is an error from Agent, never a request
-// that quietly runs without it.
-func TestAgentReportsAReaderError(t *testing.T) {
-	b, _ := json.Marshal(quarantineBase())
-	path := filepath.Join(t.TempDir(), "r.json")
-	os.WriteFile(path, b, 0o644)
-	req, err := Load(path, Run)
-	if err != nil {
-		t.Fatal(err)
-	}
-	// Past Load, so only Agent can notice.
-	bad := -1
-	req.Quarantine.Retries = &bad
-	if a, err := req.Agent("k", req.stubMCP()); err == nil || a != nil {
-		t.Fatalf("agent %v, err %v", a, err)
 	}
 }
 
@@ -461,9 +350,8 @@ func TestDisplayRefPrefix(t *testing.T) {
 			t.Errorf("%q: %v", good, err)
 			continue
 		}
-		a, err := r.Agent("key", nil)
-		if err != nil || a.DisplayRefPrefix != good {
-			t.Errorf("%q: agent %v %v", good, a, err)
+		if a := r.Agent("key", nil); a.DisplayRefPrefix != good {
+			t.Errorf("%q: agent %v", good, a)
 		}
 	}
 	for _, bad := range []string{"shown", "Shown:x/", "shown:../x]]", "shown:a b", "shown:" + strings.Repeat("a", 81)} {

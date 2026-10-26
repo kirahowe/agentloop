@@ -536,9 +536,7 @@ func checkReplay(t *rapid.T, h *harness, mark int, id acp.SessionId, opts Option
 // a session file. A fresh server loads it, which replays exactly that
 // log, and the conversation is then driven over ACP alone, one prompt at
 // a time, as the core harness drains it: every prompt is answered with
-// Respond of its run's outcome, and the conversation completes. The
-// client answers every question about a held call with cancelled, which
-// denies it. Throughout, the
+// Respond of its run's outcome, and the conversation completes. Throughout, the
 // scenario's own checks hold for every model call, policy decision and
 // tool run the server makes, and at rest the log reloads to the same
 // state, kept everything persisted before, ran no call twice, and
@@ -606,9 +604,6 @@ func TestPropertyResumeAnywhere(t *testing.T) {
 			case err != nil || resp.StopReason != stop:
 				t.Fatalf("prompt %d: got %+v, %v; want %s", i, resp, err, stop)
 			}
-			if o.Reason == agentloop.ReasonHeld {
-				break
-			}
 			complete = o.Reason == agentloop.ReasonCompleted
 		}
 		for _, u := range h.sessionUpdates(id) {
@@ -617,10 +612,7 @@ func TestPropertyResumeAnywhere(t *testing.T) {
 			}
 		}
 		if !complete {
-			es, _ := agentloop.NewFileStore(SessionPath(dir, id)).Load()
-			if s, err := agentloop.OpenSession(agentloop.NewMemoryStore(es...)); err != nil || len(s.Held()) == 0 {
-				t.Fatalf("the conversation did not complete and nothing is held (%v)", err)
-			}
+			t.Fatal("the conversation did not complete")
 		}
 		sc.CheckAtRest(complete)
 	})

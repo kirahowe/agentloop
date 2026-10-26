@@ -16,7 +16,6 @@ import (
 	"time"
 
 	"github.com/kirahowe/agentloop"
-	"github.com/kirahowe/agentloop/trifecta"
 )
 
 // syncBuffer is a writer the server's stderr can be copied to while a
@@ -39,7 +38,7 @@ func (s *syncBuffer) String() string {
 }
 
 func read(labels ...string) ToolConfig {
-	return ToolConfig{Policy: trifecta.Tool{Class: trifecta.Read, Labels: labels}}
+	return ToolConfig{Labels: labels}
 }
 
 func server(t *testing.T, tools map[string]ToolConfig, extra ...string) Server {
@@ -123,7 +122,7 @@ func TestListAndPin(t *testing.T) {
 		t.Fatalf("digests %v, want echo %s", d, want)
 	}
 	// The pinned digests connect again.
-	srv.Tools = map[string]ToolConfig{"echo": {Policy: read().Policy, Digest: d["echo"]}, "structured": {Policy: read().Policy, Digest: d["structured"]}}
+	srv.Tools = map[string]ToolConfig{"echo": {Labels: read().Labels, Digest: d["echo"]}, "structured": {Labels: read().Labels, Digest: d["structured"]}}
 	connect(t, srv)
 	if !strings.Contains(stderr.String(), "helper up") {
 		t.Fatalf("stderr %q", stderr.String())
@@ -140,13 +139,10 @@ func TestAllowlist(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "does not have the tool env") {
 		t.Fatalf("err %v", err)
 	}
-	if _, err := Connect(ctx, server(t, map[string]ToolConfig{"echo": {Policy: trifecta.Tool{Class: "reed"}}})); err == nil {
-		t.Fatal("an unknown class connected")
+	if _, err := Connect(ctx, server(t, map[string]ToolConfig{"echo": read("two\nlines")})); err == nil {
+		t.Fatal("a bad label connected")
 	}
-	if _, err := Connect(ctx, server(t, map[string]ToolConfig{"echo": read("untrusted")})); err == nil {
-		t.Fatal("an unknown label connected")
-	}
-	if _, err := Connect(ctx, server(t, map[string]ToolConfig{"echo": {Policy: read().Policy, AllowContent: []string{"video"}}})); err == nil {
+	if _, err := Connect(ctx, server(t, map[string]ToolConfig{"echo": {Labels: read().Labels, AllowContent: []string{"video"}}})); err == nil {
 		t.Fatal("an unknown content kind connected")
 	}
 }
@@ -168,13 +164,13 @@ func TestDigestDrift(t *testing.T) {
 		t.Fatalf("%+v", r)
 	}
 
-	srv.Tools = map[string]ToolConfig{"echo": {Policy: read().Policy, Digest: pinned}}
+	srv.Tools = map[string]ToolConfig{"echo": {Labels: read().Labels, Digest: pinned}}
 	_, err := Connect(context.Background(), srv)
 	if !errors.As(err, &drift) {
 		t.Fatalf("Connect: %v", err)
 	}
 	// Passing the new digest accepts the new definition.
-	srv.Tools = map[string]ToolConfig{"echo": {Policy: read().Policy, Digest: drift.Got}}
+	srv.Tools = map[string]ToolConfig{"echo": {Labels: read().Labels, Digest: drift.Got}}
 	c2 := connect(t, srv)
 	if !strings.Contains(byName(t, c2, "echo").Spec().Description, "evil") {
 		t.Fatal("new definition not used")
@@ -240,7 +236,7 @@ func TestResultLabels(t *testing.T) {
 		if !reflect.DeepEqual(r.Labels, []string{"private"}) {
 			t.Fatalf("empty labels: %+v", r)
 		}
-		mustFail(t, call(t, c, "echo", `{"msg":"SECRET","labels":["untrusted"]}`), "echo", `unknown label "untrusted"`)
+		mustFail(t, call(t, c, "echo", `{"msg":"SECRET","labels":[""]}`), "echo", "bad label")
 		mustFail(t, call(t, c, "echo", `{"msg":"SECRET","labels":"private"}`), "echo", "not an array")
 		mustFail(t, call(t, c, "echo", `{"msg":"SECRET","labels":[1]}`), "echo", "non-string")
 	}
@@ -251,7 +247,7 @@ func TestContent(t *testing.T) {
 		c := connect(t, server(t, map[string]ToolConfig{"content": read()}))
 		mustFail(t, call(t, c, "content", `{"kind":"`+kind+`"}`), "content", kind)
 
-		c = connect(t, server(t, map[string]ToolConfig{"content": {Policy: read().Policy, AllowContent: []string{kind}}}))
+		c = connect(t, server(t, map[string]ToolConfig{"content": {Labels: read().Labels, AllowContent: []string{kind}}}))
 		r := call(t, c, "content", `{"kind":"`+kind+`"}`)
 		if kind == Resource {
 			// An embedded text resource shows its text, and nothing of
@@ -361,18 +357,6 @@ func TestCloseKillsGroup(t *testing.T) {
 	}
 	if syscall.Kill(pid, 0) == nil {
 		t.Fatalf("child %d outlived Close", pid)
-	}
-}
-
-func TestLintWarnings(t *testing.T) {
-	c := connect(t, server(t, map[string]ToolConfig{"wipe": read(), "echo": read()}))
-	w := c.Warnings()
-	if len(w) != 2 || !strings.Contains(w[0], "destructiveHint") || !strings.Contains(w[1], "openWorldHint") {
-		t.Fatalf("warnings %q", w)
-	}
-	// Only lint: the call runs as configured.
-	if r := call(t, c, "wipe", `{}`); r.Content != "wiped" {
-		t.Fatalf("%+v", r)
 	}
 }
 

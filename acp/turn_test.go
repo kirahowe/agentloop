@@ -203,30 +203,6 @@ func TestPropertyTurn(t *testing.T) {
 	})
 }
 
-// A run that ends held is answered with an error and the session is idle
-// again, so the next prompt starts a run.
-func TestTurnHeldEndsTheTurn(t *testing.T) {
-	turn, effs := Step(Turn{}, Prompt{ID: 1, Content: []acp.ContentBlock{acp.TextBlock("go")}})
-	if !reflect.DeepEqual(effs, []Effect{StartRun{Prompt: "go"}}) {
-		t.Fatalf("%#v", effs)
-	}
-	turn, effs = Step(turn, RunEnded{Outcome: &agentloop.Outcome{Reason: agentloop.ReasonHeld,
-		Held: []agentloop.HeldCall{{ToolCall: agentloop.ToolCall{ID: "c1", Name: "rm"}}}}})
-	if len(effs) != 1 {
-		t.Fatalf("%#v", effs)
-	}
-	re, ok := effs[0].(RespondError)
-	if !ok || re.ID != 1 || re.Err.Code != -32603 {
-		t.Fatalf("%#v", effs)
-	}
-	if turn.State != Idle {
-		t.Fatalf("state %s", turn.State)
-	}
-	if _, effs = Step(turn, Prompt{ID: 2, Content: []acp.ContentBlock{acp.TextBlock("again")}}); !reflect.DeepEqual(effs, []Effect{StartRun{Prompt: "again"}}) {
-		t.Fatalf("%#v", effs)
-	}
-}
-
 func TestTurnCloseWhileRunning(t *testing.T) {
 	turn, _ := Step(Turn{}, Prompt{ID: 7, Content: []acp.ContentBlock{acp.TextBlock("go")}})
 	turn, effs := Step(turn, Close{})

@@ -3,7 +3,6 @@ package agentloop_test
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"reflect"
 	"slices"
@@ -156,21 +155,6 @@ func TestAnAllowThatWouldAddAForbiddenLabelIsADeny(t *testing.T) {
 	if len(s.Labels()) != 0 {
 		t.Fatalf("labels %v", s.Labels())
 	}
-
-	held := &agentloop.Agent{
-		Model: fake.New(callsThenDone(fake.Call("b", "echo", input("y")))), Tools: []agentloop.Tool{echoTool("echo", c)},
-		Forbid: []string{"private"},
-		Policy: agentloop.PolicyFunc(func(context.Context, agentloop.ToolCall, agentloop.View) agentloop.Decision {
-			return agentloop.Decision{Verdict: agentloop.Hold, Labels: []string{"private"}}
-		}),
-	}
-	s, _ = newSession(t)
-	out := run(t, held, s, "go")
-	wantReason(t, out, agentloop.ReasonHeld)
-	err := held.Resolve(context.Background(), s, agentloop.Resolution{CallID: "b", Verdict: agentloop.Allow, InputSHA256: out.Held[0].InputSHA256})
-	if !errors.Is(err, agentloop.ErrPolicyDenies) {
-		t.Fatalf("resolve: %v", err)
-	}
 }
 
 // Whatever the tools return and whatever the policy adds, a session never
@@ -191,7 +175,13 @@ func TestASessionNeverHoldsAForbiddenLabel(t *testing.T) {
 			calls = append(calls, fake.Call(id, "t", string(in)))
 			want[id] = len(agentloop.Forbidden(labels, forbid)) > 0
 		}
-		m := fake.New(callsThenDone(calls...))
+		respond := callsThenDone(calls...)
+		var requests [][]byte
+		m := fake.New(func(req *agentloop.Request) (*agentloop.Response, error) {
+			b, _ := json.Marshal(req.Messages)
+			requests = append(requests, b)
+			return respond(req)
+		})
 		a := &agentloop.Agent{
 			Model: m, Tools: []agentloop.Tool{labelTool("t")}, Labels: seed, Forbid: forbid,
 			Policy: agentloop.PolicyFunc(func(context.Context, agentloop.ToolCall, agentloop.View) agentloop.Decision {
@@ -214,6 +204,18 @@ func TestASessionNeverHoldsAForbiddenLabel(t *testing.T) {
 				t.Fatalf("a forbidden seed ran: %+v", out)
 			}
 			return
+		}
+		// Nothing a refused result said ever reaches the model, in any
+		// request, nor does its log line.
+		for i := range n {
+			if !want[fmt.Sprintf("c%d", i)] {
+				continue
+			}
+			for _, b := range requests {
+				if strings.Contains(string(b), fmt.Sprintf("got text-%d", i)) || strings.Contains(string(b), fmt.Sprintf("LOG-text-%d", i)) {
+					t.Fatalf("a refused result reached the model: %s", b)
+				}
+			}
 		}
 		results := resultsOf(s.Messages())
 		denied := len(agentloop.Forbidden(policyLabels, forbid)) > 0

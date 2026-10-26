@@ -9,8 +9,8 @@ type modelCall struct {
 }
 
 // callsOf lists the model calls among a run's entries: the assistant
-// messages, and the calls a tool made for the run (a quarantined
-// reader's), which its tool_result records.
+// messages, and the calls a tool made for the run, which its tool_result
+// records.
 func callsOf(entries []agentloop.Entry) []modelCall {
 	var rs []modelCall
 	for _, e := range entries {

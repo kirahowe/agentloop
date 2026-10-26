@@ -7,8 +7,6 @@ import (
 	"sort"
 
 	sdk "github.com/modelcontextprotocol/go-sdk/mcp"
-
-	"github.com/kirahowe/agentloop/trifecta"
 )
 
 // A Listed tool is one a server lists, with its digest, for an operator
@@ -28,7 +26,7 @@ type Listed struct {
 // fails the listing, as it would fail Connect.
 func List(ctx context.Context, srv Server) ([]Listed, error) {
 	probe := srv
-	probe.Tools = map[string]ToolConfig{"-": {Policy: trifecta.Tool{Class: trifecta.Read, Labels: []string{}}}}
+	probe.Tools = map[string]ToolConfig{"-": {}}
 	if err := checkServer(probe); err != nil {
 		return nil, err
 	}

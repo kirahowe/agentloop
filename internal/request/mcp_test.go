@@ -34,8 +34,8 @@ func mcpBase() map[string]any {
 			{"name": "pic", "protocol": "mcp-stdio", "server": "files", "tool": "picture", "allow_content": []string{"image"}},
 		},
 		"policy": map[string]any{"tools": map[string]any{
-			"lookup": map[string]any{"class": "read", "labels": []string{"contaminated"}},
-			"pic":    map[string]any{"class": "read"},
+			"lookup": map[string]any{"labels": []string{"contaminated"}},
+			"pic":    map[string]any{},
 		}},
 	}
 }
@@ -60,24 +60,20 @@ func TestMCPRequests(t *testing.T) {
 			m["tools"] = append(m["tools"].([]map[string]any), map[string]any{"name": "note", "parameters": map[string]any{"type": "object"}})
 			m["tool_command"] = []string{"x"}
 			m["tool_protocol"] = "envelope"
-			pol(m)["note"] = map[string]any{"class": "write"}
+			pol(m)["note"] = map[string]any{}
 		}, ""},
 		{"command tools still need the envelope", func(m map[string]any) {
 			m["tools"] = append(m["tools"].([]map[string]any), map[string]any{"name": "note"})
 			m["tool_command"] = []string{"x"}
-			pol(m)["note"] = map[string]any{"class": "write"}
+			pol(m)["note"] = map[string]any{}
 		}, `needs "tool_protocol"`},
-		{"a reader through an MCP tool", func(m map[string]any) {
-			m["quarantine"] = map[string]any{"model": "small", "tools": []string{"lookup"}}
-			pol(m)["read_quarantined"] = map[string]any{"class": "read"}
-		}, ""},
 		{"acp", func(m map[string]any) {
 			delete(m, "session")
 			delete(m, "prompt")
 			m["session_dir"] = "/tmp/sessions"
 		}, "acp"},
-		{"needs a policy", func(m map[string]any) { m["policy"] = map[string]any{"unrestricted": true} }, "mcp_servers need a policy"},
-		{"no policy entry", func(m map[string]any) { delete(pol(m), "pic") }, `no entry for the tool "pic"`},
+		{"no policy at all", func(m map[string]any) { delete(m, "policy") }, ""},
+		{"a policy entry for no tool", func(m map[string]any) { pol(m)["ghost"] = map[string]any{} }, `"ghost", which is not one of the tools`},
 		{"unknown protocol", func(m map[string]any) { tool(m, 0)["protocol"] = "mcp-sse" }, `unknown protocol "mcp-sse"`},
 		{"an http tool from a stdio server", func(m map[string]any) { tool(m, 0)["protocol"] = "mcp-http" }, "comes from a server with a url"},
 		{"a remote server", func(m map[string]any) {
@@ -110,7 +106,7 @@ func TestMCPRequests(t *testing.T) {
 		{"fixed args on a command tool", func(m map[string]any) {
 			m["tools"] = append(m["tools"].([]map[string]any), map[string]any{"name": "note", "parameters": map[string]any{"type": "object"},
 				"fixed_args": map[string]any{"a": 1}})
-			pol(m)["note"] = map[string]any{"class": "write"}
+			pol(m)["note"] = map[string]any{}
 		}, "only for"},
 		{"unknown server", func(m map[string]any) { tool(m, 0)["server"] = "nope" }, `MCP server "nope"`},
 		{"no remote name", func(m map[string]any) { delete(tool(m, 0), "tool") }, "server's name for it"},
@@ -235,17 +231,14 @@ func TestStartMCPCredentials(t *testing.T) {
 		{"name": "who", "protocol": "mcp-stdio", "server": "files", "tool": "whoami"},
 		{"name": "wipe", "protocol": "mcp-stdio", "server": "files", "tool": "wipe"},
 	}
-	m["policy"] = map[string]any{"tools": map[string]any{"who": map[string]any{"class": "read"}, "wipe": map[string]any{"class": "read"}}}
+	m["policy"] = map[string]any{"tools": map[string]any{"who": map[string]any{}, "wipe": map[string]any{}}}
 	req := loadMap(t, m)
 	var log bytes.Buffer
 	servers, err := req.StartMCP(t.Context(), &log)
 	if err != nil {
 		t.Fatal(err)
 	}
-	a, err := req.Agent("k", servers)
-	if err != nil {
-		t.Fatal(err)
-	}
+	a := req.Agent("k", servers)
 	if len(a.Pins) != 2 || a.Pins["who"] == "" || a.Pins["who"] != servers.Pins["who"] {
 		t.Fatalf("pins %v", a.Pins)
 	}
@@ -280,10 +273,13 @@ func TestStartMCPCredentials(t *testing.T) {
 	if strings.Contains(l, secret) || strings.Contains(res.Content, secret) {
 		t.Fatalf("the secret leaked: %s", l)
 	}
-	for _, want := range []string{"mcpserver up", "tool who pinned at sha256 " + a.Pins["who"], "warning: tool wipe: configured read, but destructiveHint is true"} {
+	for _, want := range []string{"mcpserver up", "tool who pinned at sha256 " + a.Pins["who"]} {
 		if !strings.Contains(l, want) {
 			t.Errorf("log lacks %q:\n%s", want, l)
 		}
+	}
+	if strings.Contains(l, "warning") {
+		t.Errorf("annotations are no longer linted:\n%s", l)
 	}
 }
 
@@ -335,21 +331,20 @@ func TestStartMCPFailures(t *testing.T) {
 // can leave a call unanswered for ever.
 func TestMCPToolTimeout(t *testing.T) {
 	m := mcpBase()
-	a, err := loadMap(t, m).Agent("k", nil)
-	if err != nil || a.ToolTimeout != DefaultMCPToolTimeout {
-		t.Fatalf("timeout %v, %v", a.ToolTimeout, err)
+	if a := loadMap(t, m).Agent("k", nil); a.ToolTimeout != DefaultMCPToolTimeout {
+		t.Fatalf("timeout %v", a.ToolTimeout)
 	}
 	m["tool_timeout_seconds"] = 5
-	if a, _ := loadMap(t, m).Agent("k", nil); a.ToolTimeout != 5*time.Second {
+	if a := loadMap(t, m).Agent("k", nil); a.ToolTimeout != 5*time.Second {
 		t.Fatalf("timeout %v", a.ToolTimeout)
 	}
 	delete(m, "tool_timeout_seconds")
 	m["tools"] = []map[string]any{{"name": "x"}}
 	m["tool_command"] = []string{"x"}
 	m["tool_protocol"] = "envelope"
-	m["policy"] = map[string]any{"tools": map[string]any{"x": map[string]any{"class": "read"}}}
+	m["policy"] = map[string]any{"tools": map[string]any{"x": map[string]any{}}}
 	delete(m, "mcp_servers")
-	if a, _ := loadMap(t, m).Agent("k", nil); a.ToolTimeout != 0 {
+	if a := loadMap(t, m).Agent("k", nil); a.ToolTimeout != 0 {
 		t.Fatalf("a request without MCP got %v", a.ToolTimeout)
 	}
 }

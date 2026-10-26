@@ -178,7 +178,6 @@ func newFixture(t *testing.T, api *fakeAPI, script string) *fixture {
 		"prompt":          "go",
 		"session":         f.session,
 		"api_key_command": []string{"printf", "%s", secretKey},
-		"policy":          map[string]any{"unrestricted": true},
 		"tools": []map[string]any{{
 			"name": "probe", "description": "probe",
 			"parameters": map[string]any{"type": "object"},

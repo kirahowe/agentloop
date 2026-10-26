@@ -241,7 +241,6 @@ func newChaosWorld(t *testing.T, rng *rand.Rand) *chaosWorld {
 		"base_url":        w.api.URL,
 		"session":         w.session,
 		"api_key_command": []string{"printf", "%s", chaosKey},
-		"policy":          map[string]any{"unrestricted": true},
 		"tools": []map[string]any{{
 			"name": "ledger", "description": "append to the ledger",
 			"parameters": map[string]any{"type": "object", "properties": map[string]any{"n": map[string]any{"type": "string"}}},

@@ -13,7 +13,6 @@ import (
 
 	"github.com/kirahowe/agentloop"
 	"github.com/kirahowe/agentloop/internal/scenario"
-	"github.com/kirahowe/agentloop/trifecta"
 )
 
 // run is one generated scenario: the events every run reported, in order,
@@ -376,7 +375,7 @@ func checkTextConserved(t *rapid.T, s stream, entries []agentloop.Entry) {
 func checkLabels(t *rapid.T, ups []Update, entries []agentloop.Entry) {
 	var final []string
 	for _, e := range entries {
-		final = trifecta.Union(final, entryLabels(e))
+		final = agentloop.UnionLabels(final, entryLabels(e))
 	}
 	var prev []string
 	for _, u := range ups {

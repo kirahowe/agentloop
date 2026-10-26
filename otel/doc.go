@@ -52,33 +52,28 @@
 // Everything that has no place in the conventions is under the agentloop.
 // prefix: agentloop.labels (the session's labels, as a string array),
 // agentloop.run.reason, agentloop.run.turns, agentloop.run.limit,
-// agentloop.held_calls, agentloop.stop, agentloop.call.state,
-// agentloop.policy.verdict, agentloop.policy.resolved, agentloop.retry and
+// agentloop.stop, agentloop.call.state,
+// agentloop.policy.verdict, agentloop.retry and
 // agentloop.retry.wait_ms. Policy decisions, call starts and label changes
 // are span events: agentloop.policy.decision, agentloop.call.started and
-// agentloop.labels. A hold is a decision event with verdict "hold" on the
-// call's span, and the resolving decision follows it with resolved true,
-// so the wait is the time between the two.
+// agentloop.labels.
 //
 // Labels say that a session held private or contaminated data, so they are
 // metadata, not content, and are always exported. Treat the telemetry
 // backend as inside the policy.
 //
-// Three more entry types have a place. A pins entry is an event
+// Two more entry types have a place. A pins entry is an event
 // agentloop.pins on the run span, with the pinned tool names in
-// agentloop.pins.tools (the digests stay out). A decision's deferred labels
-// are agentloop.policy.deferred on its decision event. A tool_result's
-// usage, the model calls a quarantined reader made, becomes one
+// agentloop.pins.tools (the digests stay out). A tool_result's
+// usage, the model calls the tool made, becomes one
 // "chat {model}" span (CLIENT) per call under the execute_tool span, with
 // gen_ai.usage.*. The convention's "SHOULD NOT record two spans for one
 // call" is about the MCP client span, not about a tool that calls a
 // model, so a child inference span is the right shape here. The log has no
-// times for those calls, so each spans its tool call. The reader's calls
-// also count in a crashed run's usage, as they do in an outcome's. A
-// tool_result's quarantine report is agentloop.quarantine.tool,
-// agentloop.quarantine.free_text and agentloop.quarantine.dropped on the
-// tool span. The outcome reason tools_unavailable is not in the log (the
-// run never starts), so nothing converts it.
+// times for those calls, so each spans its tool call. Those calls
+// also count in a crashed run's usage, as they do in an outcome's. The
+// outcome reason tools_unavailable is not in the log (the run never
+// starts), so nothing converts it.
 //
 // Options.ParentTraceID and ParentSpanID hang every run under a span made
 // elsewhere; the runs then share that trace.
@@ -90,7 +85,7 @@
 // message, the last tool result or the previous model error). That includes
 // the loop's own overhead, so it overstates the model's latency a little.
 // A tool span starts at its first decision and ends at its tool_result. A
-// call held in one run and finished in a later one belongs to the later
+// call decided in one run and finished in a later one belongs to the later
 // run: its start is moved to that run's start, and its decision events keep
 // their real times. Times are never invented: a span whose clock went
 // backwards is given a zero length.
@@ -98,12 +93,12 @@
 // # Content
 //
 // By default no session content is exported: no prompts, messages, tool
-// inputs or results, policy reasons, input digests, tool logs or error
+// inputs or results, policy reasons, tool logs or error
 // messages. Options.IncludeContent turns on the convention's opt-in
 // attributes: gen_ai.input.messages and gen_ai.output.messages on chat
 // spans, gen_ai.output.messages on the run span, gen_ai.tool.call.arguments
 // and gen_ai.tool.call.result on tool spans, and exception.message, with
-// agentloop.policy.reason, agentloop.policy.input_sha256, agentloop.refusal,
+// agentloop.policy.reason, agentloop.refusal,
 // agentloop.tool.error and agentloop.tool.log. Structured values are
 // recorded as JSON strings, which the conventions allow on spans.
 //

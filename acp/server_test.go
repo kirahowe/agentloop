@@ -93,24 +93,19 @@ func parseLines(t tb, lines [][]byte) []message {
 	return out
 }
 
-// testClient is the client side: it keeps every update and answers any
-// permission request with permit, or with cancelled when permit is nil.
+// testClient is the client side: it keeps every update, and every
+// permission request, which the server must never make.
 type testClient struct {
 	mu       sync.Mutex
 	updates  []acp.SessionNotification
 	onUpdate func(acp.SessionNotification)
-	permit   func(context.Context, acp.RequestPermissionRequest) (acp.RequestPermissionResponse, error)
 	asked    []acp.RequestPermissionRequest
 }
 
-func (c *testClient) RequestPermission(ctx context.Context, req acp.RequestPermissionRequest) (acp.RequestPermissionResponse, error) {
+func (c *testClient) RequestPermission(_ context.Context, req acp.RequestPermissionRequest) (acp.RequestPermissionResponse, error) {
 	c.mu.Lock()
 	c.asked = append(c.asked, req)
-	permit := c.permit
 	c.mu.Unlock()
-	if permit != nil {
-		return permit(ctx, req)
-	}
 	return acp.RequestPermissionResponse{Outcome: acp.NewRequestPermissionOutcomeCancelled()}, nil
 }
 
@@ -192,6 +187,13 @@ func serveConfigured(t tb, dir string, agent *agentloop.Agent, opts Options, not
 		defer cancel()
 		h.srv.Shutdown(ctx)
 		<-conn.Done()
+		// No call is ever held, so the server never asks the client.
+		h.cl.mu.Lock()
+		asked := len(h.cl.asked)
+		h.cl.mu.Unlock()
+		if asked != 0 {
+			t.Fatalf("the server asked the client for permission %d times", asked)
+		}
 	})
 	req := acp.InitializeRequest{ProtocolVersion: acp.ProtocolVersion(acp.WireProtocolVersion)}
 	if notices {
@@ -338,8 +340,7 @@ func goldenAgent(c goldenCase, record func(agentloop.Event)) *agentloop.Agent {
 
 // TestServerSendsTheTranslation runs the golden cases through the server,
 // with and without the client's notices capability: a reply, a tool loop,
-// a denied call, a retry, a refusal, a model error, a held call and a
-// limit. What reaches the client for the turn is exactly the translation
+// a denied call, a retry, a refusal, a model error and a limit. What reaches the client for the turn is exactly the translation
 // of the run's events, in order, every update validates and carries the
 // session id, and the response is Respond of the outcome, after every
 // update and with none following it.
@@ -715,32 +716,8 @@ func noModel(t *testing.T) agentloop.Model {
 	})
 }
 
-// A prompt whose content brings a label the session may not hold is
-// refused before the label is written: the session stays as it was, and a
-// prompt without it runs.
-func TestAPromptBringingAForbiddenLabelIsRefusedBeforeItIsRecorded(t *testing.T) {
-	h := serve(t, &agentloop.Agent{Model: fake.Script(fake.Text("Hello.")), Forbid: []string{"contaminated"}}, Options{}, false)
-	id := h.newSession()
-	_, err := h.client.Prompt(h.ctx(), acp.PromptRequest{SessionId: id, Prompt: []acp.ContentBlock{
-		acp.TextBlock("read this"), acp.ResourceLinkBlock("page", "https://example.com/x")}})
-	var re *acp.RequestError
-	if !errors.As(err, &re) || !strings.Contains(re.Message, "may not hold") {
-		t.Fatalf("prompt: %v", err)
-	}
-	if resp, err := h.prompt(id, "hi"); err != nil || resp.StopReason != acp.StopReasonEndTurn {
-		t.Fatalf("%+v, %v", resp, err)
-	}
-	b, err := os.ReadFile(SessionPath(h.dir, id))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if strings.Contains(string(b), "contaminated") {
-		t.Fatalf("the session took the label: %s", b)
-	}
-}
-
 // A prompt on a session that pinned another definition of a tool is
-// refused before its labels are written.
+// refused before anything is written.
 func TestAPromptOnARepinnedSessionWritesNothing(t *testing.T) {
 	dir := t.TempDir()
 	before := serveIn(t, dir, &agentloop.Agent{Model: fake.Script(fake.Text("hi")), Pins: map[string]string{"t": "aa"}}, Options{}, false)

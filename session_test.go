@@ -40,7 +40,6 @@ func TestSessionDerivesStateFromEntries(t *testing.T) {
 		msgEntry(assistantCalls("a", "b", "c"), agentloop.StopToolUse, u),
 		decisionEntry("a", agentloop.Allow, "z-label", "a-label"),
 		startedEntry("a"),
-		decisionEntry("b", agentloop.Hold, "never"),
 		decisionEntry("c", agentloop.Deny, "also-never"),
 		resultEntry("c", "denied"),
 		resultEntry("a", "ok", "from-result"),
@@ -52,7 +51,7 @@ func TestSessionDerivesStateFromEntries(t *testing.T) {
 	if s.Usage() != u {
 		t.Fatalf("usage %+v", s.Usage())
 	}
-	if got := s.View(); got.ToolCalls != 2 || !got.Has("z-label") || got.Has("never") {
+	if got := s.View(); !got.Has("z-label") || got.Has("never") || got.Has("also-never") {
 		t.Fatalf("view %+v", got)
 	}
 	a, _ := s.Call("a")
@@ -60,14 +59,11 @@ func TestSessionDerivesStateFromEntries(t *testing.T) {
 		t.Fatalf("a: %+v", a)
 	}
 	b, _ := s.Call("b")
-	if !b.Held() || b.Started || b.Finished {
+	if b.Decision != nil || b.Started || b.Finished {
 		t.Fatalf("b: %+v", b)
 	}
 	if _, ok := s.Call("zz"); ok {
 		t.Fatal("found a call that does not exist")
-	}
-	if held := s.Held(); len(held) != 1 || held[0].ID != "b" {
-		t.Fatalf("held %+v", held)
 	}
 	if p := s.Pending(); len(p) != 1 || p[0].ID != "b" {
 		t.Fatalf("pending %+v", p)
@@ -93,16 +89,9 @@ func TestSessionLateResultJoinsItsMessage(t *testing.T) {
 		msgEntry(assistantCalls("a", "b"), agentloop.StopToolUse, agentloop.Usage{}),
 		decisionEntry("b", agentloop.Allow),
 		resultEntry("b", "second"),
-		decisionEntry("a", agentloop.Hold),
+		decisionEntry("a", agentloop.Deny),
 	)
 	s := reopen(t, store)
-	before := s.Messages()
-	if err := s.Resolve("a", agentloop.Decision{Verdict: agentloop.Deny, Reason: "no"}); err != nil {
-		t.Fatal(err)
-	}
-	if len(before[2].Parts) != 1 {
-		t.Fatal("a message handed out earlier changed")
-	}
 	// a was denied; a run would now record its result.
 	entries := append(s.Entries(), resultEntry("a", "no"))
 	s = reopen(t, seqStore(entries...))
@@ -138,35 +127,13 @@ func TestSessionRefusesEntriesThatDoNotFit(t *testing.T) {
 	}
 }
 
-func TestResolveWritesDecisionEntry(t *testing.T) {
-	s := reopen(t, seqStore(
-		msgEntry(agentloop.Text(agentloop.User, "hi"), "", agentloop.Usage{}),
-		msgEntry(assistantCalls("a"), agentloop.StopToolUse, agentloop.Usage{}),
-		decisionEntry("a", agentloop.Hold),
-	))
-	if err := s.Resolve("a", agentloop.Decision{Verdict: agentloop.Allow, Reason: "ok by me", Labels: []string{"approved"}}); err != nil {
-		t.Fatal(err)
-	}
-	e := s.Entries()[len(s.Entries())-1]
-	if e.Type != agentloop.EntryDecision || !e.Decision.Resolved || e.Decision.Reason != "ok by me" || e.Seq != 4 {
-		t.Fatalf("%+v", e)
-	}
-	info, _ := s.Call("a")
-	if info.Held() || info.Decision.Verdict != agentloop.Allow {
-		t.Fatalf("%+v", info)
-	}
-	if got := s.View().ToolCalls; got != 1 {
-		t.Fatalf("ToolCalls = %d", got)
-	}
-}
-
 func TestSessionRebuildsFromAgentRun(t *testing.T) {
-	a, _ := crashScenario(false)
+	a, _ := crashScenario()
 	s, store := newSession(t)
-	finish(t, a, s, "go")
+	run(t, a, s, "go")
 	s2 := reopen(t, store)
 	if !reflect.DeepEqual(s.Messages(), s2.Messages()) || !reflect.DeepEqual(s.Labels(), s2.Labels()) ||
-		s.Usage() != s2.Usage() || !reflect.DeepEqual(s.Turns(), s2.Turns()) || s.View().ToolCalls != s2.View().ToolCalls {
+		s.Usage() != s2.Usage() || !reflect.DeepEqual(s.Turns(), s2.Turns()) {
 		t.Fatal("a reopened session differs from the one that wrote the log")
 	}
 }

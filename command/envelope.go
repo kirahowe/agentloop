@@ -40,7 +40,7 @@ type displayEnvelope struct {
 	Sources []agentloop.Source `json:"sources"`
 }
 
-func (d *displayEnvelope) display(known func(string) bool) (*agentloop.Display, string) {
+func (d *displayEnvelope) display() (*agentloop.Display, string) {
 	if d.Title == nil || d.Body == nil || d.Labels == nil {
 		return nil, "the display must have title, body and labels"
 	}
@@ -48,7 +48,7 @@ func (d *displayEnvelope) display(known func(string) bool) (*agentloop.Display, 
 	if out.Sources == nil {
 		out.Sources = []agentloop.Source{}
 	}
-	if err := agentloop.CheckDisplay(out, known); err != nil {
+	if err := agentloop.CheckDisplay(out); err != nil {
 		return nil, err.Error()
 	}
 	return &out, ""
@@ -84,7 +84,7 @@ func (t *Tool) envelope(ctx context.Context, call agentloop.Call) (agentloop.Res
 	if stdout.cut {
 		return failed(fmt.Sprintf("stdout passed the cap of %d bytes", stdout.max), stderr), nil
 	}
-	res, why := ParseEnvelope(stdout.buf.Bytes(), t.KnownLabel)
+	res, why := ParseEnvelope(stdout.buf.Bytes())
 	if why != "" {
 		return failed(why, stderr), nil
 	}
@@ -110,10 +110,10 @@ func StdinEnvelope(call agentloop.Call) []byte {
 // ParseEnvelope reads an envelope tool's stdout. It returns the result,
 // or why stdout is not exactly one valid envelope: unknown, missing,
 // repeated or differently spelled fields (so "Labels" or a second
-// "labels" cannot replace the labels), any label known does not accept,
+// "labels" cannot replace the labels), any label agentloop.CheckLabel refuses,
 // a display that agentloop.CheckDisplay refuses, or anything after the
 // object but whitespace.
-func ParseEnvelope(stdout []byte, known func(string) bool) (agentloop.Result, string) {
+func ParseEnvelope(stdout []byte) (agentloop.Result, string) {
 	var env stdoutEnvelope
 	if err := strictjson.Object(stdout); err != nil {
 		return agentloop.Result{}, "stdout is not an envelope: " + err.Error()
@@ -127,10 +127,8 @@ func ParseEnvelope(stdout []byte, known func(string) bool) (agentloop.Result, st
 	if env.Labels == nil {
 		return agentloop.Result{}, "the envelope has no labels"
 	}
-	for _, l := range *env.Labels {
-		if known == nil || !known(l) {
-			return agentloop.Result{}, fmt.Sprintf("the envelope has the unknown label %q", l)
-		}
+	if err := agentloop.CheckLabels(*env.Labels); err != nil {
+		return agentloop.Result{}, "the envelope has a bad label: " + err.Error()
 	}
 	labels := *env.Labels
 	if len(labels) == 0 {
@@ -138,7 +136,7 @@ func ParseEnvelope(stdout []byte, known func(string) bool) (agentloop.Result, st
 	}
 	res := agentloop.Result{Content: *env.Content, IsError: env.IsError, Labels: labels}
 	if env.Display != nil {
-		d, why := env.Display.display(known)
+		d, why := env.Display.display()
 		if why != "" {
 			return agentloop.Result{}, why
 		}

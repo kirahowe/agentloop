@@ -10,7 +10,7 @@ import (
 func TestParseEnvelopeReadsADisplay(t *testing.T) {
 	out := `{"content":"closed","labels":["private"],"display":{"title":"Venues","body":"# Venues\nmore",` +
 		`"labels":["contaminated"],"sources":[{"title":"List","ref":"web:https://example.org/"}]}}`
-	res, why := ParseEnvelope([]byte(out), knownLabel)
+	res, why := ParseEnvelope([]byte(out))
 	if why != "" {
 		t.Fatal(why)
 	}
@@ -24,7 +24,7 @@ func TestParseEnvelopeReadsADisplay(t *testing.T) {
 		t.Errorf("content %q", res.Content)
 	}
 	// No sources is an empty list.
-	res, why = ParseEnvelope([]byte(`{"content":"c","labels":[],"display":{"title":"t","body":"b","labels":[]}}`), knownLabel)
+	res, why = ParseEnvelope([]byte(`{"content":"c","labels":[],"display":{"title":"t","body":"b","labels":[]}}`))
 	if why != "" || res.Display == nil || res.Display.Sources == nil {
 		t.Errorf("display %+v, %s", res.Display, why)
 	}
@@ -38,7 +38,7 @@ func TestParseEnvelopeRefusesBadDisplays(t *testing.T) {
 		`{"title":"t","labels":[]}`,
 		`{"body":"b","labels":[]}`,
 		`{"title":"","body":"b","labels":[]}`,
-		`{"title":"t","body":"b","labels":["secret"]}`,
+		`{"title":"t","body":"b","labels":[""]}`,
 		`{"title":"t","body":"b","labels":["contaminated"],"Labels":[]}`,
 		`{"title":"t","body":"b","labels":["contaminated"],"labels":[]}`,
 		`{"title":"t","body":"b","labels":[],"ref":"shown:x"}`,
@@ -48,7 +48,7 @@ func TestParseEnvelopeRefusesBadDisplays(t *testing.T) {
 		`"text"`,
 	} {
 		out := `{"content":"c","labels":[],"display":` + d + `}`
-		if res, why := ParseEnvelope([]byte(out), knownLabel); why == "" {
+		if res, why := ParseEnvelope([]byte(out)); why == "" {
 			t.Errorf("accepted %s as %+v", d, res.Display)
 		}
 	}

@@ -15,7 +15,6 @@ import (
 	"io"
 	"os"
 	"os/signal"
-	"slices"
 	"syscall"
 
 	"github.com/kirahowe/agentloop"
@@ -168,11 +167,6 @@ func runCmd(ctx context.Context, req *request.Request, stdout, stderr io.Writer)
 		return usage.Errorf("run has no prompt and the session has no conversation to resume")
 	}
 
-	if !req.Restricted() && sess.Policed() {
-		// Carrying a labelled or held session on with no policy would
-		// drop everything the policy stood for.
-		return usage.Errorf("the session was run under a policy, and this request has none")
-	}
 	// MCP servers are not started once a signal has come, and a signal
 	// while they start stops them: the outcome says canceled, as it
 	// would from the run itself.
@@ -195,28 +189,15 @@ func runCmd(ctx context.Context, req *request.Request, stdout, stderr io.Writer)
 		return err
 	}
 	defer servers.Close()
-	agent, err := req.Agent(key, servers)
-	if err != nil {
-		return usage.Errorf("%v", err)
-	}
+	agent := req.Agent(key, servers)
 	// A changed tool definition stops the run before anything is
-	// written, a resolution included.
+	// written.
 	var pe *agentloop.PinError
 	if err := sess.CheckPins(agent.Pins); errors.As(err, &pe) {
 		return toolsUnavailable(stdout, req, sess, req.PinsError(pe))
 	} else if err != nil {
 		return err
 	}
-	resolved, err := resolve(ctx, agent, sess, req.Resolve)
-	if err != nil {
-		return err
-	}
-	for _, e := range resolved {
-		if err := writeJSON(stdout, e); err != nil {
-			return err
-		}
-	}
-
 	if req.TimeoutSeconds > 0 {
 		var cancel context.CancelFunc
 		ctx, cancel = context.WithTimeout(ctx, request.Seconds(req.TimeoutSeconds))
@@ -243,42 +224,6 @@ func runCmd(ctx context.Context, req *request.Request, stdout, stderr io.Writer)
 	return writeJSON(stdout, outcomeLine{Type: "outcome", Outcome: *out, Session: req.Session, Labels: ptr(sess.Labels()), CostUSD: runCost(callsOf(entries), priceFunc(req.Provider))})
 }
 
-// resolve records a person's decisions on held calls, from the request's
-// resolve list, and returns the entries that wrote. It checks every one
-// against the session before writing any, so a bad list writes nothing.
-// A call already resolved the same way is passed over (see Agent.Resolve).
-func resolve(ctx context.Context, agent *agentloop.Agent, sess *agentloop.Session, list []agentloop.Resolution) ([]agentloop.Entry, error) {
-	list = slices.Clone(list)
-	for i, r := range list {
-		err := agent.CheckResolve(ctx, sess, r)
-		if r.Verdict == agentloop.Allow && (errors.Is(err, agentloop.ErrPolicyDenies) || err != nil && deniedAsGone(sess, r, noLongerAllowed)) {
-			// The person allowed a call the policy no longer allows at all
-			// (its tool is gone, say). The run carries on with a deny, as
-			// acp does, rather than failing, and the same resolution sent
-			// again is the same deny.
-			list[i].Verdict, list[i].Reason = agentloop.Deny, noLongerAllowed
-			err = agent.CheckResolve(ctx, sess, list[i])
-		} else if r.Verdict == agentloop.Allow && (errors.Is(err, agentloop.ErrSettingsChanged) || err != nil && deniedAsGone(sess, r, agentloop.SettingsChanged)) {
-			// The person allowed the call as it was held, and the
-			// operator's settings for its tool have changed since, so it
-			// would run on input nobody approved. It is denied, and the
-			// model is told why.
-			list[i].Verdict, list[i].Reason = agentloop.Deny, agentloop.SettingsChanged
-			err = agent.CheckResolve(ctx, sess, list[i])
-		}
-		if err != nil {
-			return nil, usage.Errorf("resolve: %v", err)
-		}
-	}
-	before := len(sess.Entries())
-	for _, r := range list {
-		if err := agent.Resolve(ctx, sess, r); err != nil {
-			return nil, err
-		}
-	}
-	return sess.Entries()[before:], nil
-}
-
 // storedLabels reads the labels of the session at path without locking
 // it, for an outcome that never opened it. A session that does not exist
 // has none; one that cannot be read gives nil, so the outcome leaves its
@@ -295,16 +240,6 @@ func storedLabels(path string) *[]string {
 }
 
 func ptr[T any](v T) *T { return &v }
-
-// noLongerAllowed is the reason recorded for an allow the policy refuses.
-const noLongerAllowed = "The tool is no longer allowed."
-
-// deniedAsGone reports whether r's call was already resolved deny, with
-// reason, because an allow for it was refused.
-func deniedAsGone(sess *agentloop.Session, r agentloop.Resolution, reason string) bool {
-	info, ok := sess.Call(r.CallID)
-	return ok && info.Resolved && info.Decision.Verdict == agentloop.Deny && info.Decision.Reason == reason
-}
 
 func writeJSON(w io.Writer, v any) error {
 	b, err := json.Marshal(v)

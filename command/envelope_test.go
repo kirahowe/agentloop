@@ -17,13 +17,10 @@ import (
 	"github.com/kirahowe/agentloop"
 )
 
-func knownLabel(l string) bool { return l == "private" || l == "contaminated" }
-
 func envTool(script string) *Tool {
 	t := sh(script)
 	t.Def = agentloop.ToolSpec{Name: "fetch"}
 	t.Envelope = true
-	t.KnownLabel = knownLabel
 	return t
 }
 
@@ -70,7 +67,7 @@ func TestEnvelopeFailuresShowNothing(t *testing.T) {
 		"not json":         `echo SECRET; echo SECRET >&2`,
 		"two envelopes":    `echo '{"content":"SECRET","labels":[]}{"content":"x","labels":[]}'`,
 		"trailing text":    `echo '{"content":"SECRET","labels":[]} SECRET'`,
-		"unknown label":    `echo '{"content":"SECRET","labels":["untrusted"]}'`,
+		"empty label":      `echo '{"content":"SECRET","labels":[""]}'`,
 		"unknown field":    `echo '{"content":"SECRET","labels":[],"extra":1}'`,
 		"no labels":        `echo '{"content":"SECRET"}'`,
 		"null labels":      `echo '{"content":"SECRET","labels":null}'`,
@@ -136,18 +133,18 @@ func TestParseEnvelopeRefusesRepeatedAndMisspelledKeys(t *testing.T) {
 		`{"content":"x","labels":[]} null`,
 		`{"content":"x","labels":[],"display":{"title":"t","body":"b","labels":[],"n":` + strings.Repeat("9", 1001) + `}}`,
 	} {
-		if res, why := ParseEnvelope([]byte(out), knownLabel); why == "" {
+		if res, why := ParseEnvelope([]byte(out)); why == "" {
 			t.Errorf("accepted %s as %+v", out, res)
 		}
 	}
 }
 
-// ParseEnvelope accepts exactly one envelope object with known labels and
+// ParseEnvelope accepts exactly one envelope object with valid labels and
 // nothing else after it.
 func TestParseEnvelopeProperties(t *testing.T) {
 	rapid.Check(t, func(t *rapid.T) {
 		content := rapid.SampledFrom([]string{"", "x", "a\nb", "café", `{"content":"y"}`}).Draw(t, "content")
-		labels := rapid.SliceOfN(rapid.SampledFrom([]string{"private", "contaminated", "untrusted", "Private"}), 0, 3).Draw(t, "labels")
+		labels := rapid.SliceOfN(rapid.SampledFrom([]string{"private", "contaminated", "", "a\nb", "from the web"}), 0, 3).Draw(t, "labels")
 		isErr := rapid.Bool().Draw(t, "is_error")
 		obj := map[string]any{"content": content, "is_error": isErr, "labels": labels}
 		mut := rapid.IntRange(0, 6).Draw(t, "mutation")
@@ -171,8 +168,8 @@ func TestParseEnvelopeProperties(t *testing.T) {
 			b = b[:rapid.IntRange(0, len(b)-1).Draw(t, "cut")]
 		}
 		stdout := []byte(pad + string(b) + pad + tail)
-		res, why := ParseEnvelope(stdout, knownLabel)
-		allKnown := !slices.ContainsFunc(labels, func(l string) bool { return !knownLabel(l) })
+		res, why := ParseEnvelope(stdout)
+		allKnown := !slices.ContainsFunc(labels, func(l string) bool { return agentloop.CheckLabel(l) != nil })
 		valid := (mut == 0 || mut == 3) && allKnown
 		if valid != (why == "") {
 			t.Fatalf("%q: valid=%v why=%q", stdout, valid, why)
@@ -223,7 +220,6 @@ func TestEnvelopeOutputProperties(t *testing.T) {
 			Env:            []string{"PATH=/usr/bin:/bin"},
 			MaxOutputBytes: max,
 			Envelope:       true,
-			KnownLabel:     knownLabel,
 		}
 		r, err := tool.CallWith(context.Background(), agentloop.Call{ID: "c"})
 		if err != nil {
@@ -236,7 +232,7 @@ func TestEnvelopeOutputProperties(t *testing.T) {
 		if eff == 0 {
 			eff = DefaultMaxOutputBytes
 		}
-		parsed, why := ParseEnvelope(out, knownLabel)
+		parsed, why := ParseEnvelope(out)
 		ok := code == 0 && len(out) <= eff && why == ""
 		if ok {
 			if r.Content != parsed.Content || r.IsError || !reflect.DeepEqual(r.Labels, parsed.Labels) {

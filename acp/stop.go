@@ -19,14 +19,9 @@ import (
 //	limit, any other limit    max_turn_requests
 //	canceled                  cancelled
 //	model_error               error -32603, data: the error's kind, status, message and times
-//	held                      error -32603, data: the held calls
 //	forbidden                 error -32603, data: the labels it may not hold
 //
-// The server asks the client about held calls (session/request_permission)
-// and runs on, so a turn it answers has none left held, unless the turn
-// was cancelled, which is answered cancelled whatever the outcome. A held
-// outcome reaching Respond is a turn that did not get done, and an error
-// says so rather than end_turn.
+// A turn that was cancelled is answered cancelled whatever the outcome.
 func Respond(out *agentloop.Outcome) (acp.StopReason, *acp.RequestError) {
 	if out == nil {
 		return "", internal("the run ended with no outcome", nil)
@@ -53,13 +48,6 @@ func Respond(out *agentloop.Outcome) (acp.StopReason, *acp.RequestError) {
 	case agentloop.ReasonForbidden:
 		return "", internal("the session holds a label it may not hold, so it cannot run",
 			map[string]any{"reason": string(out.Reason), "labels": out.Forbidden})
-	case agentloop.ReasonHeld:
-		held := make([]map[string]any, 0, len(out.Held))
-		for _, c := range out.Held {
-			held = append(held, map[string]any{"toolCallId": c.ID, "name": c.Name})
-		}
-		return "", internal("tool calls are waiting for a person's decision",
-			map[string]any{"reason": string(out.Reason), "held": held})
 	}
 	return "", internal("the run ended for an unknown reason", map[string]any{"reason": string(out.Reason)})
 }

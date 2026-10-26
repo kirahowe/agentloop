@@ -75,15 +75,14 @@ func (s stampedStore) Append(e agentloop.Entry) error {
 	return s.MemoryStore.Append(e)
 }
 
-// recordSession runs a scripted agent: a retried model error, one read
-// with a deferred label, a pin and a reader's model call, one call held and then allowed by a person, and one
+// recordSession runs a scripted agent: a retried model error, a pin, one
+// read whose tool made a model call, one call that adds a label, and one
 // call the policy denies.
 func recordSession(t *testing.T) {
 	read := agentloop.Func(agentloop.ToolSpec{Name: "read_note", Description: "Read a note.", Parameters: json.RawMessage(`{"type":"object"}`)},
 		func(context.Context, json.RawMessage) (agentloop.Result, error) {
 			return agentloop.Result{Content: "Note: the quarterly numbers are in.", Labels: []string{"private"}, Log: "read 1 file",
-				Usage:      []agentloop.ModelUsage{{Model: "reader-1", Usage: agentloop.Usage{InputTokens: 30, OutputTokens: 5, CacheReadTokens: 50}}},
-				Quarantine: &agentloop.QuarantineReport{Tool: "read_note", FreeText: false, Dropped: []string{"contaminated"}}}, nil
+				Usage: []agentloop.ModelUsage{{Model: "reader-1", Usage: agentloop.Usage{InputTokens: 30, OutputTokens: 5, CacheReadTokens: 50}}}}, nil
 		})
 	send := agentloop.Func(agentloop.ToolSpec{Name: "send_mail", Description: "Send mail.", Parameters: json.RawMessage(`{"type":"object"}`)},
 		func(context.Context, json.RawMessage) (agentloop.Result, error) {
@@ -96,12 +95,9 @@ func recordSession(t *testing.T) {
 	policy := agentloop.PolicyFunc(func(_ context.Context, c agentloop.ToolCall, _ agentloop.View) agentloop.Decision {
 		switch c.Name {
 		case "send_mail":
-			return agentloop.Decision{Verdict: agentloop.Hold, Reason: "Mail leaves the building.", Labels: []string{"private"}}
+			return agentloop.Decision{Verdict: agentloop.Allow, Labels: []string{"outbound"}}
 		case "delete_all":
 			return agentloop.Decision{Verdict: agentloop.Deny, Reason: "Never."}
-		}
-		if c.Name == "read_note" {
-			return agentloop.Decision{Verdict: agentloop.Allow, Deferred: []string{"private"}}
 		}
 		return agentloop.Decision{Verdict: agentloop.Allow}
 	})
@@ -127,15 +123,8 @@ func recordSession(t *testing.T) {
 		t.Fatal(err)
 	}
 	out, err := agent.Run(context.Background(), s, "Mail the boss the Q3 numbers.")
-	if err != nil || out.Reason != agentloop.ReasonHeld {
-		t.Fatalf("first run: %v %+v", err, out)
-	}
-	h := out.Held[0]
-	if err := agent.Resolve(context.Background(), s, agentloop.Resolution{CallID: h.ID, Verdict: agentloop.Allow, InputSHA256: h.InputSHA256}); err != nil {
-		t.Fatal(err)
-	}
-	if out, err = agent.Run(context.Background(), s, ""); err != nil || out.Reason != agentloop.ReasonCompleted {
-		t.Fatalf("second run: %v %+v", err, out)
+	if err != nil || out.Reason != agentloop.ReasonCompleted {
+		t.Fatalf("run: %v %+v", err, out)
 	}
 	entries, err := store.Load()
 	if err != nil {

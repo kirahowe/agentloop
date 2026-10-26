@@ -69,9 +69,6 @@ type Config struct {
 	// Log takes the server's diagnostics. Nothing is ever written to the
 	// connection but JSON-RPC.
 	Log io.Writer
-	// Unrestricted says the request has no policy. A session a policy has
-	// marked (see Session.Policed) is then refused on load and resume.
-	Unrestricted bool
 	// NewSessionsOnly refuses session/load, session/resume and
 	// session/list, so every session on a connection starts empty.
 	NewSessionsOnly bool
@@ -378,10 +375,6 @@ func (s *Server) reopen(ctx context.Context, id acp.SessionId, replay bool, info
 		if err != nil {
 			return internal(err.Error(), nil)
 		}
-		if s.cfg.Unrestricted && sess.Policed() {
-			unlock()
-			return internal("the session was run under a policy, and this agent has none", map[string]any{"sessionId": string(id)})
-		}
 		if err := s.seed(sess); err != nil {
 			unlock()
 			return internal(err.Error(), nil)
@@ -598,7 +591,7 @@ func (s *Server) step(ss *session, in Input) {
 	for _, e := range effects {
 		switch e := e.(type) {
 		case StartRun:
-			s.start(ss, e.Prompt, e.Labels)
+			s.start(ss, e.Prompt)
 		case CancelRun:
 			ss.cancel()
 		case RespondStop:
@@ -622,18 +615,13 @@ func (ss *session) answer(id PromptID, a answer) {
 
 // start runs the agent on its own goroutine. Each event goes through the
 // translator and its updates are sent before the run goes on. When the
-// run returns, its end goes back into the machine. labels are what the
-// prompt's content brought, added to the session as the run starts.
-func (s *Server) start(ss *session, prompt string, labels []string) {
+// run returns, its end goes back into the machine.
+func (s *Server) start(ss *session, prompt string) {
 	ctx, cancel := context.WithCancel(context.Background())
 	ss.cancel = cancel
 	agent := *s.cfg.Agent
 	observe := agent.Observe
-	added := false // the prompt is in the conversation
 	agent.Observe = func(ev agentloop.Event) {
-		if e := ev.Entry; e != nil && e.Type == agentloop.EntryMessage && e.Message.Message.Role == agentloop.User {
-			added = true
-		}
 		var ups []Update
 		ss.tr, ups = ss.tr.Step(ev)
 		for _, u := range ups {
@@ -652,38 +640,13 @@ func (s *Server) start(ss *session, prompt string, labels []string) {
 	go func() {
 		defer s.runs.Done()
 		var out *agentloop.Outcome
-		var e *agentloop.Entry
 		var err error
-		// A prompt whose content brings a label the session may not hold is
-		// refused before the label is written, so the session stays usable.
-		// So is one on a session that pinned another definition of a
-		// tool: Run would refuse it after the labels were written.
-		if bad := agentloop.Forbidden(labels, agent.Forbid); len(bad) > 0 {
-			out = &agentloop.Outcome{Reason: agentloop.ReasonForbidden, Forbidden: bad}
-		} else if err = ss.sess.CheckPins(agent.Pins); err == nil {
-			e, err = ss.sess.AddLabels(labels, agentloop.LabelPrompt)
-		}
-		if e != nil {
-			agent.Observe(agentloop.Event{Entry: e})
-		}
-		for err == nil && (out == nil || out.Reason != agentloop.ReasonForbidden) {
-			p := prompt
-			if added {
-				p = ""
-			}
-			out, err = agent.Run(ctx, ss.sess, p)
-			if out != nil {
-				// The client sees only that a result was refused; the
-				// operator's log says which and why.
-				for _, rf := range out.Refused {
-					s.logf("agentloop: session %s: refused the result of call %s to %s: it carried %v, which this session may not hold", ss.id, rf.CallID, rf.Tool, rf.Labels)
-				}
-			}
-			if err != nil || out.Reason != agentloop.ReasonHeld || ctx.Err() != nil {
-				break
-			}
-			if err = s.ask(ctx, ss, &agent, out.Held); err != nil {
-				break
+		out, err = agent.Run(ctx, ss.sess, prompt)
+		if out != nil {
+			// The client sees only that a result was refused; the
+			// operator's log says which and why.
+			for _, rf := range out.Refused {
+				s.logf("agentloop: session %s: refused the result of call %s to %s: it carried %v, which this session may not hold", ss.id, rf.CallID, rf.Tool, rf.Labels)
 			}
 		}
 		cancel()
@@ -694,38 +657,4 @@ func (s *Server) start(ss *session, prompt string, labels []string) {
 		s.step(ss, RunEnded{Outcome: out, Err: err})
 		s.mu.Unlock()
 	}()
-}
-
-// ask puts each held call to the client as session/request_permission
-// and records the answer as the person's resolution. Only the allow
-// option allows; anything else, a cancelled turn and a lost connection
-// included, denies. The turn waits meanwhile.
-func (s *Server) ask(ctx context.Context, ss *session, agent *agentloop.Agent, held []agentloop.HeldCall) error {
-	for _, h := range held {
-		verdict := agentloop.Deny
-		if ss.conn != nil && ctx.Err() == nil {
-			req := PermissionRequest(ss.id, h, s.cfg.Options.Kinds, ss.sess.Labels(), ss.sess.LabelSources())
-			resp, err := ss.conn.RequestPermission(ctx, req)
-			verdict = PermissionVerdict(resp, err, ctx.Err() != nil)
-		}
-		r := agentloop.Resolution{CallID: h.ID, Verdict: verdict, InputSHA256: h.InputSHA256}
-		reason := NotApproved
-		if verdict == agentloop.Allow {
-			if err := agent.CheckResolve(ctx, ss.sess, r); err != nil {
-				// The policy no longer lets anyone allow it, or the call
-				// would no longer run on the input shown.
-				r.Verdict = agentloop.Deny
-				if errors.Is(err, agentloop.ErrSettingsChanged) {
-					reason = agentloop.SettingsChanged
-				}
-			}
-		}
-		if r.Verdict == agentloop.Deny {
-			r.Reason = reason
-		}
-		if err := agent.Resolve(ctx, ss.sess, r); err != nil {
-			return err
-		}
-	}
-	return nil
 }

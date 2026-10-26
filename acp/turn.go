@@ -17,11 +17,7 @@ import (
 //	Idle      --Close or ConnectionLost--> Closed [ReleaseSession]
 //
 // A Prompt anywhere but Idle is answered with an error at once and
-// changes nothing else; queueing prompts is the client's job. Held calls
-// are asked about inside the run (the shell sends
-// session/request_permission and runs again), so the machine stays in
-// Running meanwhile; a cancel then answers every open question with a
-// deny.
+// changes nothing else; queueing prompts is the client's job.
 //
 // Step does no I/O. The shell carries out the effects, in order, and
 // feeds back RunEnded when the run it started returns.
@@ -100,11 +96,9 @@ type (
 	// Effect is something the shell must do.
 	Effect interface{ effect() }
 
-	// StartRun runs the agent with the prompt text, adding the labels the
-	// prompt's content brings.
+	// StartRun runs the agent with the prompt text.
 	StartRun struct {
 		Prompt string
-		Labels []string
 	}
 	// CancelRun cancels the run in flight.
 	CancelRun struct{}
@@ -170,7 +164,7 @@ func (t Turn) prompt(p Prompt) (Turn, []Effect) {
 		}
 		return t, []Effect{RespondError{ID: p.ID, Err: rpc}}
 	}
-	return Turn{State: Running, Prompt: p.ID}, []Effect{StartRun{Prompt: text, Labels: PromptLabels(p.Content)}}
+	return Turn{State: Running, Prompt: p.ID}, []Effect{StartRun{Prompt: text}}
 }
 
 func (t Turn) runEnded(in RunEnded) (Turn, []Effect) {

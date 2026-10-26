@@ -164,10 +164,7 @@ func TestPolicyDenyAndAllow(t *testing.T) {
 	if res["b"].IsError || res["b"].Content != "echo: fine" {
 		t.Fatalf("allowed result %+v", res["b"])
 	}
-	if got := s.View().ToolCalls; got != 2 {
-		t.Fatalf("view ToolCalls = %d", got)
-	}
-	if len(views) != 2 || views[0].ToolCalls != 0 || views[1].ToolCalls != 1 {
+	if len(views) != 2 {
 		t.Fatalf("policy saw %+v", views)
 	}
 	info, _ := s.Call("a")
@@ -289,123 +286,23 @@ func TestToolFailureAndTimeout(t *testing.T) {
 	contains(t, res["s"].Content, "timed out")
 }
 
-func TestHoldResolveAndResume(t *testing.T) {
-	c := newCounter()
-	m := fake.New(callsThenDone(fake.Call("a", "echo", input("danger")), fake.Call("b", "echo", input("safe"))))
-	a := &agentloop.Agent{
-		Model: m, Tools: []agentloop.Tool{echoTool("echo", c)},
-		Policy: agentloop.PolicyFunc(func(_ context.Context, call agentloop.ToolCall, _ agentloop.View) agentloop.Decision {
-			if string(call.Input) == input("danger") {
-				return agentloop.Decision{Verdict: agentloop.Hold, Reason: "needs a person"}
-			}
-			return agentloop.Decision{Verdict: agentloop.Allow}
-		}),
-	}
-	store := agentloop.NewMemoryStore()
-	s := reopen(t, store)
-	out := run(t, a, s, "go")
-	wantReason(t, out, agentloop.ReasonHeld)
-	if len(out.Held) != 1 || out.Held[0].ID != "a" {
-		t.Fatalf("held %+v", out.Held)
-	}
-	// The rest of the turn settled.
-	if c.count("safe") != 1 || c.count("danger") != 0 {
-		t.Fatalf("runs %v", c.runs)
-	}
-	if got := s.Held(); len(got) != 1 || got[0].ID != "a" {
-		t.Fatalf("Held() %+v", got)
-	}
-	if got := s.Pending(); len(got) != 1 || got[0].ID != "a" {
-		t.Fatalf("Pending() %+v", got)
-	}
-	// A new prompt does not get past a held call.
-	out = run(t, a, s, "more")
-	wantReason(t, out, agentloop.ReasonHeld)
-	for _, msg := range s.Messages() {
-		if msg.Role == agentloop.User && msg.Text() == "more" {
-			t.Fatal("the prompt was added while a call was held")
-		}
-	}
-
-	// Resolve errors.
-	if err := s.Resolve("b", agentloop.Decision{Verdict: agentloop.Allow}); err == nil {
-		t.Error("resolved a call that is not held")
-	}
-	if err := s.Resolve("nope", agentloop.Decision{Verdict: agentloop.Allow}); err == nil {
-		t.Error("resolved a call that does not exist")
-	}
-	if err := s.Resolve("a", agentloop.Decision{Verdict: agentloop.Hold}); err == nil {
-		t.Error("resolved a call with hold")
-	}
-	if len(s.Held()) != 1 {
-		t.Fatal("a refused Resolve changed the session")
-	}
-
-	// Resolve survives a reopen, and a fresh process carries on.
-	if err := s.Resolve("a", agentloop.Decision{Verdict: agentloop.Allow, Labels: []string{"approved"}}); err != nil {
-		t.Fatal(err)
-	}
-	if err := s.Resolve("a", agentloop.Decision{Verdict: agentloop.Allow}); err == nil {
-		t.Error("resolved a call twice")
-	}
-	s = reopen(t, store)
-	if len(s.Held()) != 0 || !slices.Contains(s.Labels(), "approved") {
-		t.Fatalf("held %v labels %v", s.Held(), s.Labels())
-	}
-	out = run(t, a, s, "")
-	wantReason(t, out, agentloop.ReasonCompleted)
-	if c.count("danger") != 1 || c.count("safe") != 1 {
-		t.Fatalf("runs %v", c.runs)
-	}
-	checkConversation(t, s.Messages())
-	msgs := s.Messages()
-	if msgs[2].Parts[0].ToolResult.CallID != "a" || msgs[2].Parts[1].ToolResult.CallID != "b" {
-		t.Fatalf("results are not in call order: %+v", msgs[2])
-	}
-	if got := s.View().ToolCalls; got != 2 {
-		t.Fatalf("ToolCalls = %d", got)
-	}
-}
-
-func TestHoldResolvedWithDeny(t *testing.T) {
-	c := newCounter()
-	m := fake.New(callsThenDone(fake.Call("a", "echo", input("danger"))))
-	a := &agentloop.Agent{
-		Model: m, Tools: []agentloop.Tool{echoTool("echo", c)},
-		Policy: agentloop.PolicyFunc(func(context.Context, agentloop.ToolCall, agentloop.View) agentloop.Decision {
-			return agentloop.Decision{Verdict: agentloop.Hold}
-		}),
-	}
-	s, _ := newSession(t)
-	wantReason(t, run(t, a, s, "go"), agentloop.ReasonHeld)
-	if err := s.Resolve("a", agentloop.Decision{Verdict: agentloop.Deny, Reason: "no thanks", Labels: []string{"ignored"}}); err != nil {
-		t.Fatal(err)
-	}
-	wantReason(t, run(t, a, s, ""), agentloop.ReasonCompleted)
-	if c.all() != 0 {
-		t.Fatal("a denied call ran")
-	}
-	if res := resultsOf(s.Messages())["a"]; !res.IsError || res.Content != "no thanks" {
-		t.Fatalf("%+v", res)
-	}
-	if len(s.Labels()) != 0 {
-		t.Fatalf("labels of a denial were added: %v", s.Labels())
-	}
-}
-
+// A verdict that is not allow or deny, a removed "hold" included, is a
+// deny.
 func TestBadVerdictIsDenied(t *testing.T) {
-	c := newCounter()
-	m := fake.New(callsThenDone(fake.Call("a", "echo", input("x"))))
-	a := &agentloop.Agent{
-		Model: m, Tools: []agentloop.Tool{echoTool("echo", c)},
-		Policy: agentloop.PolicyFunc(func(context.Context, agentloop.ToolCall, agentloop.View) agentloop.Decision {
-			return agentloop.Decision{}
-		}),
-	}
-	s, _ := newSession(t)
-	wantReason(t, run(t, a, s, "go"), agentloop.ReasonCompleted)
-	if c.all() != 0 {
-		t.Fatal("a call with no verdict ran")
+	for _, v := range []agentloop.Verdict{"", "hold", "maybe"} {
+		c := newCounter()
+		m := fake.New(callsThenDone(fake.Call("a", "echo", input("x"))))
+		a := &agentloop.Agent{
+			Model: m, Tools: []agentloop.Tool{echoTool("echo", c)},
+			Policy: agentloop.PolicyFunc(func(context.Context, agentloop.ToolCall, agentloop.View) agentloop.Decision {
+				return agentloop.Decision{Verdict: v}
+			}),
+		}
+		s, _ := newSession(t)
+		wantReason(t, run(t, a, s, "go"), agentloop.ReasonCompleted)
+		if c.all() != 0 {
+			t.Fatalf("a call with the verdict %q ran", v)
+		}
 	}
 }
 

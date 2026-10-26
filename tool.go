@@ -27,19 +27,15 @@ type Result struct {
 	// IsError marks a result the model should read as a failure.
 	IsError bool
 	// Labels are added to the session for good, describing what the
-	// result brought into it, such as "private" or "untrusted".
+	// result brought into it, such as "private" or "contaminated".
 	Labels []string
 	// Log is for the operator: it is kept in the session's log and never
 	// shown to the model.
 	Log string
-	// Usage is the model calls the tool made for the run, such as a
-	// quarantined reader's. They count toward the run's usage and its
+	// Usage is the model calls the tool made for the run. They count toward the run's usage and its
 	// MaxTokens limit, and are kept in the tool_result entry even when
 	// the result is refused.
 	Usage []ModelUsage
-	// Quarantine is set by a quarantined reader, to say how its answer
-	// was labelled. A client can show it.
-	Quarantine *QuarantineReport
 	// Display is what the result shows the operator and never the
 	// model (see Display).
 	Display *Display
@@ -51,15 +47,6 @@ type ModelUsage struct {
 	Usage Usage  `json:"usage"`
 }
 
-// A QuarantineReport says how a quarantined reader's answer was labelled:
-// the inner tool it read, whether the answer's schema admits free text,
-// and the labels the result left out because it does not.
-type QuarantineReport struct {
-	Tool     string   `json:"tool"`
-	FreeText bool     `json:"free_text"`
-	Dropped  []string `json:"dropped"`
-}
-
 // A Call is one call as a CallTool sees it.
 type Call struct {
 	ID    string
@@ -67,9 +54,6 @@ type Call struct {
 	// Labels are the session's labels as the call runs, which include
 	// the labels its decision added.
 	Labels []string
-	// Deferred are the labels its decision deferred to the result (see
-	// Decision.Deferred).
-	Deferred []string
 }
 
 // An InputChecker is a Tool with a check of its own on input that
@@ -78,41 +62,6 @@ type Call struct {
 type InputChecker interface {
 	Tool
 	CheckInput(input json.RawMessage) string
-}
-
-// A Narrowed tool runs on more than the input the model wrote: the
-// operator fixed some of its arguments, which are added before the call
-// is sent (an MCP tool's fixed_args). EffectiveInput is the input the
-// tool would run on for input the model wrote, and the arguments the
-// operator set in it. ok is false when the tool would refuse the input,
-// as CheckInput does.
-//
-// The agent decides, holds and approves a call on its effective input,
-// so a consent rule can name a fixed argument, a preview sees the whole
-// call, and an approval no longer matches once the operator's settings
-// change.
-type Narrowed interface {
-	Tool
-	EffectiveInput(input json.RawMessage) (out json.RawMessage, fixed map[string]json.RawMessage, ok bool)
-}
-
-// EffectiveInput is the input call would run on with tools: what the
-// model wrote, with the arguments a Narrowed tool fixes added. fixed is
-// those arguments, nil when there are none. A tool that is not Narrowed,
-// or that would refuse the input, runs on the input as written.
-func EffectiveInput(tools []Tool, call ToolCall) (json.RawMessage, map[string]json.RawMessage) {
-	for _, t := range tools {
-		if t.Spec().Name != call.Name {
-			continue
-		}
-		if n, ok := t.(Narrowed); ok {
-			if out, fixed, ok := n.EffectiveInput(call.Input); ok && len(fixed) > 0 {
-				return out, fixed
-			}
-		}
-		break
-	}
-	return call.Input, nil
 }
 
 // A CallTool is a Tool that is told which call it serves and what the
@@ -245,8 +194,7 @@ func (s *InputSchema) Check(input json.RawMessage) string {
 		return fmt.Sprintf("The input to %s is not valid JSON: %v", name, err)
 	}
 	// A key given twice means different things to different readers (the
-	// schema, the digest a person approves, the tool), so it is refused;
-	// so is input nested too deep or with a number too long for a strict
+	// schema, the tool), so it is refused; so is input nested too deep or with a number too long for a strict
 	// reader of the log.
 	if err := strictjson.Input(input); err != nil {
 		return fmt.Sprintf("The input to %s is not acceptable: %v.", name, err)

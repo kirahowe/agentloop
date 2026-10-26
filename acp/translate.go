@@ -15,7 +15,6 @@ import (
 	acp "github.com/caelis-labs/acp-go-sdk"
 
 	"github.com/kirahowe/agentloop"
-	"github.com/kirahowe/agentloop/trifecta"
 )
 
 // Update is one session/update the agent sends.
@@ -35,8 +34,8 @@ type Options struct {
 	// US dollars; without it, none does.
 	Prices *agentloop.Prices
 	// PriceOf is the price of any model of the provider, nil for one it
-	// does not know. It prices the model calls a tool made for the run (a
-	// quarantined reader's), each at its own model's price. A nil PriceOf
+	// does not know. It prices the model calls a tool made for the run,
+	// each at its own model's price. A nil PriceOf
 	// prices none, so a session with such calls reports no cost.
 	PriceOf func(model string) *agentloop.Prices
 	// Notices says the client advertised session notices, which carry
@@ -117,7 +116,7 @@ func (t Translator) spend(e agentloop.Entry) Translator {
 
 // WithLabels is the translator for a session that already holds labels.
 func (t Translator) WithLabels(labels []string) Translator {
-	t.labels = trifecta.Union(t.labels, labels)
+	t.labels = agentloop.UnionLabels(t.labels, labels)
 	return t
 }
 
@@ -207,7 +206,7 @@ func (t Translator) entryUpdates(e agentloop.Entry) (Translator, []Update) {
 	t.seq, t.text, t.thought = e.Seq, "", ""
 	t = t.spend(e)
 	if add := entryLabels(e); len(add) > 0 {
-		t.labels = trifecta.Union(t.labels, add)
+		t.labels = agentloop.UnionLabels(t.labels, add)
 	}
 	switch e.Type {
 	case agentloop.EntryRunStarted:
@@ -261,9 +260,9 @@ func (t Translator) entryUpdates(e agentloop.Entry) (Translator, []Update) {
 }
 
 // Replay is what a client is sent when it loads a session: each message
-// as chunks, and each call as one tool_call with its final status. A held
-// call is pending, and a call that started and never finished is
-// in_progress. Notices are never replayed. If the options give a context
+// as chunks, and each call as one tool_call with its final status. A call
+// with no result yet is pending, and a call that started and never
+// finished is in_progress. Notices are never replayed. If the options give a context
 // window, or prices, the last assistant turn's usage follows, with the
 // cost of every turn.
 func Replay(opts Options, entries []agentloop.Entry) []Update {
@@ -276,7 +275,7 @@ func Replay(opts Options, entries []agentloop.Entry) []Update {
 	labelsAt := map[int][]string{}
 	callAt := map[string]int{}
 	for _, e := range entries {
-		labels = trifecta.Union(labels, entryLabels(e))
+		labels = agentloop.UnionLabels(labels, entryLabels(e))
 		labelsAt[e.Seq] = labels
 		switch {
 		case e.Type == agentloop.EntryToolResult && e.ToolResult != nil:
@@ -434,7 +433,6 @@ func toolCall(c agentloop.ToolCall, kinds map[string]acp.ToolKind, status acp.To
 	}
 	if res != nil {
 		tc.Status, tc.Content, tc.RawOutput = resultFields(*res)
-		addQuarantineMeta(tc.Meta, *res)
 	}
 	return acp.SessionUpdate{ToolCall: tc}
 }
@@ -444,25 +442,7 @@ func toolResult(r agentloop.ToolResultEntry, labels []string) Update {
 	var status acp.ToolCallStatus
 	status, u.Content, u.RawOutput = resultFields(r)
 	u.Status = &status
-	addQuarantineMeta(u.Meta, r)
 	return acp.SessionUpdate{ToolCallUpdate: u}
-}
-
-// addQuarantineMeta puts a quarantined reader's report in
-// _meta["agentloop/quarantine"]: the inner tool, whether the answer's
-// schema admits free text, and the labels the result left out, so a
-// client can show that a reader answered.
-func addQuarantineMeta(meta map[string]json.RawMessage, r agentloop.ToolResultEntry) {
-	q := r.Quarantine
-	if q == nil {
-		return
-	}
-	dropped := q.Dropped
-	if dropped == nil {
-		dropped = []string{}
-	}
-	b, _ := json.Marshal(agentloop.QuarantineReport{Tool: q.Tool, FreeText: q.FreeText, Dropped: dropped})
-	meta["agentloop/quarantine"] = b
 }
 
 // resultFields is how a result shows on a call: failed when it is an

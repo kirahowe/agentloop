@@ -41,25 +41,23 @@ func eventNamed(span map[string]any, name string) map[string]any {
 	return nil
 }
 
-// readerLog is a run in which a quarantined reader's call was deferred,
-// made two model calls and was labelled.
-func readerLog(ended bool) []agentloop.Entry {
+// toolModelLog is a run in which a tool made two model calls.
+func toolModelLog(ended bool) []agentloop.Entry {
 	t0 := time.Date(2026, 10, 17, 9, 0, 0, 0, time.UTC)
 	es := []agentloop.Entry{
 		{Type: agentloop.EntryRunStarted, RunStarted: &agentloop.RunStartedEntry{Prompt: "p"}},
 		{Type: agentloop.EntryPins, Pins: &agentloop.PinsEntry{Pins: map[string]string{"b": "d2", "a": "d1"}}},
 		{Type: agentloop.EntryMessage, Message: &agentloop.MessageEntry{
 			Message: agentloop.Message{Role: agentloop.Assistant, Parts: []agentloop.Part{{Type: agentloop.ToolCallPart,
-				ToolCall: &agentloop.ToolCall{ID: "c1", Name: "read_quarantined", Input: json.RawMessage(`{}`)}}}},
+				ToolCall: &agentloop.ToolCall{ID: "c1", Name: "summarize", Input: json.RawMessage(`{}`)}}}},
 			Stop: agentloop.StopToolUse, Usage: agentloop.Usage{InputTokens: 5, OutputTokens: 6}, Model: "big"}},
-		{Type: agentloop.EntryDecision, Decision: &agentloop.DecisionEntry{CallID: "c1", Tool: "read_quarantined", Verdict: agentloop.Allow, Deferred: []string{"contaminated"}}},
+		{Type: agentloop.EntryDecision, Decision: &agentloop.DecisionEntry{CallID: "c1", Tool: "summarize", Verdict: agentloop.Allow}},
 		{Type: agentloop.EntryCallStarted, CallStarted: &agentloop.CallStartedEntry{CallID: "c1"}},
 		{Type: agentloop.EntryToolResult, ToolResult: &agentloop.ToolResultEntry{
 			Result: agentloop.ToolResult{CallID: "c1", Content: "SECRET"},
 			Usage: []agentloop.ModelUsage{
 				{Model: "small", Usage: agentloop.Usage{InputTokens: 10, OutputTokens: 2, CacheReadTokens: 7}},
-				{Model: "small", Usage: agentloop.Usage{InputTokens: 1, OutputTokens: 1}}},
-			Quarantine: &agentloop.QuarantineReport{Tool: "mail_read", FreeText: false, Dropped: []string{"contaminated"}}}},
+				{Model: "small", Usage: agentloop.Usage{InputTokens: 1, OutputTokens: 1}}}}},
 	}
 	if ended {
 		es = append(es, agentloop.Entry{Type: agentloop.EntryRunEnded, RunEnded: &agentloop.Outcome{Reason: agentloop.ReasonCompleted, Turns: 1}})
@@ -70,8 +68,8 @@ func readerLog(ended bool) []agentloop.Entry {
 	return es
 }
 
-func TestPinsDeferredReaderQuarantine(t *testing.T) {
-	raw, err := otel.Marshal(readerLog(true), otel.Options{ConversationID: "c"})
+func TestPinsAndToolModelCalls(t *testing.T) {
+	raw, err := otel.Marshal(toolModelLog(true), otel.Options{ConversationID: "c"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -85,28 +83,24 @@ func TestPinsDeferredReaderQuarantine(t *testing.T) {
 	}
 
 	tool := spanNamed(spans, "execute_tool")[0]
-	dec := eventNamed(tool, "agentloop.policy.decision")
-	if dec == nil || !strings.Contains(string(mustJSON(dec)), "agentloop.policy.deferred") {
-		t.Fatalf("decision event lacks deferred labels: %v", dec)
-	}
-	if _, ok := attrOf(tool, "agentloop.quarantine.tool"); !ok {
-		t.Fatal("tool span lacks the quarantine report")
+	if dec := eventNamed(tool, "agentloop.policy.decision"); dec == nil {
+		t.Fatal("tool span lacks the decision event")
 	}
 
-	var readers []map[string]any
+	var calls []map[string]any
 	for _, s := range spanNamed(spans, "chat small") {
 		if s["parentSpanId"] == tool["spanId"] {
-			readers = append(readers, s)
+			calls = append(calls, s)
 		}
 	}
-	if len(readers) != 2 {
-		t.Fatalf("want 2 reader spans under the tool span, got %d", len(readers))
+	if len(calls) != 2 {
+		t.Fatalf("want 2 tool model spans under the tool span, got %d", len(calls))
 	}
-	if v, _ := attrOf(readers[0], "gen_ai.usage.input_tokens"); v["intValue"] != "17" {
-		t.Fatalf("reader input tokens (cache included): %v", v)
+	if v, _ := attrOf(calls[0], "gen_ai.usage.input_tokens"); v["intValue"] != "17" {
+		t.Fatalf("tool model input tokens (cache included): %v", v)
 	}
-	if readers[0]["spanId"] == readers[1]["spanId"] {
-		t.Fatal("reader spans share an id")
+	if calls[0]["spanId"] == calls[1]["spanId"] {
+		t.Fatal("tool model spans share an id")
 	}
 	if strings.Contains(string(raw), "SECRET") {
 		t.Fatal("content leaked")
@@ -116,9 +110,9 @@ func TestPinsDeferredReaderQuarantine(t *testing.T) {
 func mustJSON(v any) []byte { b, _ := json.Marshal(v); return b }
 
 // A run with no run_ended ends ERROR with reason crashed, and its usage
-// includes the reader's calls.
+// includes the tool's model calls.
 func TestCrashedRunEndsError(t *testing.T) {
-	raw, _ := otel.Marshal(readerLog(false), otel.Options{ConversationID: "c"})
+	raw, _ := otel.Marshal(toolModelLog(false), otel.Options{ConversationID: "c"})
 	checkOTLP(t, raw)
 	run := spanNamed(spansOf(t, raw), "invoke_agent")[0]
 	st := run["status"].(map[string]any)

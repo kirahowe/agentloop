@@ -139,7 +139,7 @@ type converter struct {
 }
 
 // anchor is the run that entries belong to now: the open one, or when
-// none is open (a person resolving a hold) the latest.
+// none is open the latest.
 func (c *converter) anchor() *run {
 	if c.cur != nil {
 		return c.cur
@@ -265,21 +265,12 @@ func (c *converter) decision(e agentloop.Entry) {
 		}
 	}
 	attrs := []KeyValue{str("agentloop.policy.verdict", string(d.Verdict))}
-	if d.Resolved {
-		attrs = append(attrs, boolean("agentloop.policy.resolved", true))
-	}
 	if len(d.Labels) > 0 {
 		attrs = append(attrs, strArray("agentloop.labels", d.Labels))
-	}
-	if len(d.Deferred) > 0 {
-		attrs = append(attrs, strArray("agentloop.policy.deferred", d.Deferred))
 	}
 	if c.opts.IncludeContent {
 		if d.Reason != "" {
 			attrs = append(attrs, str("agentloop.policy.reason", d.Reason))
-		}
-		if d.InputSHA256 != "" {
-			attrs = append(attrs, str("agentloop.policy.input_sha256", d.InputSHA256))
 		}
 	}
 	k.events = append(k.events, Event{nanos(e.Time), "agentloop.policy.decision", attrs})
@@ -503,13 +494,6 @@ func (c *converter) runSpan(r *run) {
 		if out.Limit != "" {
 			attrs = append(attrs, str("agentloop.run.limit", out.Limit))
 		}
-		if len(out.Held) > 0 {
-			ids := make([]string, len(out.Held))
-			for i, h := range out.Held {
-				ids[i] = h.ID
-			}
-			attrs = append(attrs, strArray("agentloop.held_calls", ids))
-		}
 		if out.Reason == agentloop.ReasonModelError {
 			kind := "_OTHER"
 			if out.Error != nil && out.Error.Kind != "" {
@@ -584,8 +568,6 @@ func (c *converter) callSpans() {
 			}
 		case k.started:
 			state, errType = "unfinished", "unfinished"
-		case k.verdict == agentloop.Hold:
-			state = "held"
 		}
 		attrs = append(attrs, str("agentloop.call.state", state))
 		if k.verdict != "" {
@@ -615,20 +597,11 @@ func (c *converter) callSpans() {
 			}
 		}
 
-		// A call held in one run and finished in another belongs to the
+		// A call decided in one run and finished in another belongs to the
 		// later run, and cannot start before it.
 		start := k.first
 		if k.owner != nil && start.Before(k.owner.start) {
 			start = k.owner.start
-		}
-		if k.result != nil && k.result.Quarantine != nil {
-			q := k.result.Quarantine
-			attrs = append(attrs,
-				str("agentloop.quarantine.tool", q.Tool),
-				boolean("agentloop.quarantine.free_text", q.FreeText))
-			if len(q.Dropped) > 0 {
-				attrs = append(attrs, strArray("agentloop.quarantine.dropped", q.Dropped))
-			}
 		}
 		callSpan := c.addSpan(k.owner, "call", k.firstSeq, Span{
 			Name:       name("execute_tool", k.name),
@@ -637,8 +610,7 @@ func (c *converter) callSpans() {
 			Events:     k.events,
 			Status:     status,
 		}, start, k.last)
-		// The quarantined reader's model calls are chat spans under the
-		// tool span. The log has no times for them, so each spans the
+		// The model calls a tool made are chat spans under the tool span. The log has no times for them, so each spans the
 		// tool call.
 		if k.result != nil {
 			for j, u := range k.result.Usage {
@@ -658,7 +630,7 @@ func (c *converter) callSpans() {
 					rs.TraceID = c.traceID(-1)
 				}
 				rs.ParentSpanID = callSpan
-				rs.SpanID = c.spanID(rs.TraceID, "reader"+strconv.Itoa(j), k.resultSeq)
+				rs.SpanID = c.spanID(rs.TraceID, "toolmodel"+strconv.Itoa(j), k.resultSeq)
 				rs.StartTimeUnixNano, rs.EndTimeUnixNano = nanos(start), nanos(maxTime(start, k.last))
 				c.spans = append(c.spans, orderedSpan{rs, k.firstSeq})
 			}

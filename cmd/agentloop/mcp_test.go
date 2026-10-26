@@ -59,8 +59,8 @@ func mcpFixture(t *testing.T, api *fakeAPI, sendLabels bool, extra ...string) *f
 	f.req["policy"] = map[string]any{
 		"labels": []string{"private"},
 		"tools": map[string]any{
-			"lookup": map[string]any{"class": "read"},
-			"pic":    map[string]any{"class": "read"},
+			"lookup": map[string]any{},
+			"pic":    map[string]any{},
 		},
 	}
 	return f
@@ -314,7 +314,7 @@ func TestMCPCredentialsGoOnASecondSignal(t *testing.T) {
 		"credentials_command": []string{"printf", "s3cret"},
 	}}
 	r.req["tools"] = []map[string]any{{"name": "who", "protocol": "mcp-stdio", "server": "helper", "tool": "whoami"}}
-	r.req["policy"] = map[string]any{"tools": map[string]any{"who": map[string]any{"class": "read"}}}
+	r.req["policy"] = map[string]any{"tools": map[string]any{"who": map[string]any{}}}
 	cmd := exec.Command(binary, "acp", r.write(t))
 	cmd.Env = []string{"PATH=/usr/bin:/bin"}
 	stdin, _ := cmd.StdinPipe()

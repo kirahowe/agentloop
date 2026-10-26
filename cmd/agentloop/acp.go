@@ -43,10 +43,7 @@ func acpCmd(req *request.Request, stdin io.Reader, stdout, stderr io.Writer) err
 		return err
 	}
 	defer servers.Close()
-	agent, err := req.Agent(key, servers)
-	if err != nil {
-		return usage.Errorf("%v", err)
-	}
+	agent := req.Agent(key, servers)
 	kinds := map[string]acp.ToolKind{}
 	for name, kind := range req.ToolKinds {
 		kinds[name] = acp.ToolKind(kind)
@@ -59,7 +56,6 @@ func acpCmd(req *request.Request, stdin io.Reader, stdout, stderr io.Writer) err
 		Agent:           agent,
 		Options:         acpagent.Options{Kinds: kinds, PriceOf: priceFunc(req.Provider)},
 		Log:             stderr,
-		Unrestricted:    !req.Restricted(),
 		NewSessionsOnly: req.NewSessionsOnly != nil,
 	})
 	conn, err := srv.Connect(stdout, stdin)

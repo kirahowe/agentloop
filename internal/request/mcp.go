@@ -117,9 +117,6 @@ func (r *Request) validateMCP() error {
 			seen[k] = true
 		}
 	}
-	if len(r.MCPServers) > 0 && !r.Restricted() {
-		return usage.Errorf("mcp_servers need a policy: an MCP tool's class and labels come only from it")
-	}
 	for _, name := range slices.Sorted(maps.Keys(r.MCPServers)) {
 		s := r.MCPServers[name]
 		if !toolName.MatchString(name) {
@@ -299,9 +296,6 @@ func (r *Request) StartMCP(ctx context.Context, log io.Writer) (*MCP, error) {
 			m.Pins[alias] = digests[alias]
 			fmt.Fprintf(log, "agentloop: mcp server %s: tool %s pinned at sha256 %s\n", name, alias, digests[alias])
 		}
-		for _, w := range c.Warnings() {
-			fmt.Fprintf(log, "agentloop: mcp server %s: warning: %s (the policy decides; annotations are not used)\n", name, w)
-		}
 	}
 	ok = true
 	return m, nil
@@ -314,7 +308,7 @@ func (r *Request) startServer(ctx context.Context, name string, m *MCP, log io.W
 	tools := map[string]mcp.ToolConfig{}
 	for _, t := range r.Tools {
 		if t.MCP() && t.Server == name {
-			tools[t.Tool] = mcp.ToolConfig{Alias: t.Name, Policy: r.Policy.Tools[t.Name], AllowContent: slices.Clone(t.AllowContent),
+			tools[t.Tool] = mcp.ToolConfig{Alias: t.Name, Labels: r.toolLabels(t.Name), AllowContent: slices.Clone(t.AllowContent),
 				Digest: t.Digest, FixedArgs: t.FixedArgs, HiddenArgs: slices.Clone(t.HiddenArgs)}
 		}
 	}

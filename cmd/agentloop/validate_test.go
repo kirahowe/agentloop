@@ -29,7 +29,6 @@ func newValFixture(t *testing.T) *valFixture {
 		"session":         filepath.Join(dir, "sess", "session.jsonl"),
 		"api_key_command": []string{"printf", "%s", chaosKey},
 		"prompt":          "hello",
-		"policy":          map[string]any{"unrestricted": true},
 		"tools": []map[string]any{{
 			"name": "t", "description": "d", "parameters": map[string]any{"type": "object"},
 		}},
@@ -70,11 +69,11 @@ func (f *valFixture) expectUnusable(r chaosRun) {
 	}
 }
 
-// restrict gives the fixture a real policy for its one tool.
+// restrict gives the fixture a policy with labels for its one tool.
 func restrict(m map[string]any) {
 	m["policy"] = map[string]any{
 		"labels": []string{"private"},
-		"tools":  map[string]any{"t": map[string]any{"class": "read", "labels": []string{"contaminated"}}},
+		"tools":  map[string]any{"t": map[string]any{"labels": []string{"contaminated"}}},
 	}
 	m["tool_protocol"] = "envelope"
 }
@@ -113,37 +112,39 @@ func TestUnusableRequestMatrix(t *testing.T) {
 		{"api_key_command NUL in program", func(m map[string]any) { m["api_key_command"] = []string{"pri\u0000ntf"} }},
 		{"api_key_command NUL in argument", func(m map[string]any) { m["api_key_command"] = []string{"printf", "a\u0000b"} }},
 		{"api_key_env is gone", func(m map[string]any) { m["api_key_env"] = "AGENTLOOP_API_KEY" }},
-		{"tools without a policy", func(m map[string]any) { delete(m, "policy") }},
-		{"policy is null", func(m map[string]any) { m["policy"] = nil }},
-		{"unrestricted false", func(m map[string]any) { m["policy"] = map[string]any{"unrestricted": false} }},
-		{"unrestricted with labels", func(m map[string]any) {
-			m["policy"] = map[string]any{"unrestricted": true, "labels": []string{}}
-		}},
-		{"unrestricted with tools", func(m map[string]any) {
-			m["policy"] = map[string]any{"unrestricted": true, "tools": map[string]any{"t": map[string]any{"class": "read"}}}
-		}},
+		{"policy is a string", func(m map[string]any) { m["policy"] = "none" }},
+		{"unrestricted is gone", func(m map[string]any) { m["policy"] = map[string]any{"unrestricted": true} }},
+		{"unrestricted false is gone too", func(m map[string]any) { m["policy"] = map[string]any{"unrestricted": false} }},
 		{"policy without envelope", func(m map[string]any) { restrict(m); delete(m, "tool_protocol") }},
 		{"unknown tool_protocol", func(m map[string]any) { restrict(m); m["tool_protocol"] = "Envelope" }},
-		{"tool with no policy entry", func(m map[string]any) {
+		{"policy entry for no tool", func(m map[string]any) { restrict(m); policyTools(m)["u"] = map[string]any{} }},
+		{"class is gone", func(m map[string]any) { restrict(m); policyTools(m)["t"] = map[string]any{"class": "read"} }},
+		{"always_hold is gone", func(m map[string]any) { restrict(m); policyTools(m)["t"] = map[string]any{"always_hold": true} }},
+		{"consent is gone", func(m map[string]any) { restrict(m); policyTools(m)["t"] = map[string]any{"consent": []any{}} }},
+		{"empty tool label", func(m map[string]any) {
 			restrict(m)
-			policyTools(m)["u"] = policyTools(m)["t"]
-			delete(policyTools(m), "t")
+			policyTools(m)["t"] = map[string]any{"labels": []string{""}}
 		}},
-		{"policy entry for no tool", func(m map[string]any) { restrict(m); policyTools(m)["u"] = map[string]any{"class": "read"} }},
-		{"tool with no class", func(m map[string]any) { restrict(m); policyTools(m)["t"] = map[string]any{} }},
-		{"unknown class", func(m map[string]any) { restrict(m); policyTools(m)["t"] = map[string]any{"class": "send"} }},
-		{"unknown tool label", func(m map[string]any) {
+		{"empty starting label", func(m map[string]any) {
 			restrict(m)
-			policyTools(m)["t"] = map[string]any{"class": "read", "labels": []string{"untrusted"}}
-		}},
-		{"unknown starting label", func(m map[string]any) {
-			restrict(m)
-			m["policy"].(map[string]any)["labels"] = []string{"Private"}
+			m["policy"].(map[string]any)["labels"] = []string{""}
 		}},
 		{"unknown policy field", func(m map[string]any) { restrict(m); m["policy"].(map[string]any)["egress"] = true }},
-		{"unknown forbidden label", func(m map[string]any) {
+		{"forbid label in capitals", func(m map[string]any) {
 			restrict(m)
-			m["policy"].(map[string]any)["forbid_labels"] = []string{"secret"}
+			m["policy"].(map[string]any)["forbid_labels"] = []string{"Private"}
+		}},
+		{"forbid label with a zero-width space", func(m map[string]any) {
+			restrict(m)
+			m["policy"].(map[string]any)["forbid_labels"] = []string{"private\u200b"}
+		}},
+		{"tool label with a bidi override", func(m map[string]any) {
+			restrict(m)
+			policyTools(m)["t"] = map[string]any{"labels": []string{"private\u202e"}}
+		}},
+		{"label with a newline", func(m map[string]any) {
+			restrict(m)
+			m["policy"].(map[string]any)["forbid_labels"] = []string{"a\nb"}
 		}},
 		{"starting labels it forbids", func(m map[string]any) {
 			restrict(m)
@@ -154,31 +155,21 @@ func TestUnusableRequestMatrix(t *testing.T) {
 			m["policy"].(map[string]any)["labels"] = []string{}
 			m["policy"].(map[string]any)["forbid_labels"] = []string{"contaminated"}
 		}},
-		{"unrestricted with forbid_labels", func(m map[string]any) {
-			m["policy"] = map[string]any{"unrestricted": true, "forbid_labels": []string{"private"}}
-		}},
 		{"unknown tool entry field", func(m map[string]any) {
 			restrict(m)
-			policyTools(m)["t"] = map[string]any{"class": "read", "hold": true}
+			policyTools(m)["t"] = map[string]any{"labels": []string{}, "hold": true}
 		}},
 		{"policy in capitals", func(m map[string]any) { m["POLICY"] = m["policy"]; delete(m, "policy") }},
 		{"a field given twice", func(map[string]any) {}},
 		{"a policy tool field in capitals", func(m map[string]any) {
 			restrict(m)
-			policyTools(m)["t"] = map[string]any{"Class": "read"}
+			policyTools(m)["t"] = map[string]any{"Labels": []string{"private"}}
 		}},
-		{"resolve field in capitals", func(m map[string]any) {
-			restrict(m)
-			m["resolve"] = []map[string]any{{"call_id": "a", "Verdict": "allow", "input_sha256": "x"}}
+		{"resolve is gone", func(m map[string]any) {
+			m["resolve"] = []map[string]any{{"call_id": "a", "verdict": "allow", "input_sha256": "x"}}
 		}},
-		{"resolve without call_id", func(m map[string]any) { m["resolve"] = []map[string]any{{"verdict": "allow"}} }},
-		{"resolve with hold", func(m map[string]any) {
-			m["resolve"] = []map[string]any{{"call_id": "a", "verdict": "hold", "input_sha256": "x"}}
-		}},
-		{"resolve without input_sha256", func(m map[string]any) { m["resolve"] = []map[string]any{{"call_id": "a", "verdict": "allow"}} }},
-		{"resolve twice", func(m map[string]any) {
-			m["resolve"] = []map[string]any{{"call_id": "a", "verdict": "allow", "input_sha256": "x"}, {"call_id": "a", "verdict": "deny", "input_sha256": "x"}}
-		}},
+		{"quarantine is gone", func(m map[string]any) { m["quarantine"] = map[string]any{"model": "small", "tools": []string{"t"}} }},
+		{"workbench is gone", func(m map[string]any) { m["workbench"] = map[string]any{} }},
 		{"tools without tool_command", func(m map[string]any) { delete(m, "tool_command") }},
 		{"empty tool_command with tools", func(m map[string]any) { m["tool_command"] = []string{} }},
 		{"empty program name", func(m map[string]any) { m["tool_command"] = []string{""} }},
@@ -245,9 +236,9 @@ func TestUnusableRequestMatrix(t *testing.T) {
 				raw, _ = json.Marshal(f.req) // json escapes the NUL as \u0000
 			}
 			if c.name == "a field given twice" {
-				// A later "policy" would replace the first.
+				// A later "model" would replace the first.
 				raw, _ = json.Marshal(f.req)
-				raw = append([]byte(`{"policy":{"unrestricted":true},`), raw[1:]...)
+				raw = append([]byte(`{"model":"other",`), raw[1:]...)
 			}
 			r := f.exec(raw)
 			// The session-is-a-directory case has the "session file" there already.
@@ -328,7 +319,16 @@ func TestUnusualButValidRequests(t *testing.T) {
 			delete(f.req, "tools")
 			delete(f.req, "tool_command")
 		}, ""},
-		{"unrestricted envelope tools", func(f *valFixture) { f.req["tool_protocol"] = "envelope" }, ""},
+		{"envelope tools with no policy", func(f *valFixture) { f.req["tool_protocol"] = "envelope" }, ""},
+		{"a null policy", func(f *valFixture) { f.req["policy"] = nil }, ""},
+		{"a policy with only forbid_labels", func(f *valFixture) {
+			f.req["policy"] = map[string]any{"forbid_labels": []string{"private"}}
+			f.req["tool_protocol"] = "envelope"
+		}, ""},
+		{"safe-charset labels", func(f *valFixture) {
+			f.req["policy"] = map[string]any{"labels": []string{"mail:stranger@example.com"}, "tools": map[string]any{"t": map[string]any{"labels": []string{"web"}}}}
+			f.req["tool_protocol"] = "envelope"
+		}, ""},
 		{"no tools key", func(f *valFixture) { delete(f.req, "tools"); delete(f.req, "tool_command") }, ""},
 		{"parameters is empty object", func(f *valFixture) {
 			f.req["tools"] = []map[string]any{{"name": "t", "description": "", "parameters": map[string]any{}}}

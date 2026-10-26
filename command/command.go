@@ -9,7 +9,7 @@
 // Envelope: one JSON object on stdin, {"input", "labels", "call_id"}, and
 // exactly one on stdout, {"content", "is_error", "labels"}. Anything else
 // (a non-zero exit, output past the cap, or stdout that is not one valid
-// envelope with known labels) gives the model only "The tool <name>
+// envelope with valid labels) gives the model only "The tool <name>
 // failed.", and what went wrong, with stderr, goes to the operator's log.
 package command
 
@@ -48,10 +48,8 @@ type Tool struct {
 	// MaxOutputBytes caps what is kept of stdout and of stderr. Zero means
 	// DefaultMaxOutputBytes.
 	MaxOutputBytes int
-	// Envelope selects the envelope protocol. KnownLabel then says which
-	// labels a result may carry; nil allows none.
-	Envelope   bool
-	KnownLabel func(string) bool
+	// Envelope selects the envelope protocol.
+	Envelope bool
 }
 
 var _ agentloop.CallTool = (*Tool)(nil)

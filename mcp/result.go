@@ -13,7 +13,6 @@ import (
 	"github.com/santhosh-tekuri/jsonschema/v6"
 
 	"github.com/kirahowe/agentloop"
-	"github.com/kirahowe/agentloop/trifecta"
 
 	"github.com/kirahowe/agentloop/internal/strictjson"
 )
@@ -34,7 +33,7 @@ func ToResult(name string, cfg ToolConfig, output *jsonschema.Schema, r *sdk.Cal
 	if why != "" {
 		return failed(why)
 	}
-	labels := MergeLabels(cfg.Policy.Labels, added)
+	labels := MergeLabels(cfg.Labels, added)
 	var texts []string
 	for i, c := range r.Content {
 		kind, placeholder := describe(c)
@@ -81,7 +80,7 @@ func ToResult(name string, cfg ToolConfig, output *jsonschema.Schema, r *sdk.Cal
 }
 
 // ResultLabels reads the labels a result adds from its _meta. No key is
-// no labels. Anything but an array of known labels is why the call fails.
+// no labels. Anything but an array of valid labels is why the call fails.
 func ResultLabels(meta map[string]any) ([]string, string) {
 	v, ok := meta[LabelsKey]
 	if !ok {
@@ -97,8 +96,8 @@ func ResultLabels(meta map[string]any) ([]string, string) {
 		if !ok {
 			return nil, fmt.Sprintf("_meta %s holds a non-string", LabelsKey)
 		}
-		if !trifecta.KnownLabel(l) {
-			return nil, fmt.Sprintf("_meta %s has the unknown label %q", LabelsKey, l)
+		if err := agentloop.CheckLabel(l); err != nil {
+			return nil, fmt.Sprintf("_meta %s has a bad label: %v", LabelsKey, err)
 		}
 		out = append(out, l)
 	}
@@ -108,7 +107,7 @@ func ResultLabels(meta map[string]any) ([]string, string) {
 // MergeLabels is the configured labels with those a result adds: sorted,
 // no repeats, nil when there are none. A result can only add.
 func MergeLabels(configured, added []string) []string {
-	u := trifecta.Union(configured, added)
+	u := agentloop.UnionLabels(configured, added)
 	if len(u) == 0 {
 		return nil
 	}
@@ -163,7 +162,7 @@ func describe(c sdk.Content) (kind, placeholder string) {
 
 // Digest is the SHA-256, in hex, of a tool's definition: its name,
 // description, inputSchema and outputSchema as canonical JSON. The
-// annotations are left out: they decide nothing (see Lint), and the SDK
+// annotations are left out: they decide nothing, and the SDK
 // would have to encode them again, so the digest would follow the SDK's
 // version.
 func Digest(t *sdk.Tool) (string, error) {
@@ -244,37 +243,4 @@ type noLoader struct{}
 
 func (noLoader) Load(url string) (any, error) {
 	return nil, fmt.Errorf("schemas may not load %s", url)
-}
-
-// Lint says where a tool's annotations contradict its configured class or
-// labels. It is advice for the operator and decides nothing. Only hints
-// the server gave explicitly count; the SDK cannot tell an absent
-// readOnlyHint from false, so false never counts.
-func Lint(name string, cfg trifecta.Tool, a *sdk.ToolAnnotations) []string {
-	if a == nil {
-		return nil
-	}
-	var out []string
-	warn := func(format string, args ...any) {
-		out = append(out, fmt.Sprintf("tool %s: "+format, append([]any{name}, args...)...))
-	}
-	destructive := a.DestructiveHint != nil && *a.DestructiveHint
-	openWorld := a.OpenWorldHint != nil && *a.OpenWorldHint
-	switch cfg.Class {
-	case trifecta.Read:
-		if destructive {
-			warn("configured read, but destructiveHint is true")
-		}
-		if openWorld && !slices.Contains(cfg.Labels, trifecta.Contaminated) {
-			warn("openWorldHint is true, but its labels lack contaminated")
-		}
-	case trifecta.Write:
-		if openWorld {
-			warn("configured write (the operator's own state), but openWorldHint is true")
-		}
-	}
-	if a.ReadOnlyHint && cfg.Class != trifecta.Read {
-		warn("configured %s, but readOnlyHint is true", cfg.Class)
-	}
-	return out
 }

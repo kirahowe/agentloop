@@ -25,8 +25,6 @@ type gen struct {
 	open     []string
 	toolName map[string]string
 	input    map[string]string
-	held     []string // held calls waiting for a person
-	approved []string // allowed by a person, waiting for the next run
 }
 
 func (g *gen) text(label string) string {
@@ -69,27 +67,20 @@ func (g *gen) result(id string, isErr bool, labels []string) {
 			Labels: labels,
 			Log:    g.text("log"),
 		}
-		if rapid.Bool().Draw(g.t, "reader") {
-			for i, n := 0, rapid.IntRange(1, 2).Draw(g.t, "nreader"); i < n; i++ {
+		if rapid.Bool().Draw(g.t, "toolmodel") {
+			for i, n := 0, rapid.IntRange(1, 2).Draw(g.t, "ntoolmodel"); i < n; i++ {
 				e.ToolResult.Usage = append(e.ToolResult.Usage, agentloop.ModelUsage{
-					Model: rapid.SampledFrom([]string{"", "reader-a"}).Draw(g.t, "rmodel"), Usage: g.usage()})
+					Model: rapid.SampledFrom([]string{"", "tool-model-a"}).Draw(g.t, "tmodel"), Usage: g.usage()})
 			}
-			e.ToolResult.Quarantine = &agentloop.QuarantineReport{Tool: "read", FreeText: rapid.Bool().Draw(g.t, "free"), Dropped: g.labels()}
 		}
 	})
 }
 
-func (g *gen) decide(id string, v agentloop.Verdict, resolved bool) {
+func (g *gen) decide(id string, v agentloop.Verdict) {
 	g.add(agentloop.EntryDecision, func(e *agentloop.Entry) {
-		d := &agentloop.DecisionEntry{CallID: id, Tool: g.toolName[id], Verdict: v, Labels: g.labels(), Resolved: resolved}
-		if rapid.Bool().Draw(g.t, "deferred") {
-			d.Deferred = g.labels()
-		}
+		d := &agentloop.DecisionEntry{CallID: id, Tool: g.toolName[id], Verdict: v, Labels: g.labels()}
 		if rapid.Bool().Draw(g.t, "reason") {
 			d.Reason = g.text("reason")
-		}
-		if v == agentloop.Hold {
-			d.InputSHA256 = g.text("digest")
 		}
 		e.Decision = d
 	})
@@ -101,21 +92,18 @@ func (g *gen) start(id string) {
 
 // settleOne gives one open call its fate.
 func (g *gen) settleOne(id string) {
-	switch rapid.IntRange(0, 4).Draw(g.t, "fate") {
+	switch rapid.IntRange(0, 3).Draw(g.t, "fate") {
 	case 0: // allowed, ran
-		g.decide(id, agentloop.Allow, false)
+		g.decide(id, agentloop.Allow)
 		g.start(id)
 		g.result(id, rapid.Bool().Draw(g.t, "failed"), g.labels())
 	case 1: // denied
-		g.decide(id, agentloop.Deny, false)
+		g.decide(id, agentloop.Deny)
 		g.result(id, true, nil)
-	case 2: // held
-		g.decide(id, agentloop.Hold, false)
-		g.held = append(g.held, id)
-	case 3: // cut off
+	case 2: // cut off
 		g.result(id, true, nil)
-	case 4: // started, never finished
-		g.decide(id, agentloop.Allow, false)
+	case 3: // started, never finished
+		g.decide(id, agentloop.Allow)
 		g.start(id)
 	}
 }
@@ -175,12 +163,6 @@ func (g *gen) run() {
 			e.Labels = &agentloop.LabelsEntry{Labels: l, Source: agentloop.LabelSeed}
 		})
 	}
-	// Calls a person approved run first.
-	for _, id := range g.approved {
-		g.start(id)
-		g.result(id, rapid.Bool().Draw(g.t, "failed"), g.labels())
-	}
-	g.approved = nil
 	if rapid.Bool().Draw(g.t, "user") {
 		g.add(agentloop.EntryMessage, func(e *agentloop.Entry) {
 			e.Message = &agentloop.MessageEntry{Message: agentloop.Text(agentloop.User, g.text("user"))}
@@ -211,41 +193,18 @@ func (g *gen) run() {
 	case agentloop.ReasonLimit:
 		out.Limit = agentloop.LimitTurns
 	}
-	if len(g.held) > 0 {
-		out.Reason = agentloop.ReasonHeld
-		for _, id := range g.held {
-			out.Held = append(out.Held, agentloop.HeldCall{ToolCall: agentloop.ToolCall{ID: id, Name: g.toolName[id], Input: json.RawMessage(g.input[id])}, InputSHA256: g.text("digest")})
-		}
-	}
 	g.add(agentloop.EntryRunEnded, func(e *agentloop.Entry) { e.RunEnded = out })
 }
 
-// between: a person resolves some holds, or labels are added by hand.
+// between: labels are added by hand.
 func (g *gen) between() {
-	var still []string
-	for _, id := range g.held {
-		switch rapid.IntRange(0, 2).Draw(g.t, "resolve") {
-		case 0:
-			g.decide(id, agentloop.Allow, true)
-			g.approved = append(g.approved, id)
-		case 1:
-			g.decide(id, agentloop.Deny, true)
-			g.result(id, true, nil)
-		default:
-			still = append(still, id)
-		}
-	}
-	g.held = still
 	if l := g.labels(); len(l) > 0 && rapid.Bool().Draw(g.t, "addlabels") {
 		g.add(agentloop.EntryLabels, func(e *agentloop.Entry) {
-			e.Labels = &agentloop.LabelsEntry{Labels: l, Source: agentloop.LabelPrompt}
+			e.Labels = &agentloop.LabelsEntry{Labels: l, Source: agentloop.LabelSeed}
 		})
 	}
 }
 
-// heldIDs tracks nothing across a crash: a crashed run leaves its held
-// calls to the next run's settle, which is not modelled here, so held
-// calls only survive runs that ended.
 func genLog(t *rapid.T) []agentloop.Entry {
 	g := &gen{t: t, now: time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC), toolName: map[string]string{}, input: map[string]string{}}
 	for i, n := 0, rapid.IntRange(0, 4).Draw(t, "runs"); i < n; i++ {
@@ -325,7 +284,7 @@ func TestPropertyShapeOfTraces(t *testing.T) {
 				calls[e.CallStarted.CallID] = true
 			case agentloop.EntryToolResult:
 				calls[e.ToolResult.Result.CallID] = true
-				assistant += len(e.ToolResult.Usage) // a reader's calls are chat spans too
+				assistant += len(e.ToolResult.Usage) // a tool's model calls are chat spans too
 			}
 		}
 		var roots, chats, tools int

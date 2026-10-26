@@ -23,7 +23,7 @@
               "name": "invoke_agent mailer",
               "kind": 1,
               "startTimeUnixNano": "1792227601250000000",
-              "endTimeUnixNano": "1792227616250000000",
+              "endTimeUnixNano": "1792227620000000000",
               "attributes": [
                 {
                   "key": "gen_ai.operation.name",
@@ -52,49 +52,37 @@
                 {
                   "key": "agentloop.run.reason",
                   "value": {
-                    "stringValue": "held"
+                    "stringValue": "completed"
                   }
                 },
                 {
                   "key": "agentloop.run.turns",
                   "value": {
-                    "intValue": "1"
-                  }
-                },
-                {
-                  "key": "agentloop.held_calls",
-                  "value": {
-                    "arrayValue": {
-                      "values": [
-                        {
-                          "stringValue": "c2"
-                        }
-                      ]
-                    }
+                    "intValue": "2"
                   }
                 },
                 {
                   "key": "gen_ai.output.messages",
                   "value": {
-                    "stringValue": "[{\"role\":\"assistant\",\"parts\":[{\"type\":\"text\",\"content\":\"Looking at your notes.\"}]}]"
+                    "stringValue": "[{\"role\":\"assistant\",\"parts\":[{\"type\":\"text\",\"content\":\"Sent. I did not delete anything.\"}]}]"
                   }
                 },
                 {
                   "key": "gen_ai.usage.input_tokens",
                   "value": {
-                    "intValue": "500"
+                    "intValue": "935"
                   }
                 },
                 {
                   "key": "gen_ai.usage.output_tokens",
                   "value": {
-                    "intValue": "45"
+                    "intValue": "57"
                   }
                 },
                 {
                   "key": "gen_ai.usage.cache_read.input_tokens",
                   "value": {
-                    "intValue": "350"
+                    "intValue": "770"
                   }
                 },
                 {
@@ -108,6 +96,9 @@
                   "value": {
                     "arrayValue": {
                       "values": [
+                        {
+                          "stringValue": "outbound"
+                        },
                         {
                           "stringValue": "private"
                         }
@@ -407,30 +398,6 @@
                   "value": {
                     "stringValue": "read 1 file"
                   }
-                },
-                {
-                  "key": "agentloop.quarantine.tool",
-                  "value": {
-                    "stringValue": "read_note"
-                  }
-                },
-                {
-                  "key": "agentloop.quarantine.free_text",
-                  "value": {
-                    "boolValue": false
-                  }
-                },
-                {
-                  "key": "agentloop.quarantine.dropped",
-                  "value": {
-                    "arrayValue": {
-                      "values": [
-                        {
-                          "stringValue": "contaminated"
-                        }
-                      ]
-                    }
-                  }
                 }
               ],
               "events": [
@@ -443,18 +410,6 @@
                       "value": {
                         "stringValue": "allow"
                       }
-                    },
-                    {
-                      "key": "agentloop.policy.deferred",
-                      "value": {
-                        "arrayValue": {
-                          "values": [
-                            {
-                              "stringValue": "private"
-                            }
-                          ]
-                        }
-                      }
                     }
                   ]
                 },
@@ -466,7 +421,7 @@
             },
             {
               "traceId": "0aeb311c8e25dfec29eb4f615989f475",
-              "spanId": "e91d902ae92af665",
+              "spanId": "961c551a1d453f06",
               "parentSpanId": "e0574d79e1c419ee",
               "name": "chat reader-1",
               "kind": 3,
@@ -524,13 +479,13 @@
               ]
             },
             {
-              "traceId": "9d1f389621a2e17394bcfef1d8cd5a9f",
-              "spanId": "f5914714dec55006",
-              "parentSpanId": "b7daaa19dea5de8b",
+              "traceId": "0aeb311c8e25dfec29eb4f615989f475",
+              "spanId": "332d67c11c202851",
+              "parentSpanId": "f35af1db991c31a9",
               "name": "execute_tool send_mail",
               "kind": 1,
-              "startTimeUnixNano": "1792227618750000000",
-              "endTimeUnixNano": "1792227621250000000",
+              "startTimeUnixNano": "1792227612500000000",
+              "endTimeUnixNano": "1792227615000000000",
               "attributes": [
                 {
                   "key": "gen_ai.operation.name",
@@ -601,37 +556,7 @@
                     {
                       "key": "agentloop.policy.verdict",
                       "value": {
-                        "stringValue": "hold"
-                      }
-                    },
-                    {
-                      "key": "agentloop.policy.reason",
-                      "value": {
-                        "stringValue": "Mail leaves the building."
-                      }
-                    },
-                    {
-                      "key": "agentloop.policy.input_sha256",
-                      "value": {
-                        "stringValue": "b783e2db5a39469bb58d876f842d23ed324858b1ece12983536fe8bec8d1f0ea"
-                      }
-                    }
-                  ]
-                },
-                {
-                  "timeUnixNano": "1792227617500000000",
-                  "name": "agentloop.policy.decision",
-                  "attributes": [
-                    {
-                      "key": "agentloop.policy.verdict",
-                      "value": {
                         "stringValue": "allow"
-                      }
-                    },
-                    {
-                      "key": "agentloop.policy.resolved",
-                      "value": {
-                        "boolValue": true
                       }
                     },
                     {
@@ -640,7 +565,7 @@
                         "arrayValue": {
                           "values": [
                             {
-                              "stringValue": "private"
+                              "stringValue": "outbound"
                             }
                           ]
                         }
@@ -649,19 +574,19 @@
                   ]
                 },
                 {
-                  "timeUnixNano": "1792227620000000000",
+                  "timeUnixNano": "1792227613750000000",
                   "name": "agentloop.call.started"
                 }
               ]
             },
             {
               "traceId": "0aeb311c8e25dfec29eb4f615989f475",
-              "spanId": "acd8d4cdd76c5d99",
+              "spanId": "35a8cd41939aabcd",
               "parentSpanId": "f35af1db991c31a9",
               "name": "execute_tool delete_all",
               "kind": 1,
-              "startTimeUnixNano": "1792227613750000000",
-              "endTimeUnixNano": "1792227615000000000",
+              "startTimeUnixNano": "1792227616250000000",
+              "endTimeUnixNano": "1792227617500000000",
               "attributes": [
                 {
                   "key": "gen_ai.operation.name",
@@ -732,7 +657,7 @@
               ],
               "events": [
                 {
-                  "timeUnixNano": "1792227613750000000",
+                  "timeUnixNano": "1792227616250000000",
                   "name": "agentloop.policy.decision",
                   "attributes": [
                     {
@@ -756,95 +681,13 @@
               }
             },
             {
-              "traceId": "9d1f389621a2e17394bcfef1d8cd5a9f",
-              "spanId": "b7daaa19dea5de8b",
-              "name": "invoke_agent mailer",
-              "kind": 1,
-              "startTimeUnixNano": "1792227618750000000",
-              "endTimeUnixNano": "1792227623750000000",
-              "attributes": [
-                {
-                  "key": "gen_ai.operation.name",
-                  "value": {
-                    "stringValue": "invoke_agent"
-                  }
-                },
-                {
-                  "key": "gen_ai.provider.name",
-                  "value": {
-                    "stringValue": "fake"
-                  }
-                },
-                {
-                  "key": "gen_ai.agent.name",
-                  "value": {
-                    "stringValue": "mailer"
-                  }
-                },
-                {
-                  "key": "gen_ai.conversation.id",
-                  "value": {
-                    "stringValue": "session-0001"
-                  }
-                },
-                {
-                  "key": "agentloop.run.reason",
-                  "value": {
-                    "stringValue": "completed"
-                  }
-                },
-                {
-                  "key": "agentloop.run.turns",
-                  "value": {
-                    "intValue": "1"
-                  }
-                },
-                {
-                  "key": "gen_ai.output.messages",
-                  "value": {
-                    "stringValue": "[{\"role\":\"assistant\",\"parts\":[{\"type\":\"text\",\"content\":\"Sent. I did not delete anything.\"}]}]"
-                  }
-                },
-                {
-                  "key": "gen_ai.usage.input_tokens",
-                  "value": {
-                    "intValue": "435"
-                  }
-                },
-                {
-                  "key": "gen_ai.usage.output_tokens",
-                  "value": {
-                    "intValue": "12"
-                  }
-                },
-                {
-                  "key": "gen_ai.usage.cache_read.input_tokens",
-                  "value": {
-                    "intValue": "420"
-                  }
-                },
-                {
-                  "key": "agentloop.labels",
-                  "value": {
-                    "arrayValue": {
-                      "values": [
-                        {
-                          "stringValue": "private"
-                        }
-                      ]
-                    }
-                  }
-                }
-              ]
-            },
-            {
-              "traceId": "9d1f389621a2e17394bcfef1d8cd5a9f",
-              "spanId": "4b1a16475eddfeef",
-              "parentSpanId": "b7daaa19dea5de8b",
+              "traceId": "0aeb311c8e25dfec29eb4f615989f475",
+              "spanId": "e3255a1d38c6fece",
+              "parentSpanId": "f35af1db991c31a9",
               "name": "chat fake-model",
               "kind": 3,
-              "startTimeUnixNano": "1792227621250000000",
-              "endTimeUnixNano": "1792227622500000000",
+              "startTimeUnixNano": "1792227617500000000",
+              "endTimeUnixNano": "1792227618750000000",
               "attributes": [
                 {
                   "key": "gen_ai.operation.name",
@@ -915,7 +758,7 @@
                 {
                   "key": "gen_ai.input.messages",
                   "value": {
-                    "stringValue": "[{\"role\":\"user\",\"parts\":[{\"type\":\"text\",\"content\":\"Mail the boss the Q3 numbers.\"}]},{\"role\":\"assistant\",\"parts\":[{\"type\":\"text\",\"content\":\"Looking at your notes.\"},{\"type\":\"tool_call\",\"id\":\"c1\",\"name\":\"read_note\",\"arguments\":{\"title\":\"q3\"}},{\"type\":\"tool_call\",\"id\":\"c2\",\"name\":\"send_mail\",\"arguments\":{\"to\":\"boss@example.com\",\"body\":\"numbers\"}},{\"type\":\"tool_call\",\"id\":\"c3\",\"name\":\"delete_all\",\"arguments\":{}}]},{\"role\":\"tool\",\"parts\":[{\"type\":\"tool_call_response\",\"id\":\"c1\",\"response\":\"Note: the quarterly numbers are in.\"},{\"type\":\"tool_call_response\",\"id\":\"c3\",\"response\":\"Never.\"},{\"type\":\"tool_call_response\",\"id\":\"c2\",\"response\":\"sent\"}]}]"
+                    "stringValue": "[{\"role\":\"user\",\"parts\":[{\"type\":\"text\",\"content\":\"Mail the boss the Q3 numbers.\"}]},{\"role\":\"assistant\",\"parts\":[{\"type\":\"text\",\"content\":\"Looking at your notes.\"},{\"type\":\"tool_call\",\"id\":\"c1\",\"name\":\"read_note\",\"arguments\":{\"title\":\"q3\"}},{\"type\":\"tool_call\",\"id\":\"c2\",\"name\":\"send_mail\",\"arguments\":{\"to\":\"boss@example.com\",\"body\":\"numbers\"}},{\"type\":\"tool_call\",\"id\":\"c3\",\"name\":\"delete_all\",\"arguments\":{}}]},{\"role\":\"tool\",\"parts\":[{\"type\":\"tool_call_response\",\"id\":\"c1\",\"response\":\"Note: the quarterly numbers are in.\"},{\"type\":\"tool_call_response\",\"id\":\"c2\",\"response\":\"sent\"},{\"type\":\"tool_call_response\",\"id\":\"c3\",\"response\":\"Never.\"}]}]"
                   }
                 },
                 {

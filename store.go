@@ -62,10 +62,10 @@ type RunStartedEntry struct {
 }
 
 // LabelsEntry records labels added to the session from outside any call:
-// an agent's starting labels, or what a client's prompt brought in.
+// an agent's starting labels.
 type LabelsEntry struct {
 	Labels []string `json:"labels"`
-	// Source says where they came from: LabelSeed or LabelPrompt.
+	// Source says where they came from: LabelSeed.
 	Source string `json:"source,omitempty"`
 }
 
@@ -93,19 +93,6 @@ type DecisionEntry struct {
 	Verdict Verdict  `json:"verdict"`
 	Reason  string   `json:"reason,omitempty"`
 	Labels  []string `json:"labels,omitempty"`
-	// Deferred are labels the call's result will carry, given to the
-	// tool when it runs (see Decision.Deferred).
-	Deferred []string `json:"deferred,omitempty"`
-	// Consent is the index of the standing consent rule that allowed the
-	// call, when one did (see Decision.Consent).
-	Consent *int `json:"consent,omitempty"`
-	// Resolved marks the decision of a person on a held call.
-	Resolved bool `json:"resolved,omitempty"`
-	// InputSHA256 is set on a hold: the digest of the call's effective
-	// input (see InputDigest and Narrowed) that a resolution must name.
-	// A person's allow records the digest it was given for, and the call
-	// runs only while its effective input still has it.
-	InputSHA256 string `json:"input_sha256,omitempty"`
 }
 
 // CallStartedEntry is written immediately before a tool runs. If it is
@@ -125,9 +112,6 @@ type ToolResultEntry struct {
 	// Usage is what the model calls the tool made cost (see
 	// Result.Usage). It counts toward the run's usage and the session's.
 	Usage []ModelUsage `json:"usage,omitempty"`
-	// Quarantine says how a quarantined reader's answer was labelled
-	// (see Result.Quarantine).
-	Quarantine *QuarantineReport `json:"quarantine,omitempty"`
 	// Display is what the operator was shown and the model was not (see
 	// Display). It is never part of the conversation.
 	Display *Display `json:"display,omitempty"`

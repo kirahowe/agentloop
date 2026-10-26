@@ -15,7 +15,7 @@ import (
 )
 
 func TestAlias(t *testing.T) {
-	c := connect(t, server(t, map[string]ToolConfig{"echo": {Alias: "say", Policy: read().Policy}}))
+	c := connect(t, server(t, map[string]ToolConfig{"echo": {Alias: "say", Labels: read().Labels}}))
 	if len(c.Tools()) != 1 || c.Tools()[0].Spec().Name != "say" {
 		t.Fatalf("tools %v", c.Tools())
 	}
@@ -25,9 +25,9 @@ func TestAlias(t *testing.T) {
 	if d := c.Digests(); d["say"] == "" || len(d) != 1 {
 		t.Fatalf("digests %v", d)
 	}
-	mustFail(t, call(t, c, "say", `{"msg":"x","labels":["nope"]}`), "say", "unknown label")
+	mustFail(t, call(t, c, "say", `{"msg":"x","labels":[""]}`), "say", "bad label")
 	// Two tools cannot share an alias.
-	srv := server(t, map[string]ToolConfig{"echo": {Alias: "x", Policy: read().Policy}, "meta": {Alias: "x", Policy: read().Policy}})
+	srv := server(t, map[string]ToolConfig{"echo": {Alias: "x", Labels: read().Labels}, "meta": {Alias: "x", Labels: read().Labels}})
 	if _, err := Connect(t.Context(), srv); err == nil || !strings.Contains(err.Error(), "both called x") {
 		t.Fatalf("err %v", err)
 	}

@@ -3,11 +3,10 @@
 // stdio, or a remote one spoken to over streamable HTTP (see http.go).
 //
 // The caller's configuration is the authority. It names the tools the
-// agent may have (an allowlist) and gives each its trifecta class, labels
-// and always_hold. A tool the server lists that is not on the allowlist is
-// ignored, and an allowlisted tool the server lacks is an error. The
-// server's tool annotations are only linted against the configured class
-// (Warnings); they never decide anything.
+// agent may have (an allowlist) and gives each its labels. A tool the
+// server lists that is not on the allowlist is ignored, and an
+// allowlisted tool the server lacks is an error. The server's tool
+// annotations are never used.
 //
 // Each allowed tool's definition (name, description, input and output
 // schema) is pinned by its SHA-256 (Digest) when the client
@@ -43,7 +42,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"maps"
 	"net/http"
 	"slices"
 	"sort"
@@ -56,7 +54,6 @@ import (
 	"github.com/santhosh-tekuri/jsonschema/v6"
 
 	"github.com/kirahowe/agentloop"
-	"github.com/kirahowe/agentloop/trifecta"
 )
 
 // The _meta keys agentloop uses, under its own reverse-DNS prefix.
@@ -131,8 +128,8 @@ type ToolConfig struct {
 	// Alias is the name the agent, the model and the policy know the tool
 	// by. Empty means the server's name for it.
 	Alias string
-	// Policy is the tool's class, labels and always_hold.
-	Policy trifecta.Tool
+	// Labels are carried by every result of the tool.
+	Labels []string
 	// Digest pins the tool's definition. Empty accepts whatever the
 	// server lists, and Client.Digests says what that was.
 	Digest string
@@ -180,10 +177,9 @@ func Stopped(name string) string {
 
 // A Client is a connection to one server and the tools it gives.
 type Client struct {
-	srv      Server
-	pins     map[string]string
-	warnings []string
-	tools    []*tool
+	srv   Server
+	pins  map[string]string
+	tools []*tool
 
 	// lock guards conn and refused. It is a channel so that a call can
 	// stop waiting for it when its context ends.
@@ -237,11 +233,8 @@ func checkServer(srv Server) error {
 			return fmt.Errorf("mcp server %s: the tools %s and %s are both called %s", srv.Name, min(name, other), max(name, other), alias)
 		}
 		aliases[alias] = name
-		if err := trifecta.CheckLabels(tc.Policy.Labels); err != nil {
+		if err := agentloop.CheckLabels(tc.Labels); err != nil {
 			return fmt.Errorf("mcp server %s, tool %s: %w", srv.Name, name, err)
-		}
-		if !trifecta.KnownClass(tc.Policy.Class) {
-			return fmt.Errorf("mcp server %s, tool %s: unknown class %q", srv.Name, name, tc.Policy.Class)
 		}
 		for _, k := range tc.AllowContent {
 			if !slices.Contains([]string{Image, Audio, ResourceLink, Resource}, k) {
@@ -295,7 +288,6 @@ func (c *Client) adopt(listed map[string]*sdk.Tool) error {
 		}
 		c.pins[name] = d
 		c.tools = append(c.tools, t)
-		c.warnings = append(c.warnings, Lint(cfg.alias(name), cfg.Policy, def.Annotations)...)
 	}
 	return nil
 }
@@ -318,10 +310,6 @@ func (c *Client) Digests() map[string]string {
 	}
 	return out
 }
-
-// Warnings returns where the server's annotations contradict the
-// configured classes and labels, for the operator.
-func (c *Client) Warnings() []string { return slices.Clone(c.warnings) }
 
 // Reconnect stops the server, if it is running, and starts it again. Every
 // allowed tool must have the definition pinned when the client first
@@ -630,30 +618,10 @@ type tool struct {
 var (
 	_ agentloop.CallTool     = (*tool)(nil)
 	_ agentloop.InputChecker = (*tool)(nil)
-	_ agentloop.Narrowed     = (*tool)(nil)
 )
 
-// EffectiveInput is the input CallWith would send the server for input
-// the model wrote: with the fixed arguments added. The agent decides,
-// holds and binds an approval to it. ok is false when the call would not
-// be sent at all.
-func (t *tool) EffectiveInput(input json.RawMessage) (json.RawMessage, map[string]json.RawMessage, bool) {
-	if t.narrow == nil || len(t.narrow.fixed) == 0 {
-		return input, nil, true
-	}
-	if len(strings.TrimSpace(string(input))) == 0 {
-		input = json.RawMessage(`{}`)
-	}
-	out, refused, bad := t.narrow.apply(input)
-	if refused != "" || bad != "" {
-		return nil, nil, false
-	}
-	return out, maps.Clone(t.narrow.fixed), true
-}
-
 // CheckInput refuses a call that names a fixed or hidden argument. The
-// agent runs it before the policy, so such a call is never held for the
-// operator only to be refused once approved. CallWith checks again.
+// agent runs it before the policy; CallWith checks again.
 func (t *tool) CheckInput(input json.RawMessage) string {
 	if t.narrow == nil {
 		return ""

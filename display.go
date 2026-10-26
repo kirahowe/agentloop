@@ -46,9 +46,9 @@ const (
 
 // CheckDisplay says what is wrong with a display a tool gave, or returns
 // nil: a title of 1 to MaxDisplayTitle characters, a body of at most
-// MaxDisplayBody bytes, labels known accepts, and at most
+// MaxDisplayBody bytes, labels that pass CheckLabels, and at most
 // MaxDisplaySources sources, each with a title and a one-line ref.
-func CheckDisplay(d Display, known func(string) bool) error {
+func CheckDisplay(d Display) error {
 	if strings.TrimSpace(d.Title) == "" {
 		return errors.New("the display has no title")
 	}
@@ -58,10 +58,8 @@ func CheckDisplay(d Display, known func(string) bool) error {
 	if len(d.Body) > MaxDisplayBody {
 		return fmt.Errorf("the display's body is longer than %d bytes", MaxDisplayBody)
 	}
-	for _, l := range d.Labels {
-		if known == nil || !known(l) {
-			return fmt.Errorf("the display has the unknown label %q", l)
-		}
+	if err := CheckLabels(d.Labels); err != nil {
+		return fmt.Errorf("the display has a bad label: %w", err)
 	}
 	if len(d.Sources) > MaxDisplaySources {
 		return fmt.Errorf("the display has more than %d sources", MaxDisplaySources)
@@ -109,8 +107,8 @@ func withDisplayNote(content, ref string) string {
 	return content + "\n\n" + DisplayNote(ref)
 }
 
-// unionLabels is the sorted set of the labels in all of ls.
-func unionLabels(ls ...[]string) []string {
+// UnionLabels is the sorted set of the labels in all of ls.
+func UnionLabels(ls ...[]string) []string {
 	set := map[string]bool{}
 	for _, l := range ls {
 		for _, x := range l {
