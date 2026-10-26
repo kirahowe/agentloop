@@ -6,22 +6,16 @@ Anthropic and OpenAI, and a small command, `agentloop`, built on it.
 
 An agent can do only what it was given. It has no tools, files or
 environment of its own. Every tool call is checked before it runs: the tool
-must exist, the input must match its schema, and a policy you write must
-allow it. A policy can also hold a call until a person decides, and attach
-labels to the session that are never removed, so a rule like "no network
-calls once this session has read private data" is a few lines.
-
-One such rule comes built in, in `agentloop/trifecta`. It keeps an agent
-from holding the three legs of the lethal trifecta at once: private data,
-content an outsider could have written, and a way to send data out. A
-session is labelled `private` or `contaminated` by what it has seen, and
-each tool has a class (`read`, `write`, `edit`, `egress` or `act`). Once a
-session holds both labels, an egress call waits for a person; once it is
-contaminated, so does an edit call. Every act call waits for one,
-whatever the labels, unless its input matches a standing consent rule
-the operator wrote. A policy can also forbid a label outright: a session that
+must exist, the input must match its schema, and a policy you write, if
+there is one, must allow it. A policy can attach labels to the session that
+are never removed. Labels are short provenance names such as `private` or
+`mail:stranger@example.com`. They record where the session's
+material came from, and a session can forbid a label outright: one that
 may not hold `private` never starts holding it, and a tool result that
 carries it is refused before the model sees it.
+
+agentloop never holds a call for a person to approve. What an agent can
+reach is decided by the tools it is given and by the walls around them.
 
 A session is an append-only log, written to disk entry by entry. If the
 process crashes or is killed at any point, the next run carries on from the
@@ -70,9 +64,6 @@ The packages:
 | `agentloop` | Messages, the `Model` and `Tool` interfaces, policies, sessions, the loop |
 | `agentloop/anthropic` | Anthropic's Messages API |
 | `agentloop/openai` | OpenAI's Responses API |
-| `agentloop/trifecta` | The trifecta rule and a policy built on it |
-| `agentloop/quarantine` | The quarantined reader tool and its answer schema checks |
-| `agentloop/workbench` | The sandboxed workbench: shell commands under macOS sandbox-exec |
 | `agentloop/command` | A tool that runs a program, with exactly the environment you give it |
 | `agentloop/mcp` | The tools of one MCP server, run as a child process over stdio or reached over streamable HTTP |
 | `agentloop/fake` | A scripted model for tests |
@@ -93,14 +84,16 @@ model to the client as a session config option, so nothing in the request
 can drift from the model. The request format is in
 [DESIGN.md](DESIGN.md#the-command).
 
-A request with tools must give a policy: the session's starting labels
-and each tool's class and labels, or `{"unrestricted": true}`. With a real
-policy, command tools speak the envelope protocol: JSON in with the session's
-labels, JSON out with the labels of what the tool returned. A held call
-ends `agentloop run` with reason `held`, and a later run resolves it with
-the request's `resolve` list. `agentloop acp` asks the client instead,
-with `session/request_permission`, and shows the session's labels on
-every tool call.
+A request may give a policy: the session's starting labels, the labels
+each tool adds when it is called, and the labels the session may never
+hold (`forbid_labels`). Without a policy every tool the request gives is
+allowed. With a policy, command tools speak the envelope protocol: JSON in
+with the session's labels, JSON out with the labels of what the tool
+returned. A request that uses a field from an older version (`resolve`,
+`quarantine`, `workbench`, `policy.unrestricted`, or `class`,
+`always_hold` or `consent` in a tool's policy entry) is refused with a
+message that says the field was removed. `agentloop acp` never asks the
+client for permission, and shows the session's labels on every tool call.
 
 What agentloop reads from another process (the ACP client, tool
 envelopes, local MCP servers, request files) goes through one
@@ -108,82 +101,16 @@ strict JSON reader, the same dialect relay and relay-tui read: valid
 UTF-8, one value, no name given twice, names matched exactly. See
 [Reading JSON](DESIGN.md#reading-json).
 
-A request can also turn on a quarantined reader with a `quarantine`
-block. The agent then has a built-in tool, `read_quarantined`, that runs
-one of the named `read` tools, gives its result to a second model with
-no tools, and returns only that model's answer to a question, checked
-against a JSON Schema the agent gave. If the schema admits no free text
-(booleans, numbers, enums, dates, objects with fixed keys, arrays of at
-most 100 items), the answer does not make the session `contaminated`.
-`private` always passes through. The reader's calls count toward the
-run's limits and its cost. With `show_operator`, the reader also writes a
-fuller answer that only the operator sees, as a display.
-
 A tool result can carry a display: a title, a Markdown body, labels and
 sources for the operator. agentloop keeps it in the session file and
 sends it to an ACP client, and never gives the model any of it. The
 model is told only that the operator was shown something, under the ref
 `display_ref_prefix` gives it.
 
-An inner tool may also be `egress`, such as a web search that fetches
-the pages it finds. The agent writes that tool's input, so the call is
-decided as if the agent made it directly: a session that holds both
-`private` and `contaminated` waits for a person. The reader only reads
-the result.
-
-```json
-"quarantine": {"model": "claude-haiku-5-5", "effort": "low", "retries": 1, "tools": ["mail_read"]},
-"policy": {"tools": {
-  "mail_read": {"class": "read", "labels": ["contaminated", "private"]},
-  "read_quarantined": {"class": "read"}
-}}
-```
-
-`reader_only` in the block names tools from its `tools` that the model is
-not offered at all. The reader still reads through them. Use it for a
-tool whose raw output a role should never see, such as a web search
-whose pages would contaminate it. A model that calls one by name gets
-the answer for a tool it does not have.
-
-A request can also turn on the sandboxed workbench with a `workbench`
-block. The agent then has a built-in tool, `workbench`, that hands a task
-and a JSON Schema to a child model session whose only tool runs shell
-commands under macOS `sandbox-exec`. The commands can search and read the
-disk and compute; they have no network of any kind and can write only a
-scratch directory that is removed afterwards. The caller gets only the
-child's answer, checked against the schema and labelled as the reader's
-is: `private` always, and `contaminated` unless the schema admits no free
-text. The child's model is the reader's unless the block names another.
-
-```json
-"workbench": {"deny_read": ["/Users/k/notes/private"], "command_timeout_seconds": 60},
-"policy": {"tools": {"workbench": {"class": "read"}}}
-```
-
-The profile is a pure function of the settings
-(`workbench.Profile`). It denies everything, then allows reading the disk
-except a deny list (this user's keys, passwords, browser profiles,
-coding agents' data and whatever the request adds) and writing the
-scratch directory. It has no `network*` rule, so no socket can be used,
-and no `mach-lookup` rule, so no system service can be reached: `open`,
-`osascript`, the pasteboard, DNS and Spotlight all fail. The sysctl
-values it allows are a list: reading sysctl at large would hand over
-every other process's command line. The scratch directory is always in
-the temporary directory, since one inside a synced folder would be
-uploaded by a process outside the sandbox. On macOS 26 the
-commands that do work with no mach service at all are `sh`, the
-coreutils, `find`, `grep`, `rg`, `python3`, `sqlite3`, `jq` and
-`pdftotext`; `mdfind` needs Spotlight and does not. A command has a
-timeout, a CPU limit, a process limit, an output cap and a file size
-limit; it is stopped when the scratch directory grows past its limit or
-the disk runs low, which also bounds a command holding its files
-unlinked; and everything it leaves running is killed. agentloop itself stays
-outside the sandbox, since it has to reach the provider.
-
 A request can also take tools from [MCP](https://modelcontextprotocol.io)
 servers it runs over stdio. The request is the allowlist: it names each
 tool it wants from a server, under its own name for it, and the policy
-gives the tool its class and labels, as for any other tool. The server
+gives the tool its labels, as for any other tool. The server
 gives the description and schema. agentloop pins each definition by its
 SHA-256 in the session, and a later run on that session refuses a
 definition that has changed, ending with reason `tools_unavailable`. A
@@ -217,9 +144,7 @@ A tool's entry can narrow its arguments. `fixed_args` sets arguments to
 the given values on every call, and `hidden_args` names arguments the
 model may not give. Both are taken out of the schema the model sees, and a
 call that names one is refused before the server is sent anything. The
-policy, a consent rule and a person's approval all see the call with the
-fixed values in. An approval given before the operator changed a fixed
-value does not run the call.
+fixed values are added to the call before it is sent.
 
 ```json
 "mcp_servers": {"mail": {
@@ -237,7 +162,9 @@ digest each definition would be pinned at. It reads `{"url": ..., "token":
 schemas and digest. It is for an operator choosing which tools to allow.
 
 The API key is fetched by a command named in the request, such as a
-keychain lookup, and reaches only the model.
+keychain lookup, and reaches only the model. The model clients ignore the
+proxy environment variables (`HTTPS_PROXY` and the rest), so the key and
+the prompts go to the provider directly or not at all.
 
 ### Traces
 
@@ -255,8 +182,8 @@ prints); its closing outcome line is skipped. Flags may come before or after the
 exits 2.
 
 Each run is one `invoke_agent` span, with a `chat` span per model call
-and an `execute_tool` span per tool call. A quarantined reader's model
-calls are `chat` spans under the tool span. A run with no `run_ended`
+and an `execute_tool` span per tool call. The model calls a tool
+made are `chat` spans under the tool span. A run with no `run_ended`
 (a crash) ends with status ERROR and reason `crashed`. The export has
 no content: no messages, tool inputs or results, policy reasons or
 tool logs. Labels are exported, so treat the telemetry backend as

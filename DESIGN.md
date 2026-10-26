@@ -14,10 +14,13 @@ leaves a record that can be resumed without repeating an action.
    files and has no tools of its own. A model adapter gets its credentials
    when it is built. A tool gets exactly the environment it is built with.
    The only network traffic is the adapter's requests to its provider.
+   The model clients never take a proxy from the environment: with no
+   `HTTPClient` given, they use a client whose transport has `Proxy` set to
+   nil, so `HTTPS_PROXY` and its relatives change nothing.
 2. **One gate for every effect.** A tool call reaches its tool only after
    three checks, in order: the tool exists, the input matches its schema,
-   and the policy allows it. The policy sees the call and the session's
-   state, including its labels, and can allow, deny or hold the call.
+   and the policy, if there is one, allows it. The policy sees the call and
+   the session's labels, and can allow or deny the call and add labels.
 3. **The log is the session.** A session is an append-only list of entries,
    each written durably before the loop goes on. The conversation, the
    labels and every pending call are derived from it. Nothing in a session
@@ -45,10 +48,7 @@ leaves a record that can be resumed without repeating an action.
 | `agentloop` | The core: messages, the `Model` and `Tool` interfaces, policies, sessions, stores, the agent loop |
 | `agentloop/anthropic` | The `Model` for Anthropic's Messages API |
 | `agentloop/openai` | The `Model` for OpenAI's Responses API |
-| `agentloop/trifecta` | The trifecta rule, pure, and a `Policy` built on it |
 | `agentloop/otel` | A pure converter from a session log to OpenTelemetry GenAI traces, as OTLP/JSON |
-| `agentloop/quarantine` | Pure checks for a quarantined reader: whether an answer schema admits free text, and validating an answer |
-| `agentloop/workbench` | The sandboxed workbench: a child session whose shell commands run under macOS sandbox-exec |
 | `agentloop/command` | A `Tool` that runs a program, with the plain or the envelope protocol |
 | `agentloop/mcp` | The tools of one MCP server over stdio, as `Tool` values |
 | `agentloop/fake` | A scripted `Model` for tests |
@@ -107,13 +107,11 @@ result is recorded. Its `Log` is for the operator: it is kept in the
 model calls the tool made for the run, each with the model that served
 it. They count toward the run's usage and its `MaxTokens` limit, and the
 `tool_result` entry keeps them, so the session's usage rebuilds from the
-log. A refused result keeps its usage. `Quarantine` is a quarantined
-reader's report (below), kept in the entry for clients to show.
+log. A refused result keeps its usage.
 
 A tool that also implements `CallTool` is called through `CallWith`,
-which gives it the call's id, the session's labels as the call runs
-(those include the labels the call's own decision added), and the
-labels its decision deferred. A tool that implements `InputChecker`
+which gives it the call's id and the session's labels as the call runs
+(those include the labels the call's own decision added). A tool that implements `InputChecker`
 checks input of its own after the schema and before the policy; a
 reason it returns denies the call. `CompileInput` compiles a tool's
 parameters as the agent does, so a tool can check input meant for
@@ -122,13 +120,12 @@ another.
 ### Policies
 
 ```go
-type Verdict string // "allow", "deny", "hold"
+type Verdict string // "allow" or "deny"
 
 type Decision struct {
     Verdict Verdict
     Reason  string   // shown to the model on deny; recorded always
     Labels  []string // added to the session when the call is allowed
-    Deferred []string // given to the tool; its result carries them, or fewer
 }
 
 type Policy interface {
@@ -139,24 +136,26 @@ type PolicyFunc func(ctx context.Context, call ToolCall, view View) Decision
 
 // View is the session as a policy sees it.
 type View struct {
-    Labels    []string // sorted
-    ToolCalls int      // tool calls decided so far in the session
+    Labels []string // sorted
 }
 ```
 
 A nil policy allows every call to a tool the agent was given. The tools
-themselves are the grant. The policy adds conditions on top.
+themselves are the grant. The policy adds conditions on top. A verdict
+that is neither `allow` nor `deny` is a deny.
 
-Labels are the information-flow primitive. A policy can add labels when it
-allows a call, before the result exists (cleanroom's rule). A tool can add
-labels with its result. Labels are never removed, so a policy can refuse
-an `egress` call once the session holds `private`, for example.
-
-A policy can also defer labels to the result. Deferred labels are
-recorded in the decision entry but not added to the session; the tool
-gets them as `Call.Deferred` and puts them, or fewer by a rule of its
-own, on its result. Only the quarantined reader uses this. `Agent.Forbid`
-applies to deferred labels as to the others.
+Labels are short provenance names such as `private`, `contaminated` or
+`mail:stranger@example.com`. `CheckLabel` accepts 1 to 100 bytes that start
+with a lower-case letter or digit and continue with lower-case letters,
+digits and `_ . : @ / + -`. Case, spacing, invisible, bidi and lookalike
+variants of a name therefore cannot exist, and a forbid list cannot miss a
+label by one byte. A label can be shown, logged and compared safely. The core gives no label a meaning. A policy
+can add labels when it allows a call, before the result exists. A tool
+can add labels with its result. Labels are never removed. Where they came
+from is recorded: `Session.LabelSources` gives, for each label the
+session holds, the entry that first added it, as `{"kind":
+"seed"|"tool", "tool", "call_id", "seq"}` (`tool` and `call_id` for a
+tool's decision or result).
 
 `Agent.Labels` are added to the session whenever a run starts, in a
 `labels` entry written only when one of them is new. `Session.AddLabels`
@@ -170,9 +169,8 @@ says, with `Forbidden(labels, forbid)`, the pure intersection:
 - A run on a session that holds a forbidden label, or would from
   `Agent.Labels`, does not start. It writes nothing, calls no model, and
   ends with reason `forbidden`, the labels in `Outcome.Forbidden`.
-- A decision that would add a forbidden label, or defer one, is a deny,
-  with the reason `ForbiddenDecision`, and `Resolve` refuses a person's
-  allow of such a call with `ErrPolicyDenies`.
+- A decision that would add a forbidden label is a deny, with the reason
+  `ForbiddenDecision`.
 - A tool result that carries a forbidden label is refused. The model is
   told only `RefusedResult` ("This result was refused: it carries a
   label this session may not hold."), the session does not take the
@@ -182,221 +180,6 @@ says, with `Forbidden(labels, forbid)`, the pure intersection:
   "labels"}`, whatever reason the run ended with, so whoever runs the
   agent can tell the operator.
 
-**Holds.** A held call waits for a person. A hold adds no labels; its
-decision entry records `input_sha256`, the SHA-256 in hex of the call's
-input as canonical JSON (keys sorted, no whitespace, no HTML escaping,
-numbers as written; `InputDigest`). The run ends with reason `held` and
-lists the held calls, each with its `input_sha256`, and `label_sources`:
-for each label the session holds, the entry that first added it, as
-`{"kind": "seed"|"prompt"|"tool", "tool", "call_id", "seq"}` (`tool` and
-`call_id` for a tool's decision or result). `Session.LabelSources` gives
-the same, so whoever decides can be told why the session holds a label.
-
-`Agent.Resolve(ctx, session, Resolution)` records the person's decision:
-a call id, `allow` or `deny`, an optional reason, and the input digest,
-which must match the call's input. An allow takes its labels from the
-agent's policy now, as an allow from the policy would have; the person
-never supplies labels. Resolving a call again with the verdict it was
-resolved with does nothing, and any other call that is not held is an
-error. An allow is refused when the agent has no policy (nothing could
-give the call its labels) or when its policy now denies the call: a
-person can approve what the policy held, not what it refuses.
-`CheckResolve` says whether `Resolve` would accept a resolution, without
-writing anything. `Session.Policed` reports whether a session holds a
-label or ever held a call. The next `Run` carries on: it runs the call or reports the denial,
-then goes back to the model. `Session.Resolve(callID, Decision)` is the
-lower-level form, which records the decision as given.
-
-### The trifecta
-
-The trifecta is private data, untrusted content and egress held by one
-session at once. `agentloop/trifecta` keeps a session from using all
-three without a person's approval.
-
-There are two labels and no others: `private` (the session has seen the
-operator's private data) and `contaminated` (it has seen something an
-outsider could have written). Any other name is an error wherever a
-label is read, so a typo cannot drop one. A tool has a class: `read`
-(returns content, changes nothing, sends nothing out), `write` (changes
-the operator's own state), `edit` (changes the operator's own things
-outside relay: nobody else sees the change, and the earlier state
-survives, so it can be undone, as with their own reminders), `egress`
-(can put data the model chose where an outsider sees it) or `act`
-(others see it, it spends money, or it cannot be undone, which includes
-overwriting or deleting with no history kept). An edit call is held once
-the session is contaminated because labels do not follow text outside
-relay: injected text written into the operator's reminders would be read
-back later labelled only private, and a clean session would take it in
-clean. Only `write` keeps its labels, so only `write` runs whatever the
-labels.
-
-`trifecta.Decide(labels, tool)` is the rule for a call no consent rule
-covers, a pure function of the session's labels when the call is decided
-and the tool's entry:
-
-- `always_hold`: hold
-- `act`: hold, whatever the labels
-- `edit`, and the session holds `contaminated`: hold
-- `egress`, and the session holds both labels: hold
-- an unknown class: hold
-- otherwise (`read`, `write`): allow, whatever the labels
-
-An `act` entry may carry `consent`, the operator's standing consent: a
-list of rules, each a map from input argument names to the exact JSON
-values a call must have. `trifecta.DecideCall(labels, tool, input)` is
-the whole rule. It allows an act call without `always_hold` whose input
-matches every pair of some rule, and records the rule's index in the
-decision (`consent` on the decision entry). Matching is exact after JSON
-normalisation: key order, spacing and string escapes do not matter, but a
-number matches only one written the same way and a string only the same
-characters. Input that is not one object, or that names a key twice
-anywhere, matches nothing, and so does an empty rule. Two keys that
-differ only in case count as one key named twice, since a decoder such
-as Go's encoding/json reads either into the same field. A request refuses
-`consent` on any other class, beside `always_hold`, or with an empty
-rule. Arguments a rule does not name are free.
-
-It never denies; a person does. `trifecta.Policy` applies it to a map of
-tool entries. Each decision carries the tool's static labels, which the
-session takes on when the call is allowed, before it runs, and keeps
-whatever becomes of the call. A tool with no entry is denied, and so is
-a tool whose static labels include one of `Policy.Forbid`.
-
-`Policy.Readers` names the quarantined reader tools, each with the inner
-tools it may read through. A reader call's input names its inner tool,
-and the call is decided as the inner call would be: held when the
-reader's own entry or the inner tool's would hold it, with that entry's
-reason. For a `read` inner tool the trifecta itself never holds the
-call, so the hold that matters is `always_hold`. An inner tool may also
-be `egress`, for a web search that fetches its results: the caller
-wrote the inner input (the query), so the inner call is decided under
-the caller's labels as if the caller made it, and a caller that holds
-both labels is held. The reader model only reads the inner output; it
-never writes an input. The decision's labels
-are the reader's own static labels (normally none); the inner tool's
-static labels are deferred. An inner tool off the reader's list, with no
-entry, or of a class other than `read` or `egress` is denied, and so is a call whose
-reader or inner static labels include a forbidden one. A person
-resolving a held reader call sees its whole input (the inner tool, its
-input, the question and the schema), never the inner content, which does
-not exist yet.
-
-### Quarantined answers
-
-`agentloop/quarantine` holds a quarantined reader. A reader is a model with no tools that reads content
-an outsider may have written and answers the caller's question as JSON
-matching the caller's schema. `quarantine.Check` says whether a JSON
-Schema 2020-12 admits free text: a string or object key the schema does
-not fix. Strings fixed by `enum` or `const`, or closed by the `date`,
-`time` and `date-time` formats, are not free text, and neither are
-booleans, numbers and null. Arrays and objects are free of text when
-their items, keys and values are, and an array must also say
-`maxItems` of at most 100. A fixed string or property name of one code
-point or none (after NFC) is free text, since an array of them spells.
-Numbers are not bounded. `patternProperties`,
-`unevaluatedProperties`, `unevaluatedItems`, `$id`, `$anchor`,
-`$dynamicRef`, the content keywords and every keyword `Check` does not
-know count as free text, wherever they appear. `$ref` may point only at
-the root or at the root's `$defs`. `Compile` compiles a schema with
-format assertion on and nothing loaded, and `Answer` validates an answer
-and returns it as canonical JSON, which is what a caller must be given.
-
-The design follows the dual LLM pattern (Willison, 2023): a privileged
-model with tools, and a quarantined one with none that reads the
-untrusted text. As in CaMeL (Debenedetti et al., arXiv:2503.18813) the
-reader fills a schema and may say it cannot answer, and as in FIDES
-(Costa et al., arXiv:2505.23643) a typed answer keeps its
-confidentiality label and can lose its integrity label. Dropping
-`contaminated` is a deliberate endorsement: it says the answer cannot
-carry instructions, not that it is true. No label ever comes from the
-reader's output or the inner content.
-
-`quarantine.Reader` is the tool, `read_quarantined`. A call's input has
-four fields, all required: `tool`, one of the reader's inner tools;
-`input`, that tool's input; `question`, at most 2000 characters; and
-`schema`, a JSON Schema 2020-12 for the answer. Before the policy
-decides, `CheckInput` checks `input` against the inner tool's schema and
-compiles `schema`; a schema that does not compile is a deny with the
-compiler's reason. A schema that admits free text is allowed, and its
-answer keeps `contaminated`.
-
-The reader is also built with each inner tool's static labels
-(`Reader.Labels`, from the same policy entries). When the call runs, the
-reader runs the inner call, telling it the session's labels, the
-deferred ones and the static ones. The reader labels are the deferred
-and static labels and whatever the inner result's labels add. Keeping
-the static labels in the reader as well means a decision made without
-deferred labels, by a hand-built policy or resolution, still cannot
-lose `private`. Then:
-
-- On an answer, the content is `{"answer":<value>,"free_text":<bool>}`,
-  canonical, with `<value>` the bytes `Answer` returned and `free_text`
-  `Check`'s verdict on the schema. A decline is
-  `{"free_text":<bool>,"unanswerable":true}`. The result's labels are
-  the reader labels, less `contaminated` when the schema admits no free
-  text. `private` always passes through.
-- On a failure the content is one fixed sentence and the result is an
-  error: "The inner tool failed.", "The reader could not answer in the
-  schema." or "The reader is unavailable." Its labels are the reader
-  labels less `contaminated`, as for a closed answer: that the call
-  failed is one outsider-influenced bit, which can be private.
-
-Nothing the inner tool or the reader wrote reaches the caller on any
-path but a validated answer. A result whose labels include a forbidden
-label is refused by the loop like any other, which covers an inner
-result that adds `private` in a session that may not hold it.
-
-The reader is one `Model.Generate` per attempt, with the reader's model,
-effort and output cap, no tools, the fixed system prompt
-`ReaderSystem`, and a fresh conversation each time. The user message
-holds the question, the schema, and the inner content between markers.
-Nothing relies on the markers or the instructions; the schema and the
-validation limit what a fooled reader can produce. Reasoning parts are
-dropped and the text parts are read as the reply: exactly one of
-`{"answer": <value>}` or `{"unanswerable": true}`, strict JSON (no key
-twice, bounded depth and numbers), optionally inside one Markdown code
-fence. Only the value under `answer` is validated against the caller's
-schema, compiled as given. An invalid reply is asked again, up to
-`Retries` times, in a new conversation that also says why the last reply
-was refused; that message can quote the reader's reply and goes only
-back to the reader. A failed model call is retried under the agent's
-retry policy. No structured-output mode is asked of the provider.
-
-The result's `Usage` lists every reader call, and its `log` holds one
-JSON object for the operator, with digests and sizes only:
-
-```json
-{"quarantine": {
-  "inner": {"tool": "mail_read", "input_sha256": "…", "labels": ["contaminated", "private"],
-            "is_error": false, "content_bytes": 5121, "content_sha256": "…"},
-  "reader": {"model": "claude-haiku-5-5", "attempts": 1, "model_errors": 0,
-             "usage": {"input_tokens": 1840, "output_tokens": 22}, "output_sha256": "…"},
-  "schema": {"free_text": false},
-  "dropped": ["contaminated"]}}
-```
-
-The inner content, the inner tool's own log and the reader's text are
-not kept anywhere, except as below. A `tool_result` whose labels no
-longer say `contaminated` must not carry outsider text in any field but
-its `display`, which carries labels of its own.
-
-A call may also set `show_operator: true`. The reader is then told to add
-`"operator": <text>` to its reply: a short answer in Markdown, in its own
-words, with links, for the operator alone. The answer is read and
-validated as before, and the caller gets only that. The text becomes the
-result's display (see Displays): the question as its title, the text as
-its body, the reader labels as its labels (so a closed answer leaves the
-caller clean while the display stays `contaminated`), and the inner
-result's display sources, if it had a display. A reply with `operator`
-from a call without `show_operator` is not a valid reply. A blank
-`operator` gives no display. The entry's
-`quarantine` field holds `{"tool", "free_text", "dropped"}` for clients.
-
-Crash safety is as for any tool. The deferred labels are not on the
-session until the result is, and until then the caller has seen nothing
-of the inner call. A reader killed mid-call leaves the usual "may or may
-not have taken effect" result, and its usage so far is not recorded.
-
 ### Displays
 
 A `Result` may carry a `Display`: a title, a Markdown body, labels and
@@ -404,7 +187,7 @@ sources (each a title and a ref such as `web:https://...`), for the
 operator and never the model. The loop keeps it in the `tool_result`
 entry's `display`, and the conversation never holds any of it:
 `Messages` is built from the result alone. Its labels become the union of
-its own, the result's, the deferred ones and the session's as the call
+its own, the result's and the session's as the call
 ran, so a display is never labelled less than the call that made it. The
 session does not take a display's labels. A display that would carry a
 label the agent forbids is dropped, and the entry's log says so. A
@@ -418,90 +201,6 @@ gains one line, `The operator was also shown [[<ref>]].` (without a
 prefix, `The operator was also shown more than this.`), which holds
 nothing the display said. relay keeps each display as a doc under that
 ref, and an ACP client gets it as tool call content (see the command).
-
-### The sandboxed workbench
-
-`agentloop/workbench` is the quarantined reader with tools instead of a
-document. A call gives a `task` (at most 4000 characters) and a `schema`,
-and the tool runs a child session on its own model whose only tool is
-`sh`. The child is told the task and the schema and nothing of the
-caller's conversation. The caller gets only the child's final answer,
-validated against the schema by `quarantine.Answer`, written as
-canonical JSON, and labelled by `quarantine.ResultLabels`: `private`
-always, and `contaminated` unless the schema admits no free text. The
-class is `read`. A reply that is not a valid answer is refused with the
-reason, in the same session, up to `retries` times; after that the
-caller is told only that there was no answer. The child's turns, tool
-calls and tokens are bounded, and its model calls are the run's usage
-and cost.
-
-Every `sh` command runs as `/usr/bin/sandbox-exec -p <profile> /bin/sh
--c <command>`, in a scratch directory made for the session, with an
-environment of only `PATH`, `HOME`, `TMPDIR` (the scratch directory) and
-`LANG`, and an empty stdin. `workbench.Profile` is a pure function from
-the settings to the profile text, so what the sandbox allows is read and
-tested without running anything. It denies everything, then allows
-forking, running programs, signals and process info within the same
-sandbox, reading the sysctl values in an allowlist (what the hardware and system
-are, and the kernel numbers the C library asks for, but not
-`kern.procargs2`, which is every other process's command line), reading
-every file except a deny list,
-reading and writing the scratch directory, and writing `/dev/null` and
-the process's own output. Later rules win, so the deny list comes after
-the broad read rule and the scratch directory after the deny list.
-
-There is no `network*` rule, so no socket of any kind can be used, unix
-sockets included, and no `mach-lookup` rule, so no system service can be
-reached: not LaunchServices (`open`), AppleEvents (`osascript`), the
-pasteboard, DNS, Spotlight or launchd. That is what makes going out
-impossible rather than forbidden. The deny list covers this user's keys,
-passwords, tokens, browser profiles, coding agents' settings and other
-workbench sessions, plus whatever the request adds, and the sandbox
-matches resolved paths, so each entry is resolved before the profile is
-written.
-
-The agentloop process stays outside the sandbox: it has to reach the
-model provider. Only the commands are sandboxed, and a sandbox cannot be
-loosened from inside, so `sandbox-exec` run again within it is still
-bound by the first profile.
-
-The scratch directory is made in the temporary directory, and where is
-not a setting: a scratch directory inside a synced folder, such as
-iCloud Drive, would be read and uploaded by a process outside the
-sandbox, which is the way out the sandbox exists to close.
-
-Limits: one command may run for `command_timeout_seconds` (which is also
-its CPU limit per process), write a file of at most `file_bytes`, add
-`processes` processes to this user's, and return `output_bytes` of
-output, cut with a note. A session's scratch directory may grow to
-`scratch_bytes`, and the filesystem it is on must keep `min_free_bytes`
-free. Both are watched while a command runs, since a loop writing file
-after file, each inside the file size limit, would otherwise fill the
-disk before the command ended; the free-space floor is what bounds a
-command that holds its files unlinked, where a walk sees nothing. The
-floor is read from the session directory, not the scratch directory,
-since a command may delete its own scratch directory, and a walk that
-cannot see everything counts as over the limit, since a command can take
-the permissions off a directory it made. Past either limit no further
-command runs in that session. Closing a session puts those permissions
-back before it removes the directory. The limits are set
-by a shell outside the sandbox just before it becomes `sandbox-exec`, so
-they cover everything the command starts and cannot be raised from
-inside.
-
-What a command leaves running is killed. The sandbox's processes are
-found by asking `sandbox_check` which processes are sandboxed, may write
-this session's scratch directory, and may not write a probe directory
-beside it: no other profile allows exactly that, since both directories
-are new and only this profile names them. Processes are stopped before
-they are killed, since a stopped process cannot fork, and the passes go
-on until none is left. One pass that stops and kills together is not
-enough: a fork bomb forks faster than its processes can be listed.
-
-The log holds the task's digest, the model, the attempts, the turns, how
-many commands ran, how many timed out, how many processes were swept,
-and the reply's digest. It never holds the task, a command, its output
-or the child's text, for the same reason the reader's log does not.
 
 ### Sessions and stores
 
@@ -522,11 +221,11 @@ An `Entry` has a sequence number, a time, a type and one payload:
 | Type | Payload | Written |
 |---|---|---|
 | `run_started` | the prompt, if any | when `Run` starts |
-| `labels` | labels added from outside any call, and their `source`: `seed` or `prompt` | when a run's starting labels, or `AddLabels`, add one the session lacks |
+| `labels` | labels added from outside any call, and their `source`, `seed` | when a run's starting labels, or `AddLabels`, add one the session lacks |
 | `message` | a `Message`, and for an assistant turn its `Stop`, `Usage` and serving model | when a user prompt is added or a response arrives |
-| `decision` | call id, tool name, verdict, reason, labels, `deferred` labels on an allow; `resolved` for a person's; `input_sha256` for a hold | when a call is checked, or when a held call is resolved |
+| `decision` | call id, tool name, verdict, reason, and the labels an allow adds | when a call is checked |
 | `call_started` | call id | immediately before the tool runs |
-| `tool_result` | the `ToolResult`, its labels, the operator's `log`, the tool's model `usage`, and a reader's `quarantine` report | when a call finishes, or is refused |
+| `tool_result` | the `ToolResult`, its labels, the operator's `log`, and the tool's model `usage` | when a call finishes, or is refused |
 | `model_error` | the `ModelError`, and whether the loop will retry | on each failed model call |
 | `run_ended` | the `Outcome` | when `Run` returns |
 | `pins` | digests of tool definitions, by tool name | when a run starts with `Agent.Pins` the session lacks |
@@ -583,9 +282,7 @@ name to a struct field (`ſ` reaches a field named `s`), takes one of two
 repeated names, and replaces invalid UTF-8. agentloop's own code does not
 use it to read what another process wrote. The strict reader covers the ACP
 client's lines (see The command), tool envelopes, request files,
-`mcp-tools` input, MCP servers' stdio messages, tool call input where agentloop reads a field of it (the reader's inner
-tool, the workbench's task, consent rules), and the canonical JSON that
-digests are taken of. The table of hostile lines that all three
+`mcp-tools` input, MCP servers' stdio messages, and the canonical JSON that tool definition digests are taken of. The table of hostile lines that all three
 components test against is `testdata/strict-json/cases.jsonl`, a copy
 of the one in relay's `testdata/strict-json`, which is the source.
 
@@ -636,11 +333,12 @@ Everything else is an `Outcome`:
 
 ```go
 type Outcome struct {
-    Reason Reason      // completed, max_tokens, refused, held, limit, model_error, canceled
-    Text   string      // the last assistant text
-    Error  *ModelError // for model_error
-    Held   []ToolCall  // for held
-    Limit  string      // which limit, for limit
+    Reason    Reason      // completed, max_tokens, refused, limit, model_error, canceled, forbidden
+    Text      string      // the last assistant text
+    Error     *ModelError // for model_error
+    Limit     string      // which limit, for limit
+    Forbidden []string    // the labels, for forbidden
+    Refused   []Refusal   // results refused for carrying a forbidden label
     Turns  int
     Usage  Usage
 }
@@ -649,19 +347,18 @@ type Outcome struct {
 A run:
 
 1. Writes `run_started`, and a `labels` entry if `Agent.Labels` adds any.
-2. Settles the calls left open by the last assistant turn (below). If any
-   is still held, ends with `held`.
+2. Settles the calls left open by the last assistant turn (below).
 3. Adds the prompt as a user message, if there is one. With no prompt and
    nothing waiting for the model, it ends with the last turn's outcome,
    usually `completed`, and the last assistant text. A run that ends
-   `held` or `canceled` before this step does not add its prompt, so the
-   caller passes it again.
+   `canceled` before this step does not add its prompt, so the caller
+   passes it again.
 4. Repeats: checks the limits, calls the model (retrying under the retry
    policy), and records the response. On `tool_use` it settles the turn's
    calls and goes on. On `pause` it settles them as cut off and goes on.
    On `end_turn`, `max_tokens` or `refusal` it settles them as cut off and
    ends with `completed`, `max_tokens` or `refused`. So at rest every call
-   has a result, unless it is held.
+   has a result.
 5. Writes `run_ended`.
 
 A response that repeats a tool call id, or has a call with no id, is not
@@ -694,16 +391,15 @@ in order:
   no number longer than 100 characters and matches the schema, policy) and the decision is recorded. A failed check is a deny
   with the reason. So is a call the policy allowed in an earlier run that
   never started: that allow is stale, since the session may hold more
-  labels now, and the call is decided again. A person's allow stands.
+  labels now, and the call is decided again.
 - An allowed call is recorded as started, run under the tool timeout, and
   its result recorded. A Go error from the tool becomes an error result.
   Before it runs, the tool-call and token limits are checked: a tool can
-  spend tokens (a quarantined reader does), so the token limit can be
+  spend tokens, so the token limit can be
   reached in the middle of a turn. A call past a limit gets an error
   result saying so, keeps its decision's labels, and the run ends with
   `limit`.
 - A denied call gets an error result with the reason.
-- A held call is left for later. The other calls of the turn still settle.
 
 Retries: `overloaded` and `unreachable` wait `Backoff`, doubling each time,
 or the provider's `RetryAfter` if it is later. `rate_limited` waits until
@@ -736,31 +432,25 @@ c, err := mcp.Connect(ctx, mcp.Server{
     Restart: true,
     Tools: map[string]mcp.ToolConfig{
         "read_mail": {Alias: "mail_read",
-                      Policy: trifecta.Tool{Class: "read", Labels: []string{"contaminated"}},
+                      Labels: []string{"contaminated"},
                       Digest: "9f2c…"},
     },
 })
 tools := c.Tools()       // []agentloop.Tool, by alias
 pins := c.Digests()      // by alias; keep these, and pass them next time
-warnings := c.Warnings() // annotations that contradict the config
 ```
 
 The configuration decides everything. `Tools` is an allowlist keyed by
-the server's names, and each entry has the tool's trifecta class, labels
-and `always_hold`, and the `Alias` the agent knows it by (the server's
-name when empty). The model and the policy see only the alias. A tool the
-server lists that is not on the allowlist is ignored, and an allowlisted
-tool the server does not list is an error. The server's annotations are
-untrusted (the spec says so) and only linted: `Warnings` reports, for
-example, a `read` tool with `destructiveHint` true, a `read` tool with
-`openWorldHint` true whose labels lack `contaminated`, a `write` tool with
-`openWorldHint` true, or a tool of any other class with `readOnlyHint`
-true. The SDK reads an absent `readOnlyHint` as false, so false is never
-linted.
+the server's names, and each entry has the labels every result of the tool
+carries, and the `Alias` the agent knows it by (the server's name when
+empty). The model and the policy see only the alias. A tool the server
+lists that is not on the allowlist is ignored, and an allowlisted tool the
+server does not list is an error. The server's annotations are untrusted
+(the spec says so) and are not used at all.
 
 Each allowed tool's definition is pinned when the client connects:
 `Digest` is the SHA-256 in hex of its name, description, `inputSchema`
-and `outputSchema` as canonical JSON (as for `InputDigest`). Annotations
+and `outputSchema` as canonical JSON. Annotations
 are left out: they decide nothing, and the SDK would have to encode them
 again, which would tie the digest to the SDK's version. A tool
 whose definition differs from the `Digest` its entry gives is a
@@ -794,7 +484,7 @@ session's labels in `com.kirahowe.agentloop/labels` (a sorted array,
 they say the session holds private data. A result's `_meta` may carry
 `com.kirahowe.agentloop/labels`, whatever `SendLabels` says, and those
 labels are added to the configured ones; a result can never take one
-away. A value that is not an array of known labels fails the call.
+away. A value that is not an array of valid labels fails the call.
 
 A result is text: its text blocks, joined by newlines. Image, audio,
 `resource_link` and embedded resource content fail the call unless the
@@ -863,8 +553,7 @@ Each run is one trace. The root is `invoke_agent {agent}`, from
 `run_started` to `run_ended` (a run with no end is closed at its last
 entry, as an error). Under it sit `chat {model}` spans, one per assistant
 message and one per failed model call, and `execute_tool {tool}` spans, one
-per call, from its first decision to its `tool_result`. Holds, denials and
-resolutions are `agentloop.policy.decision` events on the tool span.
+per call, from its first decision to its `tool_result`. Policy decisions are `agentloop.policy.decision` events on the tool span.
 `gen_ai.usage.input_tokens` counts cached tokens, which the log's
 `InputTokens` does not, and the cache counts are added as their own
 attributes. Labels go under `agentloop.labels`, never under `gen_ai`.
@@ -912,103 +601,44 @@ The request:
     }
   },
   "tool_protocol": "envelope",        // or leave out for the plain protocol
-  "policy": {                         // required when there are tools
+  "policy": {                         // optional; without it every tool is allowed
     "labels": ["private"],            // added to the session at every run start
     "forbid_labels": [],              // labels the session may never hold
-    "tools": {                        // an entry for every tool, and no others
-      "memo_send": {"class": "write"},
-      "web_fetch": {"class": "egress", "labels": ["contaminated"]},
-      "rem":       {"class": "edit", "labels": ["private"], "always_hold": false},
-      "send":      {"class": "act", "consent": [{"group": "Kira only"}]}
+    "tools": {                        // labels a call to the tool adds; entries are optional
+      "web_fetch": {"labels": ["contaminated"]},
+      "mail_read": {"labels": ["private", "from a mail"]}
     }
   },
-  "resolve": [                        // run only: decisions on held calls
-    {"call_id": "toolu_1", "verdict": "allow", "input_sha256": "9f2c…"},
-    {"call_id": "toolu_2", "verdict": "deny", "reason": "not now", "input_sha256": "41ab…"}
-  ],
   "tool_env": {"RELAY_ROLE": "clerk"},// the whole environment a tool gets
   "tool_dir": "/path/to/work",
   "tool_timeout_seconds": 300,
   "timeout_seconds": 1800,            // the run ends with canceled at this deadline
   "limits": {"max_turns": 0, "max_tool_calls": 0, "max_tokens": 0},
   "retry": {"retries": 3, "backoff_seconds": 2, "max_wait_seconds": 60},
-  "quarantine": {                     // turns on read_quarantined
-    "model": "claude-haiku-5-5",      // same provider, base_url and key
-    "effort": "low",
-    "max_output_tokens": 2048,        // 0 or left out: the adapter's default
-    "retries": 1,                     // re-asks after an invalid answer, 0 to 5
-    "tools": ["mail_read"]            // the inner tools it may read through
-  },
-  "workbench": {                      // turns on the sandboxed workbench
-    "model": "claude-haiku-5-5",      // quarantine.model when left out
-    "effort": "low",
-    "max_output_tokens": 2048,
-    "max_turns": 40,                  // 0: the default
-    "max_tokens": 400000,             // 0: the default
-    "retries": 1,
-    "deny_read": ["/Users/k/notes/private", "/Users/k/.secret*"],
-    "command_timeout_seconds": 60,
-    "output_bytes": 32768,
-    "processes": 64,
-    "scratch_bytes": 1073741824,
-    "min_free_bytes": 5368709120
-  },
   "display_ref_prefix": "shown:2026-10-18/" // where displays are kept; see Displays
 }
 ```
 
-**The quarantined reader.** With a `quarantine` block, agentloop adds
-`read_quarantined` to the tools itself, with a parameter schema whose
-`tool` is an enum of `quarantine.tools`, and builds it from the request:
-the reader model on the request's provider, `base_url` and key, the
-request's `retry` for failed model calls, and the inner tools as their
-command tools. A tool in `tools` named `read_quarantined` is refused.
-The block needs a real policy, and the policy an entry for
-`read_quarantined` of class `read`. Each of `quarantine.tools` must be
-one of `tools`, of class `read` or `egress`, named once, and not
-`read_quarantined`.
-An inner tool stays callable on its own, where it takes its labels the
-ordinary way. `tool_kinds` may name `read_quarantined`. The reader's
-calls are in the `tool_result`'s usage, so they count toward
-`limits.max_tokens` and `cost_usd` prices each at the reader model's
-price.
-
-**The workbench.** With a `workbench` block, agentloop adds the
-`workbench` tool itself and builds it from the request: the child model
-on the request's provider, `base_url` and key, the request's `retry` for
-failed model calls, and the limits above. Its model is `workbench.model`,
-else `quarantine.model`; a request with neither is refused, as is a tool
-in `tools` named `workbench`. The block needs a real policy, and the
-policy an entry for `workbench` of class `read`. `deny_read` takes
-absolute paths, or a path ending in `*` to deny every path with that
-prefix; each is added to the ones the workbench always denies. What an
-entry resolves to is denied as well, and so is what the symlinks inside
-it point at, down two levels and up to 2000 entries, since a dotfiles
-setup links such paths elsewhere. A path
-that is relative, unclean or holds a character the profile's strings
-cannot carry is refused, so nothing can end a rule early. `tool_kinds`
-may name `workbench`. A request with a `workbench` block is refused on a
-system with no `sandbox-exec`, and the quarantined reader cannot read
-through the workbench, since `quarantine.tools` names only the request's
-own tools. The child's calls are in the `tool_result`'s usage, like the
-reader's.
-
-`policy` is required whenever `tools` is not empty. `{"unrestricted":
-true}` turns the trifecta off, for examples and tests, and nothing else
-may sit beside it; `"unrestricted": false` is refused. A real policy
-needs an entry with a known class for every tool and none for anything
-else, and only known labels. With command tools it also needs
-`"tool_protocol": "envelope"`.
-`forbid_labels` becomes `Agent.Forbid` and `trifecta.Policy.Forbid`. A
+**The policy.** `policy` is optional. Without one every tool the request
+gives is allowed and the session starts with no labels. With one, the
+agent's starting labels are `policy.labels`, `Agent.Forbid` is
+`forbid_labels`, and the agent's policy allows every call and adds the
+labels of the tool it calls (`policy.tools`, where an entry is optional
+and must name one of the tools). Labels use a restricted character set (see Policies). A
 request whose `policy.labels`, or any tool's labels, include a label it
-forbids is unusable, since the session could not start or the tool
-could never be called; so is `forbid_labels` beside `unrestricted`. The
-request is read by the strict reader (see Reading JSON): unknown fields
-anywhere are refused, and so are fields spelled other than exactly
-(`"POLICY"`) and fields given twice in one object. `resolve` needs a real policy, and
-a request without one refuses a session that `Session.Policed` reports:
-an unrestricted request never carries on a policed session. With a real policy the agent's starting
-labels are `policy.labels` and its policy is `trifecta.Policy`.
+forbids is unusable, since the session could not start or the tool could
+never be called. With command tools a policy also needs `"tool_protocol":
+"envelope"`, since only the envelope returns the labels of a result.
+
+The request is read by the strict reader (see Reading JSON): unknown
+fields anywhere are refused, and so are fields spelled other than exactly
+(`"POLICY"`) and fields given twice in one object. The fields that older
+versions took are refused with a message that says they were removed:
+`resolve`, `quarantine`, `workbench`, `policy.unrestricted`, and `class`,
+`always_hold` and `consent` in a tool's policy entry. agentloop no longer
+holds a call for a person, classes tools, or runs a reader or a
+workbench. What an agent may do is decided by the tools it is given and
+the walls around them.
 
 **MCP tools.** A tool with `"protocol": "mcp-stdio"` comes from the MCP
 server `server` in `mcp_servers`, where it is called `tool`. Its `name`
@@ -1020,10 +650,9 @@ is the tool's definition digest (lowercase hex, as on stderr and in the
 start, at a restart too. `allow_content` may
 name `image`, `audio`, `resource_link` and `resource`; see [MCP
 servers](#mcp-servers) for what each lets through. Without it, a result
-with any non-text content fails the call. MCP servers need a real
-policy, which is the only source of each tool's class, labels and
-`always_hold`. `tool_protocol` is needed only when there are command
-tools too. `quarantine.tools` may name an MCP tool. A request with MCP
+with any non-text content fails the call. An MCP tool's labels come from
+the policy's entry for it. `tool_protocol` is needed only when there are
+command tools too. A request with MCP
 servers and no `tool_timeout_seconds` gets 120 seconds, for every tool,
 since a server can leave a call unanswered for ever.
 
@@ -1035,10 +664,8 @@ agentloop's. A server whose start takes over 30 seconds, lacks a tool
 the request gives, or whose schema does not compile fails the start.
 The digest of each tool's definition goes to stderr and into the
 session as a `pins` entry. A run on a session that pinned a different
-digest stops before anything is written, a `resolve` included: a changed
-definition needs a new session. In `acp` the check comes before a
-prompt's labels are written, so a refused prompt leaves the session as
-it was.
+digest stops before anything is written: a changed definition needs a new
+session. In `acp` a refused prompt leaves the session as it was.
 
 When the servers cannot be set up, `run` writes no entry and ends with
 reason `tools_unavailable` and a `tools_error` that says why:
@@ -1053,9 +680,7 @@ reason `tools_unavailable` and a `tools_error` that says why:
 `server`, `tool`, `pinned` and `got` are there when they apply: a
 server that did not start gives `server` and `message`. `labels` are
 the session's. A signal before or while the servers start ends the run
-with reason `canceled` in the same way, and stops them. Where a tool's
-annotations disagree with its class or labels, a warning goes to
-stderr; the policy is unchanged and the model never sees annotations.
+with reason `canceled` in the same way, and stops them.
 
 A server never gets a secret through its environment. A
 `credentials_command`, run like `api_key_command` (PATH and HOME, empty
@@ -1110,23 +735,6 @@ nothing. Otherwise the fixed values are added and the whole is checked
 against the server's own schema before it is sent. The pinned digest is
 the server's definition's, not the narrowed one's.
 
-A call is decided, held and approved on its effective input: what the
-model wrote with the fixed values added (`Narrowed`, `EffectiveInput`).
-The policy sees the effective input, so a consent rule can name a fixed
-argument, and a call cannot leave one out to dodge a rule. A held call
-lists `effective_input` and `fixed_args`, and its `input_sha256` is of
-the effective input, so a person approves the whole call. A permission
-request over ACP shows the effective input as `rawInput` and names the
-fixed values under `_meta["agentloop/fixed_args"]`. If the operator
-changes a fixed value after the call was held, the effective input no
-longer has the approved digest: a resolution that allows it becomes a
-deny, and a person's allow recorded before the change does not run. The
-model is told why (`SettingsChanged`). A call through the quarantined
-reader is bound the same way to its inner tool's fixed values. A hold
-shown again in a later run keeps the digest it was held with, so a
-resolution can still name it: a deny goes through, and an allow after a
-settings change becomes a deny.
-
 `agentloop mcp-tools` reads `{"url": "...", "token": "..."}` (token
 optional) on stdin, lists every tool the remote server has, and prints
 `{"tools": [...]}`: each tool's `name`, `title`, `description`,
@@ -1138,8 +746,8 @@ any of it.
 appended, in `tool_dir`, with exactly `tool_env`. With the plain
 protocol, stdin is the call's input and stdout is the result (stderr when
 stdout is empty; both, as an error, when the program fails). The plain
-protocol shows stderr to the model, which is why a real policy cannot use
-it. With the envelope protocol, stdin is one object:
+protocol shows stderr to the model, which is why a request with a policy
+cannot use it. With the envelope protocol, stdin is one object:
 
 ```json
 {"input": {"url": "…"}, "labels": ["contaminated", "private"], "call_id": "toolu_1"}
@@ -1169,7 +777,7 @@ to 200 characters, a body of at most 200,000 bytes, at most 50 sources,
 each with a title and a one-line ref) fails the call like any other bad
 envelope. If the program exits non-zero,
 writes more than the output cap (1 MiB) to stdout, or writes anything
-but one such envelope with known labels, read by the strict reader (see
+but one such envelope with valid labels, read by the strict reader (see
 Reading JSON; a field spelled otherwise or given twice fails it), the
 model gets only "The tool
 <name> failed." and the call is an error. The reason, with the program's
@@ -1184,27 +792,15 @@ every model call of the run was priced, `cost_usd`: the run's cost in US
 dollars, each call at the price of the model that served it. `cost_usd` is
 left out, never 0, when the run made no call, a call's model has no price,
 or the provider is not Anthropic. It is on this line only, not in the
-`run_ended` entry. Nothing else goes to stdout. For a held run the outcome's `held` lists each call as
-`{"id", "name", "input", "input_sha256"}`, with `effective_input` and
-`fixed_args` for a call whose tool fixes arguments. A run with a refused result
+`run_ended` entry. Nothing else goes to stdout. A run with a refused result
 lists it in `refused`, and one that did not start for holding a
 forbidden label ends with reason `forbidden` and the labels in
 `forbidden`.
 
-`resolve` is applied before the run starts, through `Agent.Resolve`, and
-the decision entries it writes come first on stdout. The whole list is
-checked against the session first: a call the session does not have, a
-digest that does not match, or a call that is not held (other than one
-already resolved the same way) makes the request unusable, and nothing is
-written. An allow the policy now denies outright (its tool is gone, say)
-is recorded as a deny with the reason "The tool is no longer allowed.",
-and the run carries on; the same allow sent again is that deny again. `acp` refuses `resolve`.
-
 It exits 0 whenever it reaches an outcome, whatever the reason. It exits 2
 when the request is unusable, before writing anything: bad JSON, an unknown
 field, a schema that does not compile, a tool name the providers would
-reject, a missing or invalid policy, a session path it cannot use, a
-`resolve` entry the session cannot take. It exits 1 when the session log is
+reject, an invalid policy, a session path it cannot use. It exits 1 when the session log is
 corrupt or another process holds it. On SIGTERM or SIGINT it cancels the
 run, so the outcome line is still written.
 
@@ -1249,32 +845,17 @@ agentloop writing. A second signal exits at once.
 `session/new` creates the log file straight away, so a session can be
 listed and loaded before anything has been said in it. `session/new`,
 `session/load` and `session/resume` write the request's `policy.labels`
-into the session's log as they open it. Without a policy, load and
-resume refuse a session `Session.Policed` reports (`-32603`). A prompt with an embedded
-`resource` or a `resource_link` adds `contaminated` to the session, since
-its content could have come from anyone. Nothing a client sends removes a
-label or changes the policy. `forbid_labels` holds in a conversation as
+into the session's log as they open it. Nothing a client sends adds or
+removes a label or changes the policy: a prompt's content brings no
+labels. `forbid_labels` holds in a conversation as
 in a run: a prompt to a session that holds a forbidden label is answered
 with `-32603` and the labels, without calling the model; a refused result
 reaches the client only as the refusal, and stderr names the call; and
 `session/new` refuses to seed a forbidden label.
 
-**Held calls.** When a run ends `held`, the server asks the client about
-each held call with `session/request_permission`: the tool call's id,
-title, name, kind, its whole input as `rawInput`, and the session's labels
-in `_meta["agentloop/labels"]` and their sources (as in a held outcome)
-in `_meta["agentloop/label_sources"]`, with two options, `allow_once` and
-`reject_once`. The turn waits for the answers. Only the `allow_once`
-option allows; a reject, an option that was not offered, a `cancelled`
-outcome, an error or a lost connection is a deny, recorded through
-`Agent.Resolve` with the reason "A person did not approve this call.".
-An allow the policy now denies is recorded as a deny. Then the run
-carries on. A `session/cancel` while a request is open denies it, even if
-an allow arrives after the cancel, and the turn is answered `cancelled`. A held call found in a
-loaded session is asked about at the next prompt, never run on its own. `session/load`
-sends the session's history and then answers; `session/resume` answers
-without it. Both take the session's lock, so a session open in another
-process, or on another connection in the same process, is refused with
+A session opened by `session/load` sends the session's history and then
+answers; `session/resume` answers without it. Both take the session's
+lock, so a session open in another process, or on another connection in the same process, is refused with
 `-32603` "session in use". A session already open on the same
 connection is taken up again as it is when it is idle, and refused the
 same way while a turn runs. An id that agentloop could not have made (a
@@ -1286,7 +867,8 @@ time of its last entry. ACP requires a cwd for each session, and since
 the client's is ignored, agentloop reports the directory the tools run
 in: `tool_dir`, made absolute, or agentloop's own working directory when
 `tool_dir` is empty. A `cwd` filter therefore matches every session or
-none.
+none. agentloop never sends `session/request_permission`: no call waits
+for a client.
 
 Every line the client writes must pass the strict reader (see Reading
 JSON) as one object before the ACP SDK reads it, since the SDK decodes
@@ -1331,11 +913,10 @@ pure functions in `acp/` (`Translator.Step` for a live turn, `Replay` for
 | reasoning delta | `agent_thought_chunk`, id `a<seq>` |
 | a refusal the provider explained outside the text | one more `agent_message_chunk` with the explanation |
 | a tool call in an assistant message | `tool_call`, `pending`, with the request's kind for the tool (`other` if none) |
-| a held call | `session/request_permission` (above) |
 | `call_started` | `tool_call_update`, `in_progress` |
-| `tool_result` | `tool_call_update`, `completed` or `failed`, the content as text, `rawOutput` `{content, is_error}`, and a reader's report in `_meta["agentloop/quarantine"]` |
+| `tool_result` | `tool_call_update`, `completed` or `failed`, the content as text, `rawOutput` `{content, is_error}` |
 | an assistant message, when the provider gave the window or the model is priced | `usage_update`, used = the turn's input, cache and output tokens, size = the window, and the session's cost |
-| a `tool_result` with model usage (a reader's) | `usage_update` as of the last assistant message, with the new cost |
+| a `tool_result` with model usage (a tool's own model calls) | `usage_update` as of the last assistant message, with the new cost |
 
 The cost on a `usage_update` is the session's, from its first entry:
 each assistant message at the model's price, and each model call a tool
@@ -1356,20 +937,15 @@ The outcome of the turn answers `session/prompt`:
 | `refused` | `refusal` |
 | `canceled` | `cancelled` |
 | `model_error` | error `-32603`, data: the error's kind, status, message and times |
-| `held` | error `-32603`, data: the held calls (only when the client could not be asked) |
 | `forbidden` | error `-32603`, data: the labels the session may not hold |
 
 Two `_meta` keys carry what ACP has no field for:
 `_meta["agentloop/labels"]` on every `tool_call`, `tool_call_update` and
 `usage_update` holds the session's labels as of that update (a replayed
 call shows them as of its last entry). When the labels change and nothing
-else sent for the change carries them (a seed, a resource in a prompt, a
-resolution), a `session_info_update` with only that `_meta` follows; one
+else sent for the change carries them (a seed, say), a `session_info_update` with only that `_meta` follows; one
 also follows `session/new` and `session/resume` of a labelled session,
-and ends the replay of a labelled one. `_meta["agentloop/quarantine"]`
-on a reader call's result holds `{"tool", "free_text", "dropped"}`, so
-a client can show that a reader answered and what the session did not
-take. A result with a display has one more content item after its text:
+and ends the replay of a labelled one. A result with a display has one more content item after its text:
 a text block holding the display's title and body, with the whole
 display, `{"title", "body", "labels", "sources", "ref"}`, in its
 `_meta["relay/display"]`, so a client can show it apart from the
@@ -1409,24 +985,14 @@ to the session and not passed on: tools get only `tool_env`.
 
 ## What it does not guarantee
 
-- The trifecta rule is only as good as what it is told. agentloop trusts
-  the request's classes and static labels, and the labels a tool's
-  envelope returns; a tool that under-labels its output, or an egress
-  tool classed `read`, gets through. It also treats the model provider as
-  an accepted destination: everything a session sees is sent to it.
-- A quarantined reader can be fooled. An injection in the inner content
-  can make it pick the wrong enum value or boolean, and with
-  `contaminated` dropped, the session's later `edit` and `egress` calls
-  are no longer held on that answer's account. A caller should treat an answer as a
-  claim from outside content and prefer questions whose wrong answer is
-  harmless, such as classification and routing. A closed answer still
-  carries a few bits (a boolean, an array's length, a number's digits),
-  which matters for confidentiality only, and `private` passes through.
-  Numbers are not bounded, so an answer can encode text as numbers if
-  the caller's schema invites it. The reader's prompt is not a defense;
-  validation is.
-- A reader's inner content goes whole to the reader model, whose context
-  is the only cap beyond the envelope protocol's 1 MiB output limit.
+- Labels are only as good as what agentloop is told. It trusts the
+  request's labels and the labels a tool's envelope returns; a tool that
+  under-labels its output gets through `forbid_labels`. It also treats the
+  model provider as an accepted destination: everything a session sees is
+  sent to it.
+- agentloop does not hold a call for a person, and it does not stop a
+  tool from doing what it can do. Whatever walls keep a tool from going
+  where it should not belong to whoever runs agentloop.
 - A tool is killed with its process group. The group's leader is a
   sentinel (`/bin/cat` reading a pipe) that agentloop reaps only after it
   has swept the group, so the sweep can never reach a group that reused
